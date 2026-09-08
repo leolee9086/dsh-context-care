@@ -1,13 +1,11 @@
-import z from '@deepseek-ai/schemastery'
-// The one-time activation can run after this version's preset module was already imported.
-// A distinct module URL loads the explicit installer without restarting the active turn.
-import { installContextCare, inject as agentInject, previousState, shouldNotify } from './index.js?context-care-activation=3'
-import { calculateState, renderState, resolveConfig } from './policy.js?numeric=1'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { z } from 'zod'
+import { installContextCare, inject as agentInject, previousState, shouldNotify } from './index.js'
+import { calculateState, renderState, resolveConfig } from './policy.js'
+import { createUserMessage } from './message.js'
 
 export const name = 'dsh-context-care-activate'
 export const inject = ['agents', 'agentPresets', 'tools']
-export const Config = z.object({ sessionId: z.string().required() })
+export const Config = z.object({ sessionId: z.string().trim().min(1) }).strict()
 
 /** Apply to an explicitly selected live session without replacing its preset or other tools. */
 export async function apply(ctx, config) {

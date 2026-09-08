@@ -1,6 +1,6 @@
 {
   "name": "dsh-context-care",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "description": "为 DeepSeek Harness 提供疲劳度、唤醒值、分段彩色数值显示与自主上下文压缩的独立 Cordis 插件",
@@ -11,20 +11,11 @@
   "exports": { ".": "./src/host.js", "./agent": "./src/index.js", "./activate": "./src/activate.js", "./client": "./lib/client.js", "./package.json": "./package.json" },
   "dsh": { "client": { "platform": "web", "inject": ["@deepseek-ai/dsh-client-ui-conversation", "@deepseek-ai/dsh-client-locale"] } },
   "files": ["src", "lib", "cordis.patch.yml", "README.md", "DESIGN.md", "CHANGELOG.md", "agent.example.cordis.yml"],
-  "scripts": { "build": "tsdown", "test": "node --test test/*.test.js", "check": "node --check src/index.js" },
-  "peerDependencies": {
-    "@deepseek-ai/cordis": "*",
-    "@deepseek-ai/dsh-compaction": "*",
-    "@deepseek-ai/dsh-llm": "*",
-    "@deepseek-ai/dsh-tools": "*"
-  },
-  "dependencies": { "@deepseek-ai/schemastery": "^3.18.2", "zod": "^4.4.3", "react": "^18.3.1" },
+  "scripts": { "build": "tsdown", "test": "node --test test/activate.test.js test/client.test.js test/context-care.test.js test/dependencies.test.js", "test:integration": "node --test test/integration.test.js", "check": "node --check src/index.js" },
+  "dependencies": { "zod": "^4.4.3", "react": "^18.3.1" },
   "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.2",
     "react-dom": "18.3.1",
-    "tsdown": "^0.22.2",
-    "@deepseek-ai/cordis": "link:../deepseek-harness/vendor/cordis",
-    "@deepseek-ai/dsh-compaction": "link:../deepseek-harness/packages/compaction/compaction",
-    "@deepseek-ai/dsh-llm": "link:../deepseek-harness/packages/llm/llm",
-    "@deepseek-ai/dsh-tools": "link:../deepseek-harness/packages/core/tools"
+    "tsdown": "^0.22.2"
   }
 }

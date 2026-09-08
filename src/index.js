@@ -1,20 +1,17 @@
-import z from '@deepseek-ai/schemastery'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { defineTool } from '@deepseek-ai/dsh-tools'
-import { calculateState, GUIDANCE, renderState, resolveConfig } from './policy.js?numeric=1'
-import { contextCareProjection } from './projection.js?numeric=1'
+import { z } from 'zod'
+import { createUserMessage } from './message.js'
+import { calculateState, GUIDANCE, renderState, resolveConfig } from './policy.js'
+import { contextCareProjection } from './projection.js'
 import { selectRestRange } from './selection.js'
 
 export const name = 'dsh-context-care'
 export const inject = ['agents', 'tools', 'systemPrompt', 'tokenMeter', 'llm', 'compaction', 'sessionProjections']
+// Standard Schema is consumed by Cordis before activation; no DSH schema helper.
 export const Config = z.object({
-  budgetRatio: z.number(),
-  wakefulnessRatio: z.number(),
-  fatigueExponent: z.number(),
-  retainRatio: z.number(),
-  minFreshTokens: z.number(),
-  maxNoteChars: z.number(),
-})
+  budgetRatio: z.number().optional(), wakefulnessRatio: z.number().optional(),
+  fatigueExponent: z.number().optional(), retainRatio: z.number().optional(),
+  minFreshTokens: z.number().int().optional(), maxNoteChars: z.number().int().optional(),
+}).strict()
 
 const requestPlugin = `${name}:request`
 const statePlugin = `${name}:state`
@@ -81,30 +78,33 @@ export function installContextCare(ctx, raw, compaction) {
     }
   }
 
-  ctx.effect(() => ctx.tools.register(defineTool({
+  ctx.effect(() => ctx.tools.register({
     name: 'context_status',
     description: 'Read measured context fatigue and wakefulness. These are estimates, not memory-loss diagnoses or a task deadline. Use when deciding whether a checkpoint would help; do not poll repeatedly.',
-    parameters: {},
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
     output: { schema: { type: 'string' }, render: (_args, text) => [{ type: 'text', text }] },
-    async execute(_args, exec) {
+    async execute(args, exec) {
+      if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).length) throw new Error('context_status accepts an empty object')
       if (!exec.agent) throw new Error('context_status requires an owning session')
       const { state } = await sample(exec.agent, exec.signal)
       return renderState(state)
     },
     presentCall: () => ({ card: 'generic', title: 'Context state', kind: 'read' }),
-  })))
+  }))
 
-  ctx.effect(() => ctx.tools.register(defineTool({
+  ctx.effect(() => ctx.tools.register({
     name: 'context_rest',
     description: 'Request one history compaction at the next safe request boundary, even below automatic pressure thresholds. Supply a concise continuation note; recent history and this note remain available. This schedules compaction, does not erase files, does not end the task, and is not a sleep timer. Continue from the reported outcome.',
     parameters: {
-      note: { type: 'string', required: true, description: `Continuation note: objective, verified progress, pending work, important paths. At most ${spec.maxNoteChars} characters; save longer irreplaceable details to files first.` },
+      type: 'object', additionalProperties: false, required: ['note'],
+      properties: { note: { type: 'string', minLength: 1, maxLength: spec.maxNoteChars, description: `Continuation note: objective, verified progress, pending work, important paths. At most ${spec.maxNoteChars} characters; save longer irreplaceable details to files first.` } },
     },
     output: { schema: { type: 'string' }, render: (_args, text) => [{ type: 'text', text }] },
     async execute(args, exec) {
       if (!exec.agent) throw new Error('context_rest requires an owning session')
       exec.signal.throwIfAborted()
-      if (args.note.trim().length === 0 || args.note.length > spec.maxNoteChars) throw new Error(`context_rest note must contain 1-${spec.maxNoteChars} characters`)
+      if (!args || typeof args !== 'object' || Array.isArray(args) || typeof args.note !== 'string'
+        || Object.keys(args).some(key => key !== 'note') || args.note.trim().length === 0 || args.note.length > spec.maxNoteChars) throw new Error(`context_rest note must contain 1-${spec.maxNoteChars} characters`)
       // Inbox insertion is durable. All calls in this batch settle before pre-step claims it.
       exec.agent.inject(notice(requestPlugin,
         `Continuation note for requested history compaction (agent-authored):\n${args.note}`,
@@ -112,7 +112,7 @@ export function installContextCare(ctx, raw, compaction) {
       return 'History compaction scheduled for the next request boundary. It has not completed yet; the next context-care status will report the outcome. Continue the task afterward.'
     },
     presentCall: () => ({ card: 'generic', title: 'Request history compaction', kind: 'other' }),
-  })))
+  }))
 
   ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
     const generation = agent.session.surface.replaceGeneration

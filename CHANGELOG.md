@@ -1,5 +1,18 @@
 # 更新记录
 
+## v0.1.1
+
+修复 v0.1.0 直接依赖 DSH 内部包的架构问题。
+
+- 删除运行时 DSH 模块导入、DSH peer dependencies 和所有 checkout 链接。
+- 所有 DSH 能力经 Cordis 注入服务访问；工具直接向注入注册表提交 JSON Schema 和回调。
+- 配置改用 Zod Standard Schema，不依赖 DSH schema 包。
+- 消息数据构造和范围策略由插件自身持有，摘要执行仍由注入服务负责。
+- 默认安装、测试与构建完全独立；真实 DSH 集成测试改为显式设置 `DSH_TEST_CHECKOUT` 的单独命令，不进入发布包。
+- 新增依赖边界回归检查和工具参数校验覆盖。
+
+验证：在独立临时目录从 registry 全新安装，19 项测试、构建与语法检查通过；另有 1 项真实 DSH Loader/loop 集成测试通过。
+
 ## v0.1.0
 
 首次发布独立 Cordis 插件。

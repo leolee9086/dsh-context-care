@@ -1,5 +1,3 @@
-import { toolPairingBalancedBefore, isCompactCheckpointSource } from '@deepseek-ai/dsh-compaction'
-
 /** Select a balanced prefix, retaining a recent tail and refusing summary-only recompression. */
 export function selectRestRange(session, measurement, retainTokens, minFreshTokens, pluginName) {
   const nodes = measurement.nodes
@@ -14,7 +12,19 @@ export function selectRestRange(session, measurement, retainTokens, minFreshToke
     retained += nodes[index].tokens
     if (retained >= retainTokens) break
   }
-  while (keep > 0 && !toolPairingBalancedBefore(session, surface[keep])) keep--
+  // Select a cut only after a complete tool batch in the injected history view.
+  // This is the plugin's range policy; the injected compaction service owns execution.
+  let pending = 0
+  let balancedKeep = 0
+  for (let index = 0; index < keep; index++) {
+    const event = session.eventAt(surface[index])
+    if (!event) throw new Error('context-care: missing history event')
+    if (event.type === 'assistant/message') pending += event.data.message.content.filter(block => block.type === 'tool-call').length
+    if (event.type === 'tool/result') pending--
+    if (pending < 0) throw new Error('context-care: tool result without a preceding call')
+    if (pending === 0) balancedKeep = index + 1
+  }
+  keep = balancedKeep
   if (keep === 0) return null
 
   // A checkpoint plus status messages is not fresh work worth summarizing again.
@@ -22,7 +32,7 @@ export function selectRestRange(session, measurement, retainTokens, minFreshToke
   for (let index = 0; index < keep; index++) {
     const event = session.eventAt(nodes[index].seq)
     if (!event) throw new Error('context-care: missing history event')
-    if (event.type === 'user/message' && (isCompactCheckpointSource(event.data.source)
+    if (event.type === 'user/message' && ((event.data.source.kind === 'plugin' && event.data.source.plugin === 'compact')
       || (event.data.source.kind === 'plugin' && (event.data.source.plugin === pluginName
         || event.data.source.plugin.startsWith(`${pluginName}:`))))) continue
     fresh += nodes[index].tokens

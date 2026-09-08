@@ -1,4 +1,4 @@
-import { contextCareProjection } from './projection.js?numeric=1'
+import { contextCareProjection } from './projection.js'
 
 export const name = 'dsh-context-care-display'
 export const inject = ['sessionProjections']

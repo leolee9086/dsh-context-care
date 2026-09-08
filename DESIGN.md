@@ -22,6 +22,12 @@ Status strings are discrete and bounded. Numeric values are retained in message 
 
 The status prose rejects unsupported memory-quality inferences and artificial deadlines. This choice intentionally does not port S-forge's claim that higher fatigue means unreliable memories. The feature supplies an actionable context operation instead of suggesting stopping work. No real-model A/B measurement of anxiety-related outputs has been performed.
 
+## Dependencies and Host injection
+
+All Host capabilities are obtained through Cordis injection and event/slot arguments. Runtime sources do not import Harness modules, and the package has no DSH dependency, peer dependency or checkout link. The injected tools registry accepts ordinary JSON Schema plus execution/render callbacks. Plugin messages are owned data with a Node-generated UUID; queueing and persistence belong to the injected Agent. Prefix selection is plugin policy over the supplied history view; actual summarization remains on the injected compaction service. Zod supplies Standard Schema configuration and projection validation, and React renders the client. The standalone Cordis npm package is a development-only test dependency.
+
+The real Host composition test is a separate, explicitly invoked external test using `DSH_TEST_CHECKOUT`. It is excluded from release artifacts. Default installation, tests and build require no Harness checkout.
+
 ## Validation
 
 The external package owns Node tests using real Cordis Loader YAML and actual built DSH core services, with only the LLM adapter mocked. Recorded status snapshots verify model-facing text; session event assertions verify tool-result ordering, committed compaction, preserved continuation note and resumed work. Replaying those events produces the same UI state. Additional tests cover grades, range balancing, failure, cancellation, repeated summaries, unload and localized rendering. The browser bundle is built independently and mounted into the existing Web application's composer dock.

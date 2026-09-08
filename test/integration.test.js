@@ -3,13 +3,15 @@ import assert from 'node:assert/strict'
 import { pathToFileURL } from 'node:url'
 import { resolve } from 'node:path'
 import { readFile } from 'node:fs/promises'
-import { Context } from '@deepseek-ai/cordis'
-import { LlmAdapter, createUserMessage } from '@deepseek-ai/dsh-llm'
 import * as plugin from '../src/index.js'
 
-// Test dependencies are the installed checkout artifacts, not a second implementation.
-const checkout = resolve(import.meta.dirname, '../../deepseek-harness')
+// This explicitly selected test acts as an external Host. The plugin itself never
+// locates or imports a Harness checkout, and the default test suite is standalone.
+if (!process.env.DSH_TEST_CHECKOUT) throw new Error('test:integration requires DSH_TEST_CHECKOUT pointing to a built Harness checkout')
+const checkout = resolve(process.env.DSH_TEST_CHECKOUT)
 const load = async path => import(pathToFileURL(resolve(checkout, path)).href)
+const { Context } = await load('vendor/cordis/lib/index.js')
+const { LlmAdapter, createUserMessage } = await load('packages/llm/llm/lib/index.js')
 const { default: Loader } = await load('vendor/loader/lib/index.js')
 const { default: Include } = await load('vendor/include/lib/index.js')
 const paths = {

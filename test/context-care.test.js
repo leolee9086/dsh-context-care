@@ -78,6 +78,13 @@ test('tool queues a bounded note; next boundary compacts once and preserves deci
   const tool = h.registered.get('context_rest')
   await assert.rejects(tool.execute({ note: '' }, { agent: h.agent, signal: signal() }), /note must/)
   await assert.rejects(tool.execute({ note: 'x'.repeat(4001) }, { agent: h.agent, signal: signal() }), /note must/)
+  for (const args of [null, {}, { note: 42 }, { note: 'valid', extra: true }, []]) {
+    await assert.rejects(tool.execute(args, { agent: h.agent, signal: signal() }), /note must/)
+  }
+  await assert.rejects(h.registered.get('context_status').execute({ unexpected: true }, { agent: h.agent, signal: signal() }), /empty object/)
+  assert.equal(tool.parameters.type, 'object')
+  assert.deepEqual(tool.parameters.required, ['note'])
+  assert.equal(tool.parameters.additionalProperties, false)
   const result = await tool.execute({ note: 'Finish verification; files in workspace.' }, { agent: h.agent, signal: signal() })
   assert.match(result, /not completed/)
   assert.equal(h.compacted.length, 0)
