@@ -1,0 +1,4 @@
+# Host owns shared display/projection; agent presets opt into the tools and policy.
+- insert:
+    - id: context-care-display
+      name: dsh-context-care

@@ -1,0 +1,18 @@
+# Place the consumer inside the SAME isolated compaction group as the backend.
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+  config:
+    - id: compaction-basic
+      name: '@deepseek-ai/dsh-compaction-basic'
+    - id: context-care
+      name: dsh-context-care/agent
+      config:
+        budgetRatio: 0.8
+        wakefulnessRatio: 0.3333333333333333
+        fatigueExponent: 1.5
+        retainRatio: 0.16
+        minFreshTokens: 1024
+        maxNoteChars: 4000

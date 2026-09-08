@@ -1,0 +1,5 @@
+[
+  "<context-care>\nFatigue: unknown; wakefulness: unknown.\nEstimate based on the latest recorded request and currently retained history, not a task deadline.\nCapacity is not calibrated for this request. Do not guess it.\nContinue the task; use context_rest when a checkpoint would help.\n</context-care>",
+  "<context-care>\nFatigue: normal; wakefulness: normal.\nEstimate based on the latest recorded request and currently retained history, not a task deadline.\nContinue the task; use context_rest when a checkpoint would help.\n</context-care>",
+  "<context-care>\nFatigue: normal; wakefulness: low.\nEstimate based on the latest recorded request and currently retained history, not a task deadline.\nRest outcome: completed: older history summarized; recent history and the continuation note retained.\nContinue the task; use context_rest when a checkpoint would help.\n</context-care>"
+]
