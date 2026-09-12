@@ -6,7 +6,7 @@
 
 参考 S-forge MAGI 的指标曲线和 Codex 的上下文生命周期设计，以独立 Cordis 插件接入，不修改 Harness、S-forge 或 Codex 源码。本文档以中文为主。
 
-> 当前版本：`v0.1.1`，依赖 DSH 的预稳定接口。已在 Harness 提交 `d347e703908d0406b7a7ef80e3a0e594d86b2215` 对应的本地构建上验证；不承诺兼容所有旧版或未来版本。
+> 当前版本：`v0.2.0`，依赖 DSH 的预稳定接口。已在 Harness 提交 `d347e703908d0406b7a7ef80e3a0e594d86b2215` 对应的本地构建上验证；不承诺兼容所有旧版或未来版本。
 
 ## 指标与行为
 
@@ -34,9 +34,9 @@ UI 显示最近一次请求准备时的状态，与模型读取的同一条持�
 dsh plugin --profile web add https://github.com/leolee9086/dsh-context-care/releases/download/v0.1.1/dsh-context-care-0.1.1.tgz
 ```
 
-安装不拉取 DSH 本体或内部包，也不需要 DSH 源码目录。所有 DSH 能力都通过 Cordis 的 `inject`、`ctx` 服务及事件参数取得；运行环境需预先提供这些服务。本项目暂不发布到 npm registry。安装后还需完成下面两步挂载。
+安装不拉取 DSH 本体或内部包，也不需要 DSH 源码目录。所有 DSH 能力都通过 Cordis 的 `inject`、`ctx` 服务及事件参数取得；运行环境需预先提供这些服务。本项目暂不发布到 npm registry。**安装后只需一步挂载**（profile patch 里的一行），所有会话自动生效。
 
-1. 在 Web profile 的 `cordis.patch.yml` 中加入共享显示入口。默认文件位于 `${DSH_HOME}/profiles/web/cordis.patch.yml`，未设置 `DSH_HOME` 时通常位于 `~/.dsh/profiles/web/cordis.patch.yml`。已有 `insert` 时，把行合并到相应列表：
+1. 在 Web profile 的 `cordis.patch.yml` 中加入主入口。默认文件位于 `${DSH_HOME}/profiles/web/cordis.patch.yml`，未设置 `DSH_HOME` 时通常位于 `~/.dsh/profiles/web/cordis.patch.yml`。已有 `insert` 时，把行合并到相应列表：
 
 ```yaml
 - insert:
@@ -44,7 +44,9 @@ dsh plugin --profile web add https://github.com/leolee9086/dsh-context-care/rele
       name: dsh-context-care
 ```
 
-2. 在**自己维护的 agent preset** 中，把以下行加入现有 compaction 隔离组，与 compaction provider 放在同一个 `config` 列表里：
+2. **不需要改 preset。** 主入口本身就对所有会话生效：工具在根作用域注册（按 DSH 的工具服务约定，根作用域注册进全局层，每个会话的视图都以它为基底），状态采样与压缩在 `agent/pre-step` 边界执行，唯一按会话的 compaction provider 在边界上用 `agentPresets.serviceFor(agent, 'compaction')` 现取；取不到时如实报告 `no compaction provider is available`，不影响其它功能。
+
+   旧的会话内装法仍然可用且不冲突：如果某个 agent preset 的 compaction 隔离组里还留着下面这行，该会话就由 preset 里的实例负责，根入口检测到该 agent 作用域内已有注册后自动退让，不会重复通知或重复压缩。
 
 ```yaml
     - id: context-care
@@ -58,9 +60,9 @@ dsh plugin --profile web add https://github.com/leolee9086/dsh-context-care/rele
         maxNoteChars: 4000
 ```
 
-完整组示例见 [agent.example.cordis.yml](agent.example.cordis.yml)，宿主补丁见 [cordis.patch.yml](cordis.patch.yml)。不要编辑随部署附带的预设；应编辑自定义预设。根入口负责共享投影与 UI，`/agent` 入口负责会话工具和策略。
+完整组示例见 [agent.example.cordis.yml](agent.example.cordis.yml)，宿主补丁见 [cordis.patch.yml](cordis.patch.yml)。根入口与 `/agent` 入口是等价的两种装法：前者一次覆盖所有会话，后者只覆盖挂载它的那个 agent 作用域。
 
-重新加载 profile（未启用配置热更新时需要重启 DSH），刷新现有 Web 页面，并使用修改后的预设开始新会话。首次有效请求采样后会显示数值；没有模型容量信息时显示“未校准”。编辑预设不会替换已经运行的会话所持有的旧实例。
+重新加载 profile（未启用配置热更新时需要重启 DSH），刷新现有 Web 页面。首次有效请求采样后会显示数值；没有模型容量信息时显示“未校准”。
 
 ### 从源码开发
 
@@ -82,13 +84,13 @@ $env:DSH_TEST_CHECKOUT = '/path/to/built/deepseek-harness'
 pnpm run test:integration
 ```
 
-这个命令的测试宿主显式加载 DSH 来注入服务；该测试文件不会进入发布包，插件自身从不查找或导入这个路径。未指定路径时测试明确报错，不静默跳过。源码开发后可使用 `dsh plugin --profile web add link:/absolute/path/to/dsh-context-care`，仍需完成上述两处挂载。
+这个命令的测试宿主显式加载 DSH 来注入服务；该测试文件不会进入发布包，插件自身从不查找或导入这个路径。未指定路径时测试明确报错，不静默跳过。源码开发后可使用 `dsh plugin --profile web add link:/absolute/path/to/dsh-context-care`，再按上面的步骤 1 挂载主入口即可。
 
 ### 注入接口
 
 | 入口 | Cordis 注入服务 | 用途 |
 |---|---|---|
-| 主入口 | `sessionProjections` | 注册共享显示投影 |
+| 主入口 | `sessionProjections`、`tools`、`systemPrompt`、`tokenMeter`、`llm`（`agentPresets`、`compaction` 为可选读取） | 全局注册 `context_status` / `context_rest`、系统提示段与请求边界处理；compaction provider 按会话现取；一次挂载覆盖所有会话 |
 | `/agent` | `agents`、`tools`、`systemPrompt`、`tokenMeter`、`llm`、`compaction`、`sessionProjections` | 工具、状态采样、请求边界监听与压缩 |
 | `/activate` | `agents`、`agentPresets`、`tools` | 找到指定会话并在其 Cordis 作用域中挂载能力 |
 | 客户端 | `slots`、`locale` | 插槽渲染与本地化；会话投影使用插槽传入的 `useProjection` |

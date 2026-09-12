@@ -54,8 +54,14 @@ export function apply(ctx, raw = {}) {
   return installContextCare(ctx, raw, ctx.compaction)
 }
 
-/** Shared installer also supports explicit activation on one already-running agent. */
-export function installContextCare(ctx, raw, compaction) {
+/**
+ * Shared installer. `compactionSource` is either the compaction provider itself
+ * (the agent-scoped `/agent` entry, where the service is already scoped) or a
+ * resolver `agent => provider | undefined` (the root entry, where the provider
+ * differs per agent and is resolved at the boundary that uses it).
+ */
+export function installContextCare(ctx, raw, compactionSource) {
+  const resolveCompaction = typeof compactionSource === 'function' ? compactionSource : () => compactionSource
   const spec = resolveConfig(raw)
   ctx.effect(() => ctx.sessionProjections.register(contextCareProjection))
   ctx.effect(() => ctx.systemPrompt.context({ name, order: 90, text: GUIDANCE }))
@@ -78,7 +84,7 @@ export function installContextCare(ctx, raw, compaction) {
     }
   }
 
-  ctx.effect(() => ctx.tools.register({
+  const contextStatusTool = {
     name: 'context_status',
     description: 'Read measured context fatigue and wakefulness. These are estimates, not memory-loss diagnoses or a task deadline. Use when deciding whether a checkpoint would help; do not poll repeatedly.',
     parameters: { type: 'object', properties: {}, additionalProperties: false },
@@ -90,9 +96,9 @@ export function installContextCare(ctx, raw, compaction) {
       return renderState(state)
     },
     presentCall: () => ({ card: 'generic', title: 'Context state', kind: 'read' }),
-  }))
+  }
 
-  ctx.effect(() => ctx.tools.register({
+  const contextRestTool = {
     name: 'context_rest',
     description: 'Request one history compaction at the next safe request boundary, even below automatic pressure thresholds. Supply a concise continuation note; recent history and this note remain available. This schedules compaction, does not erase files, does not end the task, and is not a sleep timer. Continue from the reported outcome.',
     parameters: {
@@ -112,21 +118,35 @@ export function installContextCare(ctx, raw, compaction) {
       return 'History compaction scheduled for the next request boundary. It has not completed yet; the next context-care status will report the outcome. Continue the task afterward.'
     },
     presentCall: () => ({ card: 'generic', title: 'Request history compaction', kind: 'other' }),
-  }))
+  }
+
+  ctx.effect(() => ctx.tools.register(contextStatusTool))
+  ctx.effect(() => ctx.tools.register(contextRestTool))
 
   ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
     const generation = agent.session.surface.replaceGeneration
     // Let normal admission and existing automatic safety compaction settle first.
     const decision = await next()
     if (decision.kind === 'reject' || signal.aborted) return decision
+    // One implementation owns one agent. When this agent's own scope registered
+    // the tool (a preset mounted `/agent`), that scoped registration shadows
+    // this global one, and the scoped instance must be the only one notifying
+    // and compacting — the root entry stands down instead of doing it twice.
+    if (typeof ctx.tools.get === 'function') {
+      const visible = ctx.tools.get('context_rest', agent)
+      if (visible !== undefined && visible !== contextRestTool) return decision
+    }
     const requested = decision.messages.some(message => message.source.kind === 'plugin' && message.source.plugin === requestPlugin)
     let outcome
     let current
     try {
       current = await sample(agent, signal, decision.messages)
       if (requested) {
+        const compaction = resolveCompaction(agent)
         if (agent.session.surface.replaceGeneration !== generation) {
           outcome = 'history already reduced by automatic maintenance at this boundary; no additional compaction'
+        } else if (!compaction) {
+          outcome = 'not performed: no compaction provider is available for this session; history retained'
         } else if (!current.capacity) {
           outcome = 'not performed: capacity is unavailable; history retained'
         } else {

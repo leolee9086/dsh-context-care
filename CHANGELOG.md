@@ -1,5 +1,17 @@
 # 更新记录
 
+## v0.2.0
+
+把"通用能力"改成真正通用：一次挂载对所有会话生效，不再要求在每个 preset 里各挂一遍。
+
+- 主入口（`.` → `src/host.js`）现在安装完整能力：在根作用域注册 `context_status` / `context_rest`（根作用域注册进全局层，每个会话的视图都以全局层为基底）、注册系统提示段、在 `agent/pre-step` 边界做状态采样与压缩。事件参数自带 agent，因此不需要按会话挂纤维。
+- compaction provider 是唯一按 agent 的东西，改为在请求边界用 `agentPresets.serviceFor(agent, 'compaction')` 现取；取不到时如实报告 `no compaction provider is available`，不再在安装期抛错。
+- 与旧装法共存：agent 作用域里已有 `context_rest` 注册时（preset 里的 `/agent` 入口），作用域注册遮蔽全局注册，根实现据此退让，同一会话不会被通知或压缩两次。
+- `/agent` 与 `/activate` 入口保留且行为不变；preset 里的 `context-care` 行不再是必需项。
+- 新增 4 项测试覆盖上述路径。
+
+验证：23 项测试（activate / client / context-care / dependencies / general）与语法检查通过。真实 DSH 组合测试仍需显式设置 `DSH_TEST_CHECKOUT`。
+
 ## v0.1.1
 
 修复 v0.1.0 直接依赖 DSH 内部包的架构问题。
