@@ -1,6 +1,6 @@
 {
   "name": "dsh-context-care",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "为 DeepSeek Harness 提供疲劳度、唤醒值、分段彩色数值显示与自主上下文压缩的独立 Cordis 插件",

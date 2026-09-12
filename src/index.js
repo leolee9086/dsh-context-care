@@ -3,6 +3,7 @@ import { createUserMessage } from './message.js'
 import { calculateState, GUIDANCE, renderState, resolveConfig } from './policy.js'
 import { contextCareProjection } from './projection.js'
 import { selectRestRange } from './selection.js'
+import { alreadyWarned, detectLoop, loopNoticeText } from './loop-guard.js'
 
 export const name = 'dsh-context-care'
 export const inject = ['agents', 'tools', 'systemPrompt', 'tokenMeter', 'llm', 'compaction', 'sessionProjections']
@@ -15,6 +16,7 @@ export const Config = z.object({
 
 const requestPlugin = `${name}:request`
 const statePlugin = `${name}:state`
+const loopPlugin = `${name}:loop`
 
 function notice(plugin, text, summary, state) {
   return createUserMessage({
@@ -167,9 +169,23 @@ export function installContextCare(ctx, raw, compactionSource) {
       outcome = requested ? 'request did not finish normally; do not assume compaction completed; inspect the checkpoint before another request' : undefined
       current = { state: { fatigue: 'unknown', fatigueValue: null, wakefulness: 'unknown', wakefulnessValue: null } }
     }
+    const messages = [...decision.messages]
+
+    // 输出循环检测：模型卡带时，提醒它先把笔记写详细、再压缩 ——
+    // 顺序反了的话，压缩会把还没落盘的细节一起带走。
+    // alreadyWarned 保证连着卡住时也只提醒一次，不刷屏。
+    const loop = detectLoop(agent.session)
+    if (loop !== undefined && !alreadyWarned(agent.session, loopPlugin)) {
+      messages.push(notice(loopPlugin, loopNoticeText(loop), 'Output loop detected'))
+    }
+
     const text = renderState(current.state, outcome)
     const previous = previousState(agent.session)
-    if (!requested && !shouldNotify(previous, text, current.state)) return decision
-    return { ...decision, messages: [...decision.messages, notice(statePlugin, text, 'Context state', current.state)] }
+    if (!requested && !shouldNotify(previous, text, current.state)) {
+      // 即便状态没变，只要循环提醒挂上了就得把消息带回去。
+      return messages.length === decision.messages.length ? decision : { ...decision, messages }
+    }
+    messages.push(notice(statePlugin, text, 'Context state', current.state))
+    return { ...decision, messages }
   }, { prepend: true })
 }
