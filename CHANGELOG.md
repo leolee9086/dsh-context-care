@@ -1,5 +1,15 @@
 # 更新记录
 
+## v0.2.1
+
+修复主动压缩（`context_rest`）一旦真正执行就必然失败的问题：压缩区间从第 0 个节点开始，而那个节点承载系统提示。
+
+- `selectRestRange` 原先把压缩区间的起点写死为 `surface[0]`。当该节点是 `system/message` 时，session surface 会保护它 —— 只有 `system/message` 能精确覆写这一个节点，普通 replace 一律拒绝（`core/session/src/surface.ts` 的 `assertSystemHeadRewrite`）。于是 `compactRegion` 在写回时抛 `surface replace: node 0 holds the system prompt…`，压缩前功尽弃；而且错误发生在摘要**已经生成之后**，每撞一次就白烧一次 LLM 调用。
+- 现在起点会跳过受保护的 node 0：`surface[0]` 是 `system/message` 就从 `surface[1]` 开始；跳过之后若已无内容可压则照常返回 `null`。再往后的 system 节点不受保护，可以正常被压缩区间覆盖。
+- 现象辨析：历史未达保留区预算（`capacity × retainRatio`）时，函数在更早的两处 `return null`，报 `not performed: no sufficiently large fresh prefix…`；一旦历史够长、真正走到执行阶段，就撞上上述错误并报 `request did not finish normally`。两者是同一流程的前后两段，不是两个独立故障。
+
+验证：在 `capacity=1,000,000`（`retainRatio=0.16` → `retainTokens=160,000`）、`nodesLen=667`、`totalNodeTokens=329,662` 的真实会话上，压缩区间取 `[surface[1], surface[272]]`、`fresh=165,483`，19 秒完成 `compactRegion`，`replaceGeneration` 由 11 变为 12，疲劳度随后由 elevated 回落到 normal。
+
 ## v0.2.0
 
 把"通用能力"改成真正通用：一次挂载对所有会话生效，不再要求在每个 preset 里各挂一遍。

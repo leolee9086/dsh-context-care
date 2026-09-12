@@ -38,5 +38,13 @@ export function selectRestRange(session, measurement, retainTokens, minFreshToke
     fresh += nodes[index].tokens
   }
   if (fresh < minFreshTokens) return null
-  return { start: surface[0], end: surface[keep - 1] }
+
+  // node 0 may hold the system prompt, and the session surface protects that node: only a
+  // `system/message` over exactly that node may rewrite it, so a compaction range starting
+  // there is always rejected (see assertSystemHeadRewrite in core/session/src/surface.ts).
+  // Start after it instead; later system nodes carry no such protection.
+  const head = session.eventAt(surface[0])
+  const from = head?.type === 'system/message' ? 1 : 0
+  if (from >= keep) return null
+  return { start: surface[from], end: surface[keep - 1] }
 }
