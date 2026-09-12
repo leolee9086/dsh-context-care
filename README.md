@@ -131,3 +131,11 @@ S-forge 来源：`kernel/nerv/magi/sages/token_counter.go` 的 `CalculateFatigue
 ## 已知限制
 
 计量是最近请求锚点加历史增减的估算，新模型路由和其他插件在后续阶段追加的大块内容可能暂时不反映在当前等级中。自动压缩仍是必要兜底。摘要质量取决于现有 provider；失败报告不声称压缩完成。插件不提供长期记忆存储，重要不可替代的信息仍应保存到文件。尚未用真实 DeepSeek 请求验证行为改善幅度。
+
+## 赞赏
+
+如果这个项目帮到了你，可以请我喝杯咖啡：
+
+![赞赏码](assets/sponsor-qr.png)
+
+也欢迎通过 [爱发电](https://afdian.net/a/leolee9086) 支持。
