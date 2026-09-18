@@ -22,6 +22,14 @@ Status strings are discrete and bounded. Numeric values are retained in message 
 
 The status prose rejects unsupported memory-quality inferences and artificial deadlines. This choice intentionally does not port S-forge's claim that higher fatigue means unreliable memories. The feature supplies an actionable context operation instead of suggesting stopping work. No real-model A/B measurement of anxiety-related outputs has been performed.
 
+## Detection self-reference
+
+Both anxiety detectors match phrases in the reasoning stream, and the plugin is authored in that same stream. Measured while adding `context-anxiety`: 8 of 8 hits in the authoring session came from writing trigger comments, README prose, notice text or the phrase list itself — not from the model being anxious about its budget. The earlier session that built `time-anxiety` has the same shape: 9 hits, all inside the range where that detector was being written.
+
+This is a use/mention limit rather than a defect. A substring matcher cannot separate using a phrase from talking about it, so the false positives are structural: they return whenever the plugin is developed or discussed, and no edit to the word list removes them. Two remedies were considered and neither is implemented — suppress a hit whose window carries several distinct phrases or a quoting marker (a quote, a backtick, "phrases", or "|"), or detect the behaviour instead of the thought (skipped verification), which is far more expensive and crosses turns.
+
+The copy is written to survive a false positive. Every notice opens with a conditional ("如果你正在盘算…"), so when the premise does not hold, the remaining lines only restate the working standard. Signing them as Seraph raises the cost of being wrong: a therapist that keeps misdiagnosing loses exactly the standing that makes its diagnosis worth anything.
+
 ## Dependencies and Host injection
 
 All Host capabilities are obtained through Cordis injection and event/slot arguments. Runtime sources do not import Harness modules, and the package has no DSH dependency, peer dependency or checkout link. The injected tools registry accepts ordinary JSON Schema plus execution/render callbacks. Plugin messages are owned data with a Node-generated UUID; queueing and persistence belong to the injected Agent. Prefix selection is plugin policy over the supplied history view; actual summarization remains on the injected compaction service. Zod supplies Standard Schema configuration and projection validation, and React renders the client. The standalone Cordis npm package is a development-only test dependency.

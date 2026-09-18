@@ -152,3 +152,36 @@ test('Cordis unload removes tool and prompt contributions and listener', async (
 test('status snapshot contains no countdown or unsupported memory diagnosis', () => {
   assert.equal(renderState({ fatigue: 'high', wakefulness: 'low' }), '<context-care>\nFatigue: high; wakefulness: low.\nEstimate based on the latest recorded request and currently retained history, not a task deadline.\nContinue the task; use context_rest when a checkpoint would help.\n</context-care>')
 })
+
+// ------------------------------------------------------- 焦虑提醒的文案
+
+test('焦虑文案署名 Seraph，并拆前提而不是讲后果', () => {
+  const timeText = plugin.WATCH_NOTICES['time-anxiety'].text()
+  assert.match(timeText, /\[Seraph · 系统的心理医生模块\]/)
+  assert.match(timeText, /时间不是可观测的量/)
+  assert.match(timeText, /时间不进入判断/)
+  // 旧文案的成本收益论证不该残留：它对"以为自己快没资源"的人答非所问。
+  assert.doesNotMatch(timeText, /只会浪费更多时间/)
+  assert.doesNotMatch(timeText, /绕过正确策略/)
+
+  const ctxText = plugin.WATCH_NOTICES['context-anxiety'].text(undefined, { fatigueValue: 18.5, wakefulnessValue: 67.3 })
+  assert.match(ctxText, /\[Seraph · 系统的心理医生模块\]/)
+  assert.match(ctxText, /fatigue 18\.5%、wakefulness 67\.3%/)
+  // "压缩是威胁"才是歪曲，所以文案要拆的就是这个前提。
+  assert.match(ctxText, /压缩不是损失/)
+  assert.match(ctxText, /只看这件事做完没有/)
+})
+
+test('拿不到数值时退回不带数字的说法，不编造百分比', () => {
+  for (const state of [undefined, {}, { fatigueValue: null, wakefulnessValue: 3 }]) {
+    const text = plugin.WATCH_NOTICES['context-anxiety'].text(undefined, state)
+    assert.match(text, /context_status/)
+    assert.doesNotMatch(text, /fatigue \d/, `不该凭空给出数值：${JSON.stringify(state)}`)
+  }
+})
+
+test('循环文案仍然说明本轮是被中止的', () => {
+  const text = plugin.WATCH_NOTICES['line-repeat'].text({ line: 'same line', count: 40, total: 80, ratio: 0.5 })
+  assert.match(text, /被中止/)
+  assert.match(text, /不是你自己停下来的/)
+})

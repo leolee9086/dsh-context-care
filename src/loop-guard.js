@@ -119,15 +119,20 @@ export function alreadyWarned(session, plugin) {
  * （先落盘、再压缩）；顺序不能反 —— 压缩会带走细节，笔记必须先写。
  *
  * @param {{ line: string, count: number, total: number, ratio: number }} hit 检测结果
+ * @param {boolean} aborted 这次是不是已经在流式阶段中止了本轮响应 —— 是的话要说清楚
+ *   「不是你自己停的」，否则模型会以为自己正常收尾了
  * @returns {string} 提醒正文
  */
-export function loopNoticeText(hit) {
+export function loopNoticeText(hit, aborted = false) {
   const percent = Math.round(hit.ratio * 100)
   const shown = hit.line.length > 40 ? `${hit.line.slice(0, 40)}…` : hit.line
   return [
     '<context-care>',
     `检测到输出循环：最近一条回复里「${shown}」重复了 ${hit.count} 次，`
       + `占末尾 ${hit.total} 行的 ${percent}%。`,
+    ...(aborted
+      ? ['', '**本轮响应已经在生成过程中被中止**（不是你自己停下来的），以免继续刷屏。']
+      : []),
     '',
     '请先做这两件事，然后再继续任务（顺序不能反）：',
     '',
