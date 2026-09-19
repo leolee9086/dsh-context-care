@@ -64,7 +64,7 @@ test('existing-session numeric upgrade samples when old grade is unchanged and r
   const result = await active.run({ kind: 'enter', messages: [] })
   assert.equal(result.messages[0].role, 'user')
   assert.equal(result.messages[0].source.contextCare.fatigueValue, 35.4)
-  assert.match(result.messages[0].content[0].text, /Fatigue: elevated; wakefulness: normal/)
+  assert.match(result.messages[0].content[0].text, /疲劳：升高；唤醒值：正常/)
   assert.doesNotMatch(result.messages[0].content[0].text, /35.4|54.8|%/)
   active.dispose()
 })

@@ -48,3 +48,48 @@ export function selectRestRange(session, measurement, retainTokens, minFreshToke
   if (from >= keep) return null
   return { start: surface[from], end: surface[keep - 1] }
 }
+
+/**
+ * Select a whole span to clear, keeping only the system head.
+ *
+ * This is the deep-rest counterpart of {@link selectRestRange}, and it drops
+ * that function's two judgments on purpose. There is no retained tail: clearing
+ * does not need recent context to survive, because the replacement is the
+ * model's own handoff rather than a summary that has to stay under the span's
+ * price. There is likewise no `minFreshTokens` gate — a span is worth clearing
+ * whenever it exists, since the replacement is always smaller than what it
+ * replaces. What both share is the tool-batch edge rule: the cut has to land
+ * where every tool call is answered.
+ *
+ * @param session - session whose current surface is being cleared.
+ * @returns inclusive surface seq span and its complete node list, or `null`.
+ */
+export function selectClearRange(session) {
+  const surface = session.surface.nodes
+  if (surface.length === 0) return null
+  // The system prompt lives at surface node 0 and is the one node a replacement
+  // may not shadow: `assertSystemHeadRewrite` in core/session/src/surface.ts
+  // rejects any replace whose startIdx is 0 while that node is a `system/message`.
+  // Starting at 1 keeps the prompt — clearing the history must not clear the rules.
+  // Later system nodes carry no such protection, so they are clearable like any other.
+  const head = session.eventAt(surface[0])
+  const from = head?.type === 'system/message' ? 1 : 0
+  let pending = 0
+  let balancedEnd = -1
+  for (let index = from; index < surface.length; index++) {
+    const event = session.eventAt(surface[index])
+    if (!event) throw new Error('context-care: missing history event')
+    if (event.type === 'assistant/message') {
+      pending += event.data.message.content.filter(block => block.type === 'tool-call').length
+    }
+    if (event.type === 'tool/result') pending--
+    if (pending < 0) throw new Error('context-care: tool result without a preceding call')
+    if (pending === 0) balancedEnd = index
+  }
+  if (balancedEnd < from) return null
+  return {
+    start: surface[from],
+    end: surface[balancedEnd],
+    shadowedSeqs: surface.slice(from, balancedEnd + 1),
+  }
+}

@@ -1,5 +1,53 @@
 # 更新记录
 
+## v0.6.0
+
+新增**深度休息**（清空式压缩），并把模型面向的提示全部改成中文、按疲劳等级分级。
+
+### 深度休息：不生成摘要的清空路径
+
+`context_rest` 新增 `deep` 与 `recovery` 两个参数。`deep: true` 时不再调用 compaction provider，
+而是直接写一条替换事件，把历史清成「系统提示词 + 模型自己写的交接」。
+
+- **为什么需要它**：DSH 本体的摘要路径有一条死结 —— `compaction-basic` 的 `region.ts:419`
+  要求摘要严格小于被压区间，而摘要有个约 3200 token 的下限（框架 + 模型输出）。
+  区间一旦缩到同量级，压缩就永久失败，重试也没用。更根本的是：**替换式压缩反复执行必然收敛到失败**，
+  因为对摘要再摘要不会更短。
+- `src/selection.js` 新增 `selectClearRange(session)`：不保留尾部、不要 `minFreshTokens` 门槛
+  （清空的替换物永远比区间小），保留工具批次边界规则。**从 surface node 1 起算** ——
+  node 0 是系统提示词，`assertSystemHeadRewrite` 会拒绝覆盖它，清空历史不该连规则一起清掉。
+- `src/deep-rest.js`（新文件）：`inspectSession` 从日志推出 openTurn 和未闭合的 compaction；
+  `clearRange` 写完整事务 `compaction/start` → `summary` → `user/message`(replace) → `end`，
+  四处 compactionId 相同，`shadowedSeqs` 精确列出区间内每个节点。取区间、测量、写事件之间不 await
+  （中间让出的话 surface 会变，`shadowedSeqs` 就对不上）。失败时也写一条带 error 的 `end`，
+  否则未匹配的 start 会永久挡住这个会话的后续压缩。
+- **不 import 任何 `@deepseek-ai/*`**：`session.append` + `surfaceOp` 是 session 的公开契约
+  （`core/session/src/types.ts:437` 原文写着 "any surface-replacing producer may use it"）。
+- `recovery` 在 `deep` 为真时必填：清空之后那段文字是唯一的回程。通用指引对每个会话都一样、
+  等于零信息，所以它由模型自己写（搜什么词、看哪个文件），插件只要求它存在并拼进替换物。
+- 新增 3 项测试。真机验证：一个 26.4 万 token 的会话被清成「系统提示词 + 交接」，compaction provider 零调用。
+
+### 模型面向的提示全部改成中文，并按疲劳等级分级
+
+- `GUIDANCE`、`renderState`、两个工具的描述与参数说明、错误信息、outcome 文本、注入消息的框架文字
+  一律中文（loop-guard 与两条 Seraph 文案本来就是中文，这次是补齐）。内部不变量错误与日志前缀保留英文。
+- **`renderState` 从「一句到底」改成四级**：旧版不管哪一级都输出同一句
+  `Continue the task; use context_rest when a checkpoint would help.` ——
+  那是**许可**不是**推动**。实测里模型在疲劳 39%、唤醒值 90% 时反复说「该落盘了」，
+  然后继续往下查，始终没动手。现在强度跟着等级走，`very-high` 明确指向深度休息。
+- **修掉一处反向抑制**：`GUIDANCE` 旧收尾「不要仅凭一个状态标签就赶工、停下或反复压缩」
+  本意是对的（标签是估计不是诊断），但它不分等级，在 `very-high` 时恰好给了继续硬撑的理由。
+  现在拆成两句：慌和乱压仍然禁止，但等级给出的具体建议动作要照做。
+- `very-high` 的最后一句是**重构**不是加重语气：把「休息会丢信息」的恐惧，
+  换成「带着疲劳继续做才是不可恢复的损失」。
+- `src/projection.js` 的状态行解析改成**中英双认**：投影要重放整个会话日志，
+  里面既有中文（现行）也有英文（旧事件），只认一种的话旧会话的面板会读不出等级。
+  这条是实测出来的 —— 改完语言，`client.test.js` 里重放事件那条断言立刻拿到了 null。
+- UI 文本（面板、卡片标题、消息 summary）不在本次范围内：面板走 `dsh-client-locale` 自动选中英两套，
+  且是 `lib/` 构建产物，改动需要重新 build。
+
+验证：51 项测试全部通过（原 49 + 新增 2 项分级测试）。
+
 ## v0.5.0
 
 焦虑检测改为**认知行为疗法**范式，并新增 `context-anxiety` 模式。

@@ -42,21 +42,69 @@ export function calculateState(totalTokens, historyTokens, capacity, spec) {
   }
 }
 
-export const GUIDANCE = `Context care (fatigue / wakefulness):
-These are load and retained-information estimates, not evidence of memory loss, hallucinations, impaired ability, or a task deadline. Do not infer remaining capacity from conversation length or an internal feeling of running out.
-Continue the task normally. Low wakefulness only means less retained context; consult the checkpoint or relevant files when facts are missing, without inventing details or padding the conversation.
-You may call context_rest at a useful task boundary, even before fatigue is high. Include a concise continuation note with the current objective, verified progress, unresolved work and important paths. Preserve irreplaceable details in files first. A request is not a completed compaction; wait for the next status report, then continue work.
-Existing automatic compaction remains the capacity fallback. Do not rush, stop, or repeatedly compact solely because of a status label.`
+// ---------------------------------------------------------------- 模型面向的文本
+//
+// 一律用中文：哥哥 2026-09-19 的要求。这个插件注入的每一句都是给模型看的，
+// 而这里的模型（DeepSeek 系列）和读日志的人（哥哥）都是中文母语的，
+// 英文标签除了多一层翻译之外没有任何好处。
 
-/** Bounded, cache-stable status text: no raw remaining-token countdown. */
+/** 等级显示名。unknown 也在这里 —— 漏一个就会让英文枚举值漏进提示里。 */
+const FATIGUE_LABEL = { normal: '正常', elevated: '升高', high: '高', 'very-high': '非常高', unknown: '未知' }
+const WAKEFULNESS_LABEL = { low: '低', normal: '正常', elevated: '升高', high: '高', unknown: '未知' }
+
+/**
+ * 分等级的下一步建议。
+ *
+ * 为什么必须分级（哥哥 2026-09-19 的诊断，我当时的行为就是证据）：
+ * 旧版不管哪一级都输出同一句「继续任务，检查点会有帮助时用 context_rest」——
+ * 那是**许可**，不是**推动**。实测里我在疲劳 39%、唤醒值 90% 的时候反复说
+ * 「该落盘了」「要不要压缩」，然后继续往下查，始终没动手。
+ * 强度必须跟着等级走，very-high 时明确指向深度休息（清空历史、只留交接）。
+ *
+ * very-high 最后那句是**重构**，不是加重语气：把「休息会丢信息」的恐惧，
+ * 换成「带着疲劳继续做才是不可恢复的损失」。恐惧不拆掉，就没有人肯撒手。
+ */
+const ADVICE = {
+  normal: ['照常推进任务。'],
+  elevated: ['上下文负载在上升。到自然的工作边界时，把要紧的东西落盘，然后可以考虑 context_rest。'],
+  high: [
+    '这次会话靠前的部分正在变得不好回忆。继续之前：先把要紧的写下来，再压缩。',
+    '摘要能留住线索；context_rest 更省。',
+  ],
+  'very-high': [
+    '已经过了「继续做下去还划算」的那个点 —— 回忆不可靠，错误会叠加。',
+    '不要再往上加工作了：现在就把要紧的东西落盘，然后做一次深度休息（清空历史，只留交接）。',
+    '清空的是表层，不是记忆：细节还能从会话日志里用 session_blocks_* 找回来；但在这个状态下做出来的活儿找不回来。',
+  ],
+}
+
+/**
+ * 常驻系统提示段。
+ *
+ * 末两行是这次改动的关键：旧版收尾是「不要仅凭一个状态标签就赶工、停下或反复压缩」，
+ * 本意是对的（标签是估计不是诊断），但它**不分等级**，所以在 very-high 时也在踩刹车 ——
+ * 恰恰在最该撒手的时候给出了继续硬撑的理由。现在拆成两句：
+ * 慌和乱压仍然要禁止，但等级给出的具体建议动作要照做。
+ */
+export const GUIDANCE = `上下文照料（疲劳度 / 唤醒值）：
+这两个数字是负载与留存信息量的估计，不是记忆丢失、幻觉、能力受损的证据，也不是任务的截止时间。
+不要从对话长度、或者「感觉快用完了」去推断还剩多少容量。
+照常推进任务。唤醒值低只意味着留存下来的上下文少：缺事实时去查检查点或相关文件，不要编造细节，也不要用废话把对话撑长。
+在合适的工作边界就可以调用 context_rest，不必等到疲劳度很高。交接笔记要简短，写清当前目标、已验证的进度、未完成的工作和重要路径；不可复原的细节先落盘到文件。**发出请求不等于压缩已经完成** —— 等下一次状态报告，然后再接着干。
+自动压缩仍然是容量的兜底。
+状态标签是估计，不是命令：不要因为一个标签而慌、赶工或者反复压缩。
+但标签的等级升高时会给出具体的建议动作（先落盘、再休息）—— 那部分要照做，不要拿「这只是估计」当作继续硬撑的理由。`
+
+/** 有界、缓存稳定的状态文本：不给原始的剩余 token 倒计时。 */
 export function renderState(state, outcome) {
   const lines = [
     '<context-care>',
-    `Fatigue: ${state.fatigue}; wakefulness: ${state.wakefulness}.`,
-    'Estimate based on the latest recorded request and currently retained history, not a task deadline.',
+    `疲劳：${FATIGUE_LABEL[state.fatigue] ?? state.fatigue}；唤醒值：${WAKEFULNESS_LABEL[state.wakefulness] ?? state.wakefulness}。`,
+    '这是基于最近一次请求与当前留存历史的估计，不是任务的截止时间。',
   ]
-  if (state.fatigue === 'unknown') lines.push('Capacity is not calibrated for this request. Do not guess it.')
-  if (outcome) lines.push(`Rest outcome: ${outcome}.`)
-  lines.push('Continue the task; use context_rest when a checkpoint would help.', '</context-care>')
+  if (state.fatigue === 'unknown') lines.push('这次请求没有校准容量，不要猜。')
+  if (outcome) lines.push(`休息结果：${outcome}。`)
+  // 建议放在最后：它是这一整段里唯一要照做的东西，位置也该在最后。
+  lines.push(...(ADVICE[state.fatigue] ?? ADVICE.normal), '</context-care>')
   return lines.join('\n')
 }

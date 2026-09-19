@@ -2,7 +2,8 @@ import { z } from 'zod'
 import { createUserMessage } from './message.js'
 import { calculateState, GUIDANCE, renderState, resolveConfig } from './policy.js'
 import { contextCareProjection } from './projection.js'
-import { selectRestRange } from './selection.js'
+import { selectClearRange, selectRestRange } from './selection.js'
+import { clearRange } from './deep-rest.js'
 import { alreadyWarned, detectLoop, loopNoticeText } from './loop-guard.js'
 import { createStreamWatch } from './stream-watch.js'
 
@@ -21,11 +22,12 @@ const loopPlugin = `${name}:loop`
 /** 每个流式模式一个独立的 plugin 标识 —— alreadyWarned 据此按模式去重。 */
 const watchPlugin = triggerId => `${name}:watch:${triggerId}`
 
-function notice(plugin, text, summary, state) {
+function notice(plugin, text, summary, state, extra) {
   return createUserMessage({
     content: [{ type: 'text', text }],
     source: { kind: 'plugin', plugin, form: 'notice', summary,
       ...(state ? { contextCare: { fatigueValue: state.fatigueValue, wakefulnessValue: state.wakefulnessValue } } : {}),
+      ...extra,
     },
   })
 }
@@ -319,12 +321,12 @@ export function installContextCare(ctx, raw, compactionSource) {
 
   const contextStatusTool = {
     name: 'context_status',
-    description: 'Read measured context fatigue and wakefulness. These are estimates, not memory-loss diagnoses or a task deadline. Use when deciding whether a checkpoint would help; do not poll repeatedly.',
+    description: '读取实测的上下文疲劳度与唤醒值。这些是估计，不是记忆丢失的诊断，也不是任务的截止时间。用来判断一次检查点有没有用；不要反复轮询。',
     parameters: { type: 'object', properties: {}, additionalProperties: false },
     output: { schema: { type: 'string' }, render: (_args, text) => [{ type: 'text', text }] },
     async execute(args, exec) {
-      if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).length) throw new Error('context_status accepts an empty object')
-      if (!exec.agent) throw new Error('context_status requires an owning session')
+      if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).length) throw new Error('context_status 只接受一个空对象')
+      if (!exec.agent) throw new Error('context_status 需要一个所属会话')
       const { state } = await sample(exec.agent, exec.signal)
       return renderState(state)
     },
@@ -333,22 +335,37 @@ export function installContextCare(ctx, raw, compactionSource) {
 
   const contextRestTool = {
     name: 'context_rest',
-    description: 'Request one history compaction at the next safe request boundary, even below automatic pressure thresholds. Supply a concise continuation note; recent history and this note remain available. This schedules compaction, does not erase files, does not end the task, and is not a sleep timer. Continue from the reported outcome.',
+    description: '在下一个安全的请求边界请求一次历史压缩，即使还没到自动压力阈值。给一段简短的交接笔记；近况和这条笔记会留下来。这只是排定压缩，不会删除文件、不会结束任务，也不是睡眠计时器。按报告出来的结果继续。deep 为真时历史是被清空而不是被摘要，只剩笔记和找回路径。',
     parameters: {
       type: 'object', additionalProperties: false, required: ['note'],
-      properties: { note: { type: 'string', minLength: 1, maxLength: spec.maxNoteChars, description: `Continuation note: objective, verified progress, pending work, important paths. At most ${spec.maxNoteChars} characters; save longer irreplaceable details to files first.` } },
+      properties: {
+        note: { type: 'string', minLength: 1, maxLength: spec.maxNoteChars, description: `交接笔记：当前目标、已验证的进度、没做完的工作、重要路径。最多 ${spec.maxNoteChars} 字；更长、更不可复原的细节先落盘到文件。` },
+        deep: { type: 'boolean', description: '清空历史而不是摘要。疲劳度会重置，但唤醒值会掉下来：之后在你重新查回来之前，你只有这条笔记和找回路径。摘要能留住线索；深度休息用在「这条线索已经不值得它的代价」的时候。' },
+        recovery: { type: 'string', minLength: 1, maxLength: spec.maxNoteChars, description: `deep 为真时必填。下一个你怎样把细节找回来：用哪些关键词搜会话日志、读哪些文件、任务材料放在哪里。要写搜索真能命中的词、真存在的路径。最多 ${spec.maxNoteChars} 字。` },
+      },
     },
     output: { schema: { type: 'string' }, render: (_args, text) => [{ type: 'text', text }] },
     async execute(args, exec) {
-      if (!exec.agent) throw new Error('context_rest requires an owning session')
+      if (!exec.agent) throw new Error('context_rest 需要一个所属会话')
       exec.signal.throwIfAborted()
-      if (!args || typeof args !== 'object' || Array.isArray(args) || typeof args.note !== 'string'
-        || Object.keys(args).some(key => key !== 'note') || args.note.trim().length === 0 || args.note.length > spec.maxNoteChars) throw new Error(`context_rest note must contain 1-${spec.maxNoteChars} characters`)
+      const keys = args && typeof args === 'object' && !Array.isArray(args) ? Object.keys(args) : []
+      if (keys.some(key => key !== 'note' && key !== 'deep' && key !== 'recovery')) throw new Error('context_rest 只接受 note、deep 和 recovery 三个参数')
+      if (typeof args?.note !== 'string' || args.note.trim().length === 0 || args.note.length > spec.maxNoteChars) throw new Error(`context_rest 的 note 需要 1-${spec.maxNoteChars} 个字符`)
+      const deep = args.deep === true
+      const recovery = args.recovery
+      if (recovery !== undefined && (typeof recovery !== 'string' || recovery.length > spec.maxNoteChars)) throw new Error(`context_rest 的 recovery 必须是不超过 ${spec.maxNoteChars} 个字符的字符串`)
+      if (deep && (typeof recovery !== 'string' || recovery.trim().length === 0)) throw new Error('deep 为真时 context_rest 需要 recovery：历史被清空之后，那段文字是下一个请求把细节找回来的唯一途径')
+      const sections = [`历史压缩的交接笔记（你自己写的）：\n${args.note}`]
+      if (typeof recovery === 'string' && recovery.trim().length > 0) {
+        sections.push(`被清空历史的找回路径（你自己写的）：\n${recovery}`)
+      }
       // Inbox insertion is durable. All calls in this batch settle before pre-step claims it.
-      exec.agent.inject(notice(requestPlugin,
-        `Continuation note for requested history compaction (agent-authored):\n${args.note}`,
-        'History compaction requested'))
-      return 'History compaction scheduled for the next request boundary. It has not completed yet; the next context-care status will report the outcome. Continue the task afterward.'
+      exec.agent.inject(notice(requestPlugin, sections.join('\n\n'),
+        deep ? 'Deep rest requested' : 'History compaction requested', undefined,
+        deep ? { contextRest: { deep: true } } : undefined))
+      return deep
+        ? '深度休息已经排定在下一个请求边界。它还没完成；下一次上下文状态会报告结果。'
+        : '历史压缩已经排定在下一个请求边界。它还没完成；下一次上下文状态会报告结果，之后继续任务。'
     },
     presentCall: () => ({ card: 'generic', title: 'Request history compaction', kind: 'other' }),
   }
@@ -377,35 +394,51 @@ export function installContextCare(ctx, raw, compactionSource) {
       const visible = ctx.tools.get('context_rest', agent)
       if (visible !== undefined && visible !== contextRestTool) return decision
     }
-    const requested = decision.messages.some(message => message.source.kind === 'plugin' && message.source.plugin === requestPlugin)
+    const restRequest = decision.messages.find(message => message.source.kind === 'plugin' && message.source.plugin === requestPlugin)
+    const requested = restRequest !== undefined
     let outcome
     let current
     try {
       current = await sample(agent, signal, decision.messages)
-      if (requested) {
-        const compaction = resolveCompaction(agent)
+      if (restRequest !== undefined) {
+        const deep = restRequest.source.contextRest?.deep === true
         if (agent.session.surface.replaceGeneration !== generation) {
-          outcome = 'history already reduced by automatic maintenance at this boundary; no additional compaction'
-        } else if (!compaction) {
-          outcome = 'not performed: no compaction provider is available for this session; history retained'
-        } else if (!current.capacity) {
-          outcome = 'not performed: capacity is unavailable; history retained'
-        } else {
-          const range = selectRestRange(agent.session, current.measurement,
-            Math.floor(current.capacity * spec.retainRatio), spec.minFreshTokens, name)
+          outcome = '历史已经被本边界的自动维护减少过，不再额外压缩'
+        } else if (deep) {
+          // 清空不经过 compaction provider：替换物是模型自己写的那条消息，
+          // 不需要另起一次 LLM 调用，也就没有"摘要不可能比区间小"那道墙。
+          const range = selectClearRange(agent.session)
           if (range === null) {
-            outcome = 'not performed: no sufficiently large fresh prefix outside the retained recent history'
+            outcome = '没有执行——系统提示词之外没有可清空的内容'
           } else {
-            await compaction.compactRegion(range.start, range.end, agent, signal)
-            outcome = 'completed: older history summarized; recent history and the continuation note retained'
+            const text = restRequest.content.filter(block => block.type === 'text').map(block => block.text).join('\n')
+            const cleared = clearRange(agent.session, ctx.tokenMeter, range, text)
+            outcome = `历史已清空（${cleared.shadowedTokenCount} tokens），只剩交接和找回路径`
             current = await sample(agent, signal, decision.messages)
+          }
+        } else {
+          const compaction = resolveCompaction(agent)
+          if (!compaction) {
+            outcome = '没有执行——这个会话没有可用的压缩提供方，历史保留'
+          } else if (!current.capacity) {
+            outcome = '没有执行——容量不可知，历史保留'
+          } else {
+            const range = selectRestRange(agent.session, current.measurement,
+              Math.floor(current.capacity * spec.retainRatio), spec.minFreshTokens, name)
+            if (range === null) {
+              outcome = '没有执行——留存近况之外没有足够大的新鲜前缀'
+            } else {
+              await compaction.compactRegion(range.start, range.end, agent, signal)
+              outcome = '较早的历史已摘要，近况与交接笔记保留'
+              current = await sample(agent, signal, decision.messages)
+            }
           }
         }
       }
     } catch (error) {
       if (signal.aborted) throw error
       ctx.logger.warn(`context-care: ${error instanceof Error ? error.message : String(error)}`)
-      outcome = requested ? 'request did not finish normally; do not assume compaction completed; inspect the checkpoint before another request' : undefined
+      outcome = requested ? '请求没有正常结束；不要假定压缩已经完成；再发下一个请求之前先检查检查点' : undefined
       current = { state: { fatigue: 'unknown', fatigueValue: null, wakefulness: 'unknown', wakefulnessValue: null } }
     }
     const messages = [...decision.messages]

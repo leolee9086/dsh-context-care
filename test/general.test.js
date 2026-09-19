@@ -79,7 +79,7 @@ test('根入口:工具与系统提示挂在全局,compaction 按 agent 现取', 
   const decision = await h.step(h.inbox)
   assert.equal(h.compacted.length, 1)
   assert.equal(h.compacted[0].owner, h.agent)
-  assert.match(decision.messages.at(-1).content[0].text, /completed: older history summarized/)
+  assert.match(decision.messages.at(-1).content[0].text, /较早的历史已摘要/)
 })
 
 test('agent 作用域里已有别的实现时,根实现退让,不重复通知也不重复压缩', async () => {
@@ -101,7 +101,7 @@ test('解析不到 compaction provider 时如实报告,不抛异常', async () =
   const decision = await h.step(h.inbox)
 
   assert.equal(h.compacted.length, 0)
-  assert.match(decision.messages.at(-1).content[0].text, /no compaction provider is available/)
+  assert.match(decision.messages.at(-1).content[0].text, /没有可用的压缩提供方/)
 })
 
 test('安装函数仍接受直接传入的 compaction 服务(旧的 /agent 与 activate 路径)', async () => {
@@ -112,5 +112,5 @@ test('安装函数仍接受直接传入的 compaction 服务(旧的 /agent 与 a
   const decision = await h.step(h.inbox)
 
   assert.equal(h.compacted.length, 1)
-  assert.match(decision.messages.at(-1).content[0].text, /completed: older history summarized/)
+  assert.match(decision.messages.at(-1).content[0].text, /较早的历史已摘要/)
 })
