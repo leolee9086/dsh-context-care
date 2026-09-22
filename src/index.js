@@ -13,7 +13,7 @@ export const inject = ['agents', 'tools', 'systemPrompt', 'tokenMeter', 'llm', '
 export const Config = z.object({
   budgetRatio: z.number().optional(), wakefulnessRatio: z.number().optional(),
   fatigueExponent: z.number().optional(), retainRatio: z.number().optional(),
-  minFreshTokens: z.number().int().optional(), maxNoteChars: z.number().int().optional(),
+  minFreshTokens: z.number().int().optional(), minNoteChars: z.number().int().optional(), maxNoteChars: z.number().int().optional(),
 }).strict()
 
 const requestPlugin = `${name}:request`
@@ -335,13 +335,14 @@ export function installContextCare(ctx, raw, compactionSource) {
 
   const contextRestTool = {
     name: 'context_rest',
-    description: '在下一个安全的请求边界请求一次历史压缩，即使还没到自动压力阈值。给一段简短的交接笔记；近况和这条笔记会留下来。这只是排定压缩，不会删除文件、不会结束任务，也不是睡眠计时器。按报告出来的结果继续。deep 为真时历史是被清空而不是被摘要，只剩笔记和找回路径。',
+    description: '在下一个安全的请求边界请求一次历史压缩，即使还没到自动压力阈值。给一段交接笔记（宜细不宜粗）；近况和这条笔记会留下来。这只是排定压缩，不会删除文件、不会结束任务，也不是睡眠计时器。按报告出来的结果继续。deep 为真时历史是被清空而不是被摘要，只剩笔记和找回路径。',
     parameters: {
       type: 'object', additionalProperties: false, required: ['note'],
       properties: {
-        note: { type: 'string', minLength: 1, maxLength: spec.maxNoteChars, description: `交接笔记：当前目标、已验证的进度、没做完的工作、重要路径。最多 ${spec.maxNoteChars} 字；更长、更不可复原的细节先落盘到文件。` },
+        // 下限不是防呆，是**要求写细**：几百字的笔记下一个自己还得回去翻日志。
+        note: { type: 'string', minLength: spec.minNoteChars, maxLength: spec.maxNoteChars, description: `交接笔记：当前目标、已验证的进度、没做完的工作、重要路径。${spec.minNoteChars}~${spec.maxNoteChars} 字，宜细不宜粗；不可复原的细节先落盘到文件。` },
         deep: { type: 'boolean', description: '清空历史而不是摘要。疲劳度会重置，但唤醒值会掉下来：之后在你重新查回来之前，你只有这条笔记和找回路径。摘要能留住线索；深度休息用在「这条线索已经不值得它的代价」的时候。' },
-        recovery: { type: 'string', minLength: 1, maxLength: spec.maxNoteChars, description: `deep 为真时必填。下一个你怎样把细节找回来：用哪些关键词搜会话日志、读哪些文件、任务材料放在哪里。要写搜索真能命中的词、真存在的路径。最多 ${spec.maxNoteChars} 字。` },
+        recovery: { type: 'string', minLength: spec.minNoteChars, maxLength: spec.maxNoteChars, description: `deep 为真时必填。下一个你怎样把细节找回来：用哪些关键词搜会话日志、读哪些文件、任务材料放在哪里。要写搜索真能命中的词、真存在的路径。${spec.minNoteChars}~${spec.maxNoteChars} 字。` },
       },
     },
     output: { schema: { type: 'string' }, render: (_args, text) => [{ type: 'text', text }] },
@@ -350,10 +351,19 @@ export function installContextCare(ctx, raw, compactionSource) {
       exec.signal.throwIfAborted()
       const keys = args && typeof args === 'object' && !Array.isArray(args) ? Object.keys(args) : []
       if (keys.some(key => key !== 'note' && key !== 'deep' && key !== 'recovery')) throw new Error('context_rest 只接受 note、deep 和 recovery 三个参数')
-      if (typeof args?.note !== 'string' || args.note.trim().length === 0 || args.note.length > spec.maxNoteChars) throw new Error(`context_rest 的 note 需要 1-${spec.maxNoteChars} 个字符`)
+      // 长度**按 trim 后算**：一串空白不算"写细了"。
+      // 下限是要求（宜细不宜粗），不是防呆 —— 几百字的笔记下一个自己还得回去翻日志。
+      const noteLength = typeof args?.note === 'string' ? args.note.trim().length : 0
+      if (noteLength < spec.minNoteChars || noteLength > spec.maxNoteChars) {
+        throw new Error(`context_rest 的 note 需要 ${spec.minNoteChars}-${spec.maxNoteChars} 个字符（宜细不宜粗），实际 ${noteLength} 个`)
+      }
       const deep = args.deep === true
       const recovery = args.recovery
-      if (recovery !== undefined && (typeof recovery !== 'string' || recovery.length > spec.maxNoteChars)) throw new Error(`context_rest 的 recovery 必须是不超过 ${spec.maxNoteChars} 个字符的字符串`)
+      const recoveryLength = typeof recovery === 'string' ? recovery.trim().length : 0
+      if (recovery !== undefined
+        && (typeof recovery !== 'string' || recoveryLength < spec.minNoteChars || recoveryLength > spec.maxNoteChars)) {
+        throw new Error(`context_rest 的 recovery 需要 ${spec.minNoteChars}-${spec.maxNoteChars} 个字符的字符串（宜细不宜粗），实际 ${recoveryLength} 个`)
+      }
       if (deep && (typeof recovery !== 'string' || recovery.trim().length === 0)) throw new Error('deep 为真时 context_rest 需要 recovery：历史被清空之后，那段文字是下一个请求把细节找回来的唯一途径')
       const sections = [`历史压缩的交接笔记（你自己写的）：\n${args.note}`]
       if (typeof recovery === 'string' && recovery.trim().length > 0) {

@@ -4,8 +4,11 @@ import { Context } from '@deepseek-ai/cordis'
 import * as plugin from '../src/index.js'
 import { calculateState, GUIDANCE, renderState, resolveConfig } from '../src/policy.js'
 import { selectClearRange, selectRestRange } from '../src/selection.js'
+import { detectLoop } from '../src/loop-guard.js'
 
 const signal = () => new AbortController().signal
+/** 交接笔记的默认区间是 1000~10000 字（宜细不宜粗）；这里凑够下限，见 general.test.js 里的同一说明。 */
+const longNote = text => text.padEnd(1200, '…')
 const user = (seq, tokens = 500, source = { kind: 'user' }) => ({ seq, type: 'user/message', data: { source, content: [{ type: 'text', text: 'x' }] }, tokens })
 /**
  * A session stub with just enough surface machinery for both paths.
@@ -120,8 +123,10 @@ test('summary-only and plugin statuses are not fresh work', () => {
 test('tool queues a bounded note; next boundary compacts once and preserves decision fields', async t => {
   const h = await mounted(); t.after(() => h.ctx.fiber.dispose())
   const tool = h.registered.get('context_rest')
+  // 下限是**要求**（宜细不宜粗），不是防呆 —— 太短的笔记，下一个自己还得回去翻日志。
   await assert.rejects(tool.execute({ note: '' }, { agent: h.agent, signal: signal() }), /note 需要/)
-  await assert.rejects(tool.execute({ note: 'x'.repeat(4001) }, { agent: h.agent, signal: signal() }), /note 需要/)
+  await assert.rejects(tool.execute({ note: 'x'.repeat(999) }, { agent: h.agent, signal: signal() }), /note 需要/)
+  await assert.rejects(tool.execute({ note: 'x'.repeat(10001) }, { agent: h.agent, signal: signal() }), /note 需要/)
   for (const args of [null, {}, { note: 42 }, []]) {
     await assert.rejects(tool.execute(args, { agent: h.agent, signal: signal() }), /note 需要/)
   }
@@ -131,7 +136,7 @@ test('tool queues a bounded note; next boundary compacts once and preserves deci
   assert.equal(tool.parameters.type, 'object')
   assert.deepEqual(tool.parameters.required, ['note'])
   assert.equal(tool.parameters.additionalProperties, false)
-  const result = await tool.execute({ note: 'Finish verification; files in workspace.' }, { agent: h.agent, signal: signal() })
+  const result = await tool.execute({ note: longNote('Finish verification; files in workspace.') }, { agent: h.agent, signal: signal() })
   assert.match(result, /还没完成/)
   assert.equal(h.compacted.length, 0)
   const decision = await h.step(h.inbox)
@@ -145,11 +150,11 @@ test('deep rest clears the history to the handoff and never calls the compaction
   const h = await mounted(); t.after(() => h.ctx.fiber.dispose())
   const tool = h.registered.get('context_rest')
   // deep 缺 recovery 直接拒：清空之后，那段文字是唯一的回程。
-  await assert.rejects(tool.execute({ note: 'handoff', deep: true }, { agent: h.agent, signal: signal() }), /需要 recovery/)
+  await assert.rejects(tool.execute({ note: longNote('handoff'), deep: true }, { agent: h.agent, signal: signal() }), /需要 recovery/)
   const result = await tool.execute({
-    note: 'Goal: ship the clear path. Done: selection and execution.',
+    note: longNote('Goal: ship the clear path. Done: selection and execution.'),
     deep: true,
-    recovery: 'Search the session log for "deep rest" and "shadowedSeqs"; the plan is in notes/2026-09-19.md.',
+    recovery: longNote('Search the session log for "deep rest" and "shadowedSeqs"; the plan is in notes/2026-09-19.md.'),
   }, { agent: h.agent, signal: signal() })
   assert.match(result, /深度休息已经排定/)
   const decision = await h.step(h.inbox)
@@ -167,7 +172,7 @@ test('deep rest clears the history to the handoff and never calls the compaction
 
 test('automatic reduction avoids a second compaction in the same boundary', async t => {
   const h = await mounted({ auto: true }); t.after(() => h.ctx.fiber.dispose())
-  await h.registered.get('context_rest').execute({ note: 'Continue.' }, { agent: h.agent, signal: signal() })
+  await h.registered.get('context_rest').execute({ note: longNote('Continue.') }, { agent: h.agent, signal: signal() })
   const decision = await h.step(h.inbox)
   assert.equal(h.compacted.length, 0)
   assert.match(decision.messages.at(-1).content[0].text, /自动维护减少过/)
@@ -175,7 +180,7 @@ test('automatic reduction avoids a second compaction in the same boundary', asyn
 
 test('failure is reported without pretending that history was compressed', async t => {
   const h = await mounted({ error: true }); t.after(() => h.ctx.fiber.dispose())
-  await h.registered.get('context_rest').execute({ note: 'Continue.' }, { agent: h.agent, signal: signal() })
+  await h.registered.get('context_rest').execute({ note: longNote('Continue.') }, { agent: h.agent, signal: signal() })
   const decision = await h.step(h.inbox)
   assert.match(decision.messages.at(-1).content[0].text, /没有正常结束/)
   assert.equal(h.compacted.length, 0)
@@ -183,7 +188,7 @@ test('failure is reported without pretending that history was compressed', async
 
 test('cancellation and rejected admission do not start compaction', async t => {
   const h = await mounted(); t.after(() => h.ctx.fiber.dispose())
-  await h.registered.get('context_rest').execute({ note: 'Continue.' }, { agent: h.agent, signal: signal() })
+  await h.registered.get('context_rest').execute({ note: longNote('Continue.') }, { agent: h.agent, signal: signal() })
   assert.equal((await h.step(h.inbox, { kind: 'reject' })).kind, 'reject')
   const controller = new AbortController(); controller.abort()
   await h.step(h.inbox, {}, controller.signal)
@@ -193,7 +198,7 @@ test('cancellation and rejected admission do not start compaction', async t => {
 test('cancellation during summarization propagates without a completion message', async t => {
   const controller = new AbortController()
   const h = await mounted({ abort: controller }); t.after(() => h.ctx.fiber.dispose())
-  await h.registered.get('context_rest').execute({ note: 'Continue.' }, { agent: h.agent, signal: signal() })
+  await h.registered.get('context_rest').execute({ note: longNote('Continue.') }, { agent: h.agent, signal: signal() })
   await assert.rejects(h.step(h.inbox, {}, controller.signal), { name: 'AbortError' })
   assert.equal(h.compacted.length, 0)
 })
@@ -291,4 +296,28 @@ test('循环文案仍然说明本轮是被中止的', () => {
   const text = plugin.WATCH_NOTICES['line-repeat'].text({ line: 'same line', count: 40, total: 80, ratio: 0.5 })
   assert.match(text, /被中止/)
   assert.match(text, /不是你自己停下来的/)
+})
+
+/** 把一段助手文本包成 detectLoop 认得的 session。 */
+const assistantSession = text => history([{
+  seq: 0,
+  type: 'assistant/message',
+  data: { message: { content: [{ type: 'text', text }] } },
+}])
+
+test('代码围栏不算循环：写文档时围栏天然成对出现', () => {
+  // 20 个代码块 = 40 行围栏 + 20 行各不相同的内容，后面再跟 40 行正文。
+  // 围栏在末尾 80 行里占 28 行（35%），改之前正好越过 15 次 / 20% 两条线 ——
+  // 实测误报过一次：``` 重复 18 次、占末尾 80 行的 23%。
+  const fence = '`'.repeat(3)
+  const blocks = Array.from({ length: 20 }, (_, i) => [fence + 'js', `const a${i} = ${i}`, fence].join('\n'))
+  const prose = Array.from({ length: 40 }, (_, i) => `正文第 ${i} 行，每行都不一样。`)
+  assert.equal(detectLoop(assistantSession([...blocks, ...prose].join('\n'))), undefined)
+})
+
+test('真实循环仍然认得出：同一行反复出现', () => {
+  const hit = detectLoop(assistantSession(Array.from({ length: 60 }, () => 'go.').join('\n')))
+  assert.ok(hit, '同一行重复 60 次应当判为循环')
+  assert.equal(hit.line, 'go.')
+  assert.equal(hit.count, 60)
 })

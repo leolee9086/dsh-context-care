@@ -36,7 +36,8 @@ class ScriptedAdapter extends LlmAdapter {
     } else {
       this.calls++
       if (this.calls === 1 || this.calls === 2) block = { type: 'text', text: `Answer ${this.calls}.` }
-      else if (this.calls === 3) block = { type: 'tool-call', id: 'rest-one', name: 'context_rest', arguments: JSON.stringify({ note: 'Verify output and finish the requested task.' }) }
+      // 交接笔记的默认下限是 1000 字（宜细不宜粗），这里凑够。
+      else if (this.calls === 3) block = { type: 'tool-call', id: 'rest-one', name: 'context_rest', arguments: JSON.stringify({ note: 'Verify output and finish the requested task.'.padEnd(1200, '…') }) }
       else block = { type: 'text', text: 'Continued after context care.' }
     }
     yield { type: 'block-start', index: 0, blockType: block.type }

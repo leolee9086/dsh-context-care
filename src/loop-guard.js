@@ -24,6 +24,14 @@ const WINDOW_LINES = 80
 const MIN_LINES = 30
 /** 太短的行不参与统计（代码里的 `}`、空行之类天然会重复）。 */
 const MIN_LINE_LEN = 3
+/**
+ * 代码围栏行（``` 或 ~~~ 开头，含带语言标记的形式）。
+ *
+ * 围栏行长度正好是 3，过得了 MIN_LINE_LEN；而写代码或文档时围栏天然成对出现 ——
+ * 一段回复里十来个代码块就是二十来行 ```，正好撞上 REPEAT_THRESHOLD 与 REPEAT_RATIO。
+ * 那是正常写作，不是循环，所以围栏行一律不参与统计。
+ */
+const FENCE_LINE = /^(`{3,}|~{3,})[\w+-]*$/
 /** 同一行在窗口里出现这么多次才算循环。 */
 const REPEAT_THRESHOLD = 15
 /** 同时还要占够窗口的比例，避免把"正常但啰嗦"的输出也判成循环。 */
@@ -71,7 +79,7 @@ export function detectLoop(session) {
 
   const lines = text.split('\n')
     .map((line) => line.trim())
-    .filter((line) => line.length >= MIN_LINE_LEN)
+    .filter((line) => line.length >= MIN_LINE_LEN && !FENCE_LINE.test(line))
   if (lines.length < MIN_LINES) return undefined
 
   const tail = lines.slice(-WINDOW_LINES)

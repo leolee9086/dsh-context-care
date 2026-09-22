@@ -6,6 +6,13 @@ import * as general from '../src/host.js'
 import { installContextCare } from '../src/index.js'
 
 const signal = () => new AbortController().signal
+/**
+ * 交接笔记的默认区间是 1000~10000 字（宜细不宜粗）。
+ * 这里凑够下限，好让下面的用例专注于它们真正要验的东西 ——
+ * 排队、边界、保留哪些字段 —— 而不是长度规则本身。
+ * 长度规则另有专门的用例。
+ */
+const longNote = text => text.padEnd(1200, '…')
 const user = (seq, tokens = 500, source = { kind: 'user' }) => ({ seq, type: 'user/message', data: { source, content: [{ type: 'text', text: 'x' }] }, tokens })
 
 function history(events) {
@@ -73,7 +80,7 @@ test('根入口:工具与系统提示挂在全局,compaction 按 agent 现取', 
   assert.deepEqual([...h.tools.keys()].sort(), ['context_rest', 'context_status'])
   assert.deepEqual([...h.sections.keys()], ['dsh-context-care'])
 
-  await h.tools.get('context_rest').execute({ note: '继续验证。' }, { agent: h.agent, signal: signal() })
+  await h.tools.get('context_rest').execute({ note: longNote('继续验证。') }, { agent: h.agent, signal: signal() })
   assert.equal(h.compacted.length, 0)
 
   const decision = await h.step(h.inbox)
@@ -86,7 +93,7 @@ test('agent 作用域里已有别的实现时,根实现退让,不重复通知也
   const h = harness({ shadowed: true })
   general.apply(h.ctx, {})
 
-  await h.tools.get('context_rest').execute({ note: '继续验证。' }, { agent: h.agent, signal: signal() })
+  await h.tools.get('context_rest').execute({ note: longNote('继续验证。') }, { agent: h.agent, signal: signal() })
   const decision = await h.step(h.inbox)
 
   assert.equal(h.compacted.length, 0, '根实现不该压缩')
@@ -97,7 +104,7 @@ test('解析不到 compaction provider 时如实报告,不抛异常', async () =
   const h = harness({ hasProvider: false })
   general.apply(h.ctx, {})
 
-  await h.tools.get('context_rest').execute({ note: '继续验证。' }, { agent: h.agent, signal: signal() })
+  await h.tools.get('context_rest').execute({ note: longNote('继续验证。') }, { agent: h.agent, signal: signal() })
   const decision = await h.step(h.inbox)
 
   assert.equal(h.compacted.length, 0)
@@ -108,7 +115,7 @@ test('安装函数仍接受直接传入的 compaction 服务(旧的 /agent 与 a
   const h = harness({ hasProvider: false })
   installContextCare(h.ctx, {}, h.provider)
 
-  await h.tools.get('context_rest').execute({ note: '继续验证。' }, { agent: h.agent, signal: signal() })
+  await h.tools.get('context_rest').execute({ note: longNote('继续验证。') }, { agent: h.agent, signal: signal() })
   const decision = await h.step(h.inbox)
 
   assert.equal(h.compacted.length, 1)

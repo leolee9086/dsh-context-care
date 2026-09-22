@@ -6,11 +6,14 @@ export function resolveConfig(raw = {}) {
     fatigueExponent: 1.5,
     retainRatio: 0.16,
     minFreshTokens: 1024,
-    maxNoteChars: 4000,
+    // 交接笔记的字数区间。**宜细不宜粗**：下限存在的意义是把"随便写两句"堵掉——
+    // 一份写到几百字的笔记，下一个自己不用再去翻日志就能接着干。
+    minNoteChars: 1000,
+    maxNoteChars: 10000,
     ...raw,
   }
   for (const key of Object.keys(raw)) {
-    if (!['budgetRatio', 'wakefulnessRatio', 'fatigueExponent', 'retainRatio', 'minFreshTokens', 'maxNoteChars'].includes(key)) {
+    if (!['budgetRatio', 'wakefulnessRatio', 'fatigueExponent', 'retainRatio', 'minFreshTokens', 'minNoteChars', 'maxNoteChars'].includes(key)) {
       throw new Error(`context-care: unknown config ${key}`)
     }
   }
@@ -21,9 +24,10 @@ export function resolveConfig(raw = {}) {
   }
   if (spec.retainRatio >= spec.budgetRatio) throw new Error('context-care: retainRatio must be below budgetRatio')
   if (!Number.isFinite(spec.fatigueExponent) || spec.fatigueExponent <= 0) throw new Error('context-care: invalid fatigueExponent')
-  for (const key of ['minFreshTokens', 'maxNoteChars']) {
+  for (const key of ['minFreshTokens', 'minNoteChars', 'maxNoteChars']) {
     if (!Number.isSafeInteger(spec[key]) || spec[key] <= 0) throw new Error(`context-care: ${key} must be a positive integer`)
   }
+  if (spec.minNoteChars >= spec.maxNoteChars) throw new Error('context-care: minNoteChars must be below maxNoteChars')
   return Object.freeze(spec)
 }
 
@@ -90,7 +94,7 @@ export const GUIDANCE = `上下文照料（疲劳度 / 唤醒值）：
 这两个数字是负载与留存信息量的估计，不是记忆丢失、幻觉、能力受损的证据，也不是任务的截止时间。
 不要从对话长度、或者「感觉快用完了」去推断还剩多少容量。
 照常推进任务。唤醒值低只意味着留存下来的上下文少：缺事实时去查检查点或相关文件，不要编造细节，也不要用废话把对话撑长。
-在合适的工作边界就可以调用 context_rest，不必等到疲劳度很高。交接笔记要简短，写清当前目标、已验证的进度、未完成的工作和重要路径；不可复原的细节先落盘到文件。**发出请求不等于压缩已经完成** —— 等下一次状态报告，然后再接着干。
+在合适的工作边界就可以调用 context_rest，不必等到疲劳度很高。交接笔记**宜细不宜粗**：写清当前目标、已验证的进度、未完成的工作和重要路径；不可复原的细节先落盘到文件。**发出请求不等于压缩已经完成** —— 等下一次状态报告，然后再接着干。
 自动压缩仍然是容量的兜底。
 状态标签是估计，不是命令：不要因为一个标签而慌、赶工或者反复压缩。
 但标签的等级升高时会给出具体的建议动作（先落盘、再休息）—— 那部分要照做，不要拿「这只是估计」当作继续硬撑的理由。`
