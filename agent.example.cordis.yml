@@ -15,4 +15,6 @@
         fatigueExponent: 1.5
         retainRatio: 0.16
         minFreshTokens: 1024
-        maxNoteChars: 4000
+        # 交接笔记上限 10000（v0.6.1 起为源码默认值）。
+        # 这里若显式写小数字，会把源码默认值盖掉 —— 曾经写成 4000，导致改动不生效。
+        maxNoteChars: 10000

@@ -106,7 +106,7 @@ dsh plugin --profile web add https://github.com/leolee9086/dsh-context-care/rele
         fatigueExponent: 1.5
         retainRatio: 0.16
         minFreshTokens: 1024
-        maxNoteChars: 4000
+        maxNoteChars: 10000
 ```
 
 完整组示例见 [agent.example.cordis.yml](agent.example.cordis.yml)，宿主补丁见 [cordis.patch.yml](cordis.patch.yml)。根入口与 `/agent` 入口是等价的两种装法：前者一次覆盖所有会话，后者只覆盖挂载它的那个 agent 作用域。
@@ -169,7 +169,8 @@ pnpm run test:integration
 | `fatigueExponent` | 1.5 | 疲劳度增长曲线指数 |
 | `retainRatio` | 0.16 | 主动压缩保留的近期历史预算比例 |
 | `minFreshTokens` | 1024 | 待压缩区间的新内容最低估算量 |
-| `maxNoteChars` | 4000 | 续接笔记 UTF-16 字符数上限 |
+| `minNoteChars` | 1000 | 续接笔记 UTF-16 字符数下限（堵掉「随便写两句」） |
+| `maxNoteChars` | 10000 | 续接笔记 UTF-16 字符数上限 |
 
 比例必须大于 0 且小于 1，保留比例小于预算比例；计数上限必须为正整数。配置错误在挂载时拒绝。
 
