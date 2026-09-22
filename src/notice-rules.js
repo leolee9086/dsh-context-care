@@ -13,30 +13,13 @@
 
 import { createEngine } from '@leolee9086/dsh-rule-engine'
 import { createUserMessage } from './message.js'
+import { lastUserMessage, textOf } from './prompt-text.js'
 
 /** 规则里写 action.by: 'context-care' 就落到这里。 */
 export const CONSUMER_NAME = 'context-care'
 
 /** 提示规则服务名。取不到就是没装索引插件 —— 正常情况,不是错误。 */
 export const RULES_SERVICE = 'memoryNoticeRules'
-
-/** 从一条消息里取纯文本。 */
-function textOf(message) {
-  if (typeof message.content === 'string') return message.content
-  if (!Array.isArray(message.content)) return ''
-  return message.content.filter(block => block.type === 'text').map(block => block.text).join('\n')
-}
-
-/**
- * 最后一条真人说的话。
- * 规则要判的是「用户刚说了什么」,不是历史里任何一句话;没有就这一轮不判。
- */
-function lastUserMessage(messages) {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    if (messages[i].source?.kind === 'user') return messages[i]
-  }
-  return undefined
-}
 
 /**
  * 装提示规则。

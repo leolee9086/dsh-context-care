@@ -43,6 +43,8 @@ function harness({ shadowed = false, hasProvider = true } = {}) {
   const inbox = []
   const agent = { session, inject: message => inbox.push(message) }
   const provider = { async compactRegion(start, end, owner) { compacted.push({ start, end, owner }) } }
+  // 插件现在会 provide 一个通知通道,假 ctx 也得跟上。
+  const provided = new Map()
 
   const ctx = {
     tokenMeter: { measure: measurement, estimateMessage: () => 10 },
@@ -55,6 +57,8 @@ function harness({ shadowed = false, hasProvider = true } = {}) {
       register(tool) { tools.set(tool.name, tool); return () => tools.delete(tool.name) },
       get(name) { return shadowed && name === 'context_rest' ? foreign : tools.get(name) },
     },
+    logger: { warn: () => {}, info: () => {} },
+    provide(name, service) { provided.set(name, service); return () => provided.delete(name) },
     effect(callback) { return callback() },
     on(event, handler) { listeners.push({ event, handler }); return () => {} },
     get(service) {

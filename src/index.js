@@ -7,6 +7,8 @@ import { clearRange } from './deep-rest.js'
 import { alreadyWarned, detectLoop, loopNoticeText } from './loop-guard.js'
 import { createStreamWatch } from './stream-watch.js'
 import { installNoticeRules } from './notice-rules.js'
+import { createNoticeChannel, NOTICE_CHANNEL } from './notice-channel.js'
+import { lastAssistantMessage, lastUserMessage, textOf } from './prompt-text.js'
 
 export const name = 'dsh-context-care'
 export const inject = ['agents', 'tools', 'systemPrompt', 'tokenMeter', 'llm', 'compaction', 'sessionProjections']
@@ -151,6 +153,13 @@ export function installContextCare(ctx, raw, compactionSource) {
   // 规则由别的插件声明(索引插件的 memoryNoticeRules 服务),本插件是它的消费者:
   // 判断什么时候该提醒、提醒什么,都在这里发生。规则本身不属于本插件。
   const noticeRules = installNoticeRules(ctx, { plugin: name })
+
+  // ---------------------------------------------------------- 通知通道
+  //
+  // 通用通道:别的插件有话要告诉模型时,注册一个源;这里在每个请求边界问一遍。
+  // 通道不认识「召回」「分数」这些东西 —— 它只知道要通知什么、什么时候能通知。
+  const noticeChannel = createNoticeChannel({ warn: message => ctx.logger.warn(message) })
+  ctx.provide(NOTICE_CHANNEL, { register: noticeChannel.register })
 
   // ---------------------------------------------------------- 流式监视
   //
@@ -474,6 +483,25 @@ export function installContextCare(ctx, raw, compactionSource) {
       for (const ruleMessage of noticeRules.collect({ agent, messages: decision.messages })) messages.push(ruleMessage)
     } catch (error) {
       ctx.logger.warn(`context-care: 提示规则没有跑起来: ${error instanceof Error ? error.message : String(error)}`)
+    }
+
+    // 通知通道:别的插件有话要告诉模型,在这里问、在这里注入。
+    try {
+      const userMessage = lastUserMessage(decision.messages)
+      const assistantMessage = lastAssistantMessage(decision.messages)
+      const notices = await noticeChannel.collect({
+        agentId: agent.id,
+        sessionId: agent.session?.id,
+        userText: userMessage === undefined ? '' : textOf(userMessage),
+        assistantText: assistantMessage === undefined ? '' : textOf(assistantMessage),
+        signal,
+      })
+      for (const incoming of notices) {
+        messages.push(notice(`${name}:notice:${incoming.source}`, incoming.text,
+          incoming.summary ?? `Notice from ${incoming.source}`))
+      }
+    } catch (error) {
+      ctx.logger.warn(`context-care: 通知通道没有跑起来: ${error instanceof Error ? error.message : String(error)}`)
     }
 
     const text = renderState(current.state, outcome)
