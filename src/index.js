@@ -6,6 +6,7 @@ import { selectClearRange, selectRestRange } from './selection.js'
 import { clearRange } from './deep-rest.js'
 import { alreadyWarned, detectLoop, loopNoticeText } from './loop-guard.js'
 import { createStreamWatch } from './stream-watch.js'
+import { installNoticeRules } from './notice-rules.js'
 
 export const name = 'dsh-context-care'
 export const inject = ['agents', 'tools', 'systemPrompt', 'tokenMeter', 'llm', 'compaction', 'sessionProjections']
@@ -144,6 +145,12 @@ export function installContextCare(ctx, raw, compactionSource) {
   const spec = resolveConfig(raw)
   ctx.effect(() => ctx.sessionProjections.register(contextCareProjection))
   ctx.effect(() => ctx.systemPrompt.context({ name, order: 90, text: GUIDANCE }))
+
+  // ---------------------------------------------------------- 提示规则
+  //
+  // 规则由别的插件声明(索引插件的 memoryNoticeRules 服务),本插件是它的消费者:
+  // 判断什么时候该提醒、提醒什么,都在这里发生。规则本身不属于本插件。
+  const noticeRules = installNoticeRules(ctx, { plugin: name })
 
   // ---------------------------------------------------------- 流式监视
   //
@@ -459,6 +466,14 @@ export function installContextCare(ctx, raw, compactionSource) {
     const loop = detectLoop(agent.session)
     if (loop !== undefined && !alreadyWarned(agent.session, loopPlugin)) {
       messages.push(notice(loopPlugin, loopNoticeText(loop), 'Output loop detected'))
+    }
+
+    // 提示规则:命中就往这一轮注入。规则没跑起来不该毁掉整个请求,
+    // 但也不能静默 —— 所以记 warn。
+    try {
+      for (const ruleMessage of noticeRules.collect({ agent, messages: decision.messages })) messages.push(ruleMessage)
+    } catch (error) {
+      ctx.logger.warn(`context-care: 提示规则没有跑起来: ${error instanceof Error ? error.message : String(error)}`)
     }
 
     const text = renderState(current.state, outcome)
