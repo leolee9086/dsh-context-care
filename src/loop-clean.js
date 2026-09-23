@@ -28,8 +28,46 @@ const REPEAT_THRESHOLD = 15
 /** 还要占够窗口比例,免得把「正常但啰嗦」也输出判成循环。 */
 const REPEAT_RATIO = 0.2
 
+/** 超过这么长的行不可能是填充行 —— 长句总能承载信息。 */
+const MAX_FILLER_LEN = 6
+/** 填充行到这个数才算刷屏。 */
+const MIN_FILLER_LINES = 5
+/** 同时要占够窗口比例。 */
+const MIN_FILLER_RATIO = 0.4
+/**
+ * 填充词。**只收最高频的应答词与虚字** —— 表越长越容易误杀。
+ * 判定不要求整行都是它,只要行足够短、又含其中一个,就算填充行
+ * (「嗯，简洁。」这种一行一句的碎念也算 —— 它承载不了信息)。
+ */
+const FILLER_CHARS = new Set([...'做干搞走来了好嗯对是吧呢啊呀行成可以继续那就先再'])
+
+/**
+ * 标出每一行是不是在代码块里(含围栏行本身)。
+ *
+ * 代码块里什么都可能出现:短行、`}`、中文注释、示例文本 —— 那些都不该参与循环判定。
+ * **误清代码比漏清一段退化输出严重得多**:前者毁任务材料,后者只是多留一点噪声。
+ * 所以任何新加的模式都得先过这一层,不是可选优化。
+ *
+ * @param {string[]} lines 原文的行。
+ * @returns {boolean[]} 与 lines 等长;true 表示这行在代码块里。
+ */
+function fenceMask(lines) {
+  const mask = []
+  let inside = false
+  for (const line of lines) {
+    if (FENCE_LINE.test(line.trim())) {
+      mask.push(true)
+      inside = !inside
+      continue
+    }
+    mask.push(inside)
+  }
+  return mask
+}
+
 /** 一行参不参与统计。 */
-function counts(line) {
+function counts(line, inCode) {
+  if (inCode) return false
   const trimmed = line.trim()
   return trimmed.length >= MIN_LINE_LEN && !FENCE_LINE.test(trimmed)
 }
@@ -57,7 +95,8 @@ export const PATTERNS = [
     id: 'line-repeat',
     detect(text) {
       const lines = String(text).split('\n')
-      const marks = lines.map(counts)
+      const fences = fenceMask(lines)
+      const marks = lines.map((line, index) => counts(line, fences[index]))
       const counted = []
       for (let index = 0; index < lines.length; index += 1) {
         if (marks[index]) counted.push(index)
@@ -96,6 +135,45 @@ export const PATTERNS = [
       // 截断点落在第 0 行就保一段:整块清空会让模型看到一段凭空消失的思考。
       if (cut === 0) cut = Math.max(1, Math.floor(hit.lines.length / 4))
       return hit.lines.slice(0, cut).join('\n')
+    },
+  },
+  {
+    id: 'filler-lines',
+    /**
+     * 单行短、又只由应答词之类组成,却成片出现 —— 这是另一种退化形状。
+     * 实测样本(2026-09-23,同一次失控的后半段):
+     *
+     *     做。
+     *     嗯，简洁。
+     *     做。
+     *     嗯，先记忆 + 落盘，然后回复 ✓
+     *     做。
+     *     嗯，一次做完。
+     *     做。
+     *     好。
+     *     做。
+     *     （直接做。）
+     *     做。
+     *
+     * 「做。」只出现 6 次,够不到 line-repeat 的 15 次门槛,
+     * 但它和同类碎句加起来占了窗口六成 —— 这一类要靠"行的性质"认,不是靠同一行重复。
+     */
+    detect(text) {
+      const lines = String(text).split('\n')
+      const fences = fenceMask(lines)
+      const marks = lines.map((line, index) => {
+        if (fences[index]) return false
+        const trimmed = line.trim()
+        if (trimmed.length === 0 || trimmed.length > MAX_FILLER_LEN) return false
+        return [...trimmed].some(char => FILLER_CHARS.has(char))
+      })
+      const filled = marks.filter(Boolean).length
+      if (filled < MIN_FILLER_LINES || filled / lines.length < MIN_FILLER_RATIO) return undefined
+      return { pattern: 'filler-lines', count: filled, total: lines.length, ratio: filled / lines.length, lines, marks }
+    },
+    clean(text, hit) {
+      // 这些行逐条删掉,其余保留 —— 它们本来就不承载信息,不像 line-repeat 那样要截断。
+      return hit.lines.filter((_line, index) => !hit.marks[index]).join('\n')
     },
   },
 ]
