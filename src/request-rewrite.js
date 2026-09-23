@@ -24,11 +24,13 @@ function targetOf(url) {
  *
  * @param {object} deps
  * @param {() => (object[]|undefined|null)} deps.rules 取规则;每次请求现取。
- * @param {(record: object) => void} deps.onRecord 命中记录的回调。
- * @returns {(request: {body: string, url: string}) => Promise<string|undefined>} 改写器;没改动就返回 undefined。
+ * @param {(record: object, where: {sessionId: string|undefined}) => void} deps.onRecord 命中记录的回调。
+ * @returns {(request: {body: string, url: string, scope?: object}) => Promise<string|undefined>} 改写器;没改动就返回 undefined。
  */
 export function createRequestRewriter({ rules, onRecord }) {
-  const engine = createEngine({ onRecord })
+  // 不把 onRecord 交给引擎:引擎回调在 run 内部触发,那时还不知道这次请求属于哪个会话。
+  // 从 run 的返回值里拿记录,就能把 sessionId 一起带上。
+  const engine = createEngine()
   /**
    * 每个接口上一次真正发出去的 body。
    *
@@ -44,7 +46,7 @@ export function createRequestRewriter({ rules, onRecord }) {
   // 接住之后不用做什么:改后的文本就是 engine.run 的返回值,
   // 这一环在这里的语义是「这条规则有主」。
   engine.registerConsumer({ name: REWRITER_NAME, kinds: ['transform'], handle() {} })
-  return async function rewrite({ body, url }) {
+  return async function rewrite({ body, url, scope }) {
     const key = targetOf(url)
     const previous = lastSent.get(key) ?? null
     const result = engine.run({
@@ -52,6 +54,8 @@ export function createRequestRewriter({ rules, onRecord }) {
       ctx: { now: Date.now(), previous },
     })
     lastSent.set(key, result.text)
+    const sessionId = typeof scope?.sessionId === 'string' ? scope.sessionId : undefined
+    for (const record of result.records) onRecord(record, { sessionId })
     // 没变就交回 undefined —— 「没人改」和「改成一样的东西」是两回事,
     // 前者不该让调用方重建 body。
     return result.text === body ? undefined : result.text

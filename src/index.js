@@ -10,6 +10,7 @@ import { installNoticeRules } from './notice-rules.js'
 import { createNoticeChannel, NOTICE_CHANNEL } from './notice-channel.js'
 import { lastAssistantMessage, lastAssistantText, lastUserMessage, textOf } from './prompt-text.js'
 import { createRequestRewriter, REWRITER_NAME } from './request-rewrite.js'
+import { createTransformLog } from './transform-log.js'
 
 export const name = 'dsh-context-care'
 export const inject = ['agents', 'tools', 'systemPrompt', 'tokenMeter', 'llm', 'compaction', 'sessionProjections']
@@ -153,7 +154,25 @@ export function installContextCare(ctx, raw, compactionSource) {
   //
   // 规则由别的插件声明(索引插件的 memoryNoticeRules 服务),本插件是它的消费者:
   // 判断什么时候该提醒、提醒什么,都在这里发生。规则本身不属于本插件。
-  const noticeRules = installNoticeRules(ctx, { plugin: name })
+  // ---------------------------------------------------------- 变换记录
+  //
+  // 写进会话日志的 log-only 事件:模型看不到,但持久、可回放、能推给界面。
+  // 为什么这么做见 transform-log.js 的头注释。
+  const transformLog = createTransformLog({ ctx })
+  /** 两个来源的命中都记到一处,面板和排查都只看这一张表。 */
+  const recordHit = (layer, record, where) => transformLog.record({
+    sessionId: where.sessionId,
+    layer,
+    ruleId: record.ruleId,
+    outcome: record.outcome,
+    loss: record.loss,
+    detail: record.detail,
+  })
+
+  const noticeRules = installNoticeRules(ctx, {
+    plugin: name,
+    onHit: (record, where) => recordHit('notice', record, where),
+  })
 
   // ---------------------------------------------------------- 通知通道
   //
@@ -174,7 +193,8 @@ export function installContextCare(ctx, raw, compactionSource) {
         const rules = ctx.get('memoryNoticeRules')
         return rules === undefined || rules === null ? [] : rules
       },
-      onRecord(record) {
+      onRecord(record, where) {
+        recordHit('request', record, where)
         if (record.outcome !== 'applied') {
           ctx.logger.warn(`context-care: 请求层规则 ${record.ruleId} 未生效(${record.outcome})${record.detail === undefined ? '' : ': ' + record.detail}`)
           return

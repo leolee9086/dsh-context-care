@@ -26,9 +26,10 @@ export const RULES_SERVICE = 'memoryNoticeRules'
  * @param {object} ctx 插件上下文。
  * @param {object} options
  * @param {string} options.plugin 本插件名,用来拼 notice 的 source.plugin。
+ * @param {(record: object, where: {sessionId: string|undefined}) => void} [options.onHit] 每条命中的回调。
  * @returns {{collect: (input: {agent: object, messages: object[]}) => object[]}}
  */
-export function installNoticeRules(ctx, { plugin }) {
+export function installNoticeRules(ctx, { plugin, onHit = () => {} }) {
   /** 每个会话一个引擎:冷却和 surface 去重都是按会话算的。 */
   const engines = new Map()
   /**
@@ -50,6 +51,7 @@ export function installNoticeRules(ctx, { plugin }) {
       // 每次命中都留一条记录。规则命中和提醒注入都是对上下文的介入,
       // 不记下来就没人知道模型为什么突然收到那句话。
       onRecord(record) {
+        onHit(record, { sessionId: agent.session?.id })
         if (record.outcome === 'applied') return
         warn(`context-care: 提示规则 ${record.ruleId} 未生效(${record.outcome})${record.detail === undefined ? '' : ': ' + record.detail}`)
       },
