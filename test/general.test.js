@@ -59,6 +59,12 @@ function harness({ shadowed = false, hasProvider = true } = {}) {
     },
     logger: { warn: () => {}, info: () => {} },
     provide(name, service) { provided.set(name, service); return () => provided.delete(name) },
+    inject(services, callback) {
+      // 假 ctx 里只有显式 provide 过的服务才算可用 —— 没装 fetch-router 时
+      // requestRewrite 不该触发。
+      if (!services.every(name => provided.has(name))) return () => {}
+      return callback(Object.fromEntries(services.map(name => [name, provided.get(name)])))
+    },
     effect(callback) { return callback() },
     on(event, handler) { listeners.push({ event, handler }); return () => {} },
     get(service) {

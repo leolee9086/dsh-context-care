@@ -26,3 +26,45 @@ export function lastAssistantMessage(messages) {
   }
   return undefined
 }
+
+/**
+ * 从会话里取最近的工具调用记录(名字 + 时间)。
+ * 「某个工具多久没被调用了」这个判断用它。
+ *
+ * 事件在 session.surface.nodes 上,用 session.eventAt 取回来;
+ * tool/call 的 data 是 { turn, step, callId, name, arguments },时间在事件信封的 time 上。
+ *
+ * @param {object} session 会话。
+ * @param {object} [options]
+ * @param {number} [options.limit] 最多往回看多少条调用;找"最近一次"够用了。
+ * @returns {Array<{name: string, at: number}>} 按时间正序。
+ */
+export function recentToolCalls(session, { limit = 50 } = {}) {
+  const out = []
+  const nodes = session?.surface?.nodes
+  if (!Array.isArray(nodes)) return out
+  for (let i = nodes.length - 1; i >= 0 && out.length < limit; i -= 1) {
+    const event = session.eventAt(nodes[i])
+    if (event?.type !== 'tool/call') continue
+    out.push({ name: String(event.data?.name ?? ''), at: Number(event.time) })
+  }
+  return out.reverse()
+}
+
+/**
+ * 从会话里取最后一条助手输出的纯文本。
+ * 提醒规则里的 when.produced 用它判「助手刚说过什么」。
+ *
+ * @param {object} session 会话。
+ * @returns {string} 文本;没有就空串。
+ */
+export function lastAssistantText(session) {
+  const nodes = session?.surface?.nodes
+  if (!Array.isArray(nodes)) return ''
+  for (let i = nodes.length - 1; i >= 0; i -= 1) {
+    const event = session.eventAt(nodes[i])
+    if (event?.type !== 'assistant/message') continue
+    return textOf(event.data)
+  }
+  return ''
+}

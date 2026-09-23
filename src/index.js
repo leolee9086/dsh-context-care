@@ -8,7 +8,8 @@ import { alreadyWarned, detectLoop, loopNoticeText } from './loop-guard.js'
 import { createStreamWatch } from './stream-watch.js'
 import { installNoticeRules } from './notice-rules.js'
 import { createNoticeChannel, NOTICE_CHANNEL } from './notice-channel.js'
-import { lastAssistantMessage, lastUserMessage, textOf } from './prompt-text.js'
+import { lastAssistantMessage, lastAssistantText, lastUserMessage, textOf } from './prompt-text.js'
+import { createRequestRewriter, REWRITER_NAME } from './request-rewrite.js'
 
 export const name = 'dsh-context-care'
 export const inject = ['agents', 'tools', 'systemPrompt', 'tokenMeter', 'llm', 'compaction', 'sessionProjections']
@@ -160,6 +161,29 @@ export function installContextCare(ctx, raw, compactionSource) {
   // 通道不认识「召回」「分数」这些东西 —— 它只知道要通知什么、什么时候能通知。
   const noticeChannel = createNoticeChannel({ warn: message => ctx.logger.warn(message) })
   ctx.provide(NOTICE_CHANNEL, { register: noticeChannel.register })
+
+  // ---------------------------------------------------------- 请求层篡改
+  //
+  // 篡改的执行在请求层,那里看得见整段组装好的请求体。执行者由别的插件提供
+  // (fetch-router 的 requestRewrite 服务);没装就没有执行者,篡改规则不生效,
+  // 引擎会在 gate 阶段判掉并留下 no-consumer 记录 —— 请求保持原样。
+  ctx.inject(['requestRewrite'], (scope) => {
+    const rewrite = createRequestRewriter({
+      // 跟提醒规则共用一个服务:规则里用 placement 区分它该在哪一层生效。
+      rules: () => {
+        const rules = ctx.get('memoryNoticeRules')
+        return rules === undefined || rules === null ? [] : rules
+      },
+      onRecord(record) {
+        if (record.outcome !== 'applied') {
+          ctx.logger.warn(`context-care: 请求层规则 ${record.ruleId} 未生效(${record.outcome})${record.detail === undefined ? '' : ': ' + record.detail}`)
+          return
+        }
+        ctx.logger.info(`context-care: 请求层改写 ${record.ruleId},废掉 ${(record.loss * 100).toFixed(2)}% 缓存`)
+      },
+    })
+    return scope.requestRewrite.register(REWRITER_NAME, rewrite)
+  })
 
   // ---------------------------------------------------------- 流式监视
   //
@@ -493,7 +517,7 @@ export function installContextCare(ctx, raw, compactionSource) {
         agentId: agent.id,
         sessionId: agent.session?.id,
         userText: userMessage === undefined ? '' : textOf(userMessage),
-        assistantText: assistantMessage === undefined ? '' : textOf(assistantMessage),
+        assistantText: assistantMessage === undefined ? lastAssistantText(agent.session) : textOf(assistantMessage),
         signal,
       })
       for (const incoming of notices) {

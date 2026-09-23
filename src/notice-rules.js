@@ -7,13 +7,12 @@
 // 这里只管 notify。transform(篡改上下文)是另一条路 —— 它要经过请求层,
 // 由提供 requestRewrite 服务的插件执行,本插件只做裁决。
 //
-// 已知限制:这一轮只判「用户刚说了什么」(placement: user)。
-// when.produced 要看助手输出、when.idle 要看工具调用历史,两者现在都拿不到,
-// 声明了也不会命中 —— 接上会话事件之后补。
+// 判的 surface 是「用户刚说了什么」(placement: user);
+// when.produced 和 when.idle 要的助手输出与工具调用历史,从会话事件里取(见 prompt-text.js)。
 
 import { createEngine } from '@leolee9086/dsh-rule-engine'
 import { createUserMessage } from './message.js'
-import { lastUserMessage, textOf } from './prompt-text.js'
+import { lastAssistantText, lastUserMessage, recentToolCalls, textOf } from './prompt-text.js'
 
 /** 规则里写 action.by: 'context-care' 就落到这里。 */
 export const CONSUMER_NAME = 'context-care'
@@ -106,9 +105,15 @@ export function installNoticeRules(ctx, { plugin }) {
     const collected = []
     sink = collected
     try {
+      // 助手输出和工具调用历史都从会话里取 —— 规则里的 when.produced / when.idle 靠它们。
       engine.run({
         surface: { placement: 'user', text },
-        ctx: { userText: text, now: Date.now() },
+        ctx: {
+          userText: text,
+          assistantText: lastAssistantText(agent.session),
+          toolCalls: recentToolCalls(agent.session),
+          now: Date.now(),
+        },
       })
     } finally {
       sink = null
