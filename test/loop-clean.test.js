@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { cleanTail, cleanMessage, cleanMessages } from '../src/loop-clean.js'
+import { cleanTail, cleanMessage, cleanMessages, PATTERNS } from '../src/loop-clean.js'
 import { detectLoop } from '../src/loop-guard.js'
 
 /** 造一段像真实循环的文本:前面正常,尾巴上同一行刷了几十遍。 */
@@ -12,7 +12,7 @@ function loopingText() {
 
 test('正常文本原样返回', () => {
   const text = '第一行\n第二行\n第三行'
-  assert.deepEqual(cleanTail(text), { text, removedLines: 0 })
+  assert.deepEqual(cleanTail(text), { text, removedLines: 0, pattern: undefined })
 })
 
 test('行数太少不判', () => {
@@ -26,6 +26,7 @@ test('循环文本被截断并留下说明', () => {
   assert.match(cleaned.text, /先读 surface 的实现/)
   assert.match(cleaned.text, /已清理/)
   assert.equal(cleaned.text.includes('（做。）'), false)
+  assert.equal(cleaned.pattern, 'line-repeat')
 })
 
 test('同样的输入产出同样的结果 —— 缓存要的就是这个', () => {
@@ -33,7 +34,7 @@ test('同样的输入产出同样的结果 —— 缓存要的就是这个', () 
   assert.deepEqual(cleanTail(text), cleanTail(text))
   // 清理过的再清一次不再变:第二次请求不会重复花缓存。
   const once = cleanTail(text).text
-  assert.deepEqual(cleanTail(once), { text: once, removedLines: 0 })
+  assert.deepEqual(cleanTail(once), { text: once, removedLines: 0, pattern: undefined })
 })
 
 test('代码围栏行不参与统计', () => {
@@ -93,4 +94,14 @@ test('跟 loop-guard 串起来:检测到就清得掉', () => {
   assert.match(cleaned.messages[1].content[0].text, /已清理/)
   // 原文不动 —— 日志里那份还在。
   assert.equal(message.content[0].text.includes('已清理'), false)
+})
+
+test('模式表是加模式的唯一入口', () => {
+  // 「打地鼠」的现实:只能一个个抓。结构要保证加一个模式只动 PATTERNS 一处。
+  assert.equal(PATTERNS.length, 1)
+  for (const pattern of PATTERNS) {
+    assert.equal(typeof pattern.id, 'string')
+    assert.equal(typeof pattern.detect, 'function')
+    assert.equal(typeof pattern.clean, 'function')
+  }
 })
