@@ -211,17 +211,19 @@ export function cleanTail(text) {
  * @returns {{ message: object, removedLines: number }} 清理后的消息与总行数变化。
  */
 export function cleanMessage(message) {
-  if (!Array.isArray(message?.content)) return { message, removedLines: 0 }
+  if (!Array.isArray(message?.content)) return { message, removedLines: 0, pattern: undefined }
   let removedLines = 0
+  let pattern
   const content = message.content.map(block => {
     if (typeof block?.text !== 'string') return block
     if (block.type !== 'reasoning' && block.type !== 'text') return block
     const cleaned = cleanTail(block.text)
     removedLines += cleaned.removedLines
+    if (cleaned.pattern !== undefined) pattern = cleaned.pattern
     return cleaned.removedLines === 0 ? block : { ...block, text: cleaned.text }
   })
-  if (removedLines === 0) return { message, removedLines: 0 }
-  return { message: { ...message, content }, removedLines }
+  if (removedLines === 0) return { message, removedLines: 0, pattern: undefined }
+  return { message: { ...message, content }, removedLines, pattern }
 }
 
 /**
@@ -230,17 +232,17 @@ export function cleanMessage(message) {
  * 只碰最后一条:循环总是刚发生的那一条,往前翻会把正常的历史也改掉。
  *
  * @param {object[]} messages 这一轮组装好的消息。
- * @returns {{ messages: object[], removedLines: number, index: number }}
- *   清理后的消息、去掉的行数、被清理的是第几条(-1 表示没找到助手消息)。
+ * @returns {{ messages: object[], removedLines: number, index: number, pattern: string|undefined }}
+ *   清理后的消息、去掉的行数、被清理的是第几条(-1 表示没找到助手消息)、哪个模式命中的。
  */
 export function cleanMessages(messages) {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     if (messages[index]?.role !== 'assistant') continue
     const cleaned = cleanMessage(messages[index])
-    if (cleaned.removedLines === 0) return { messages, removedLines: 0, index }
+    if (cleaned.removedLines === 0) return { messages, removedLines: 0, index, pattern: undefined }
     const next = [...messages]
     next[index] = cleaned.message
-    return { messages: next, removedLines: cleaned.removedLines, index }
+    return { messages: next, removedLines: cleaned.removedLines, index, pattern: cleaned.pattern }
   }
-  return { messages, removedLines: 0, index: -1 }
+  return { messages, removedLines: 0, index: -1, pattern: undefined }
 }

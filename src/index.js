@@ -517,58 +517,32 @@ export function installContextCare(ctx, raw, compactionSource) {
     // 输出循环检测：模型卡带时，提醒它先把笔记写详细、再压缩 ——
     // 顺序反了的话，压缩会把还没落盘的细节一起带走。
     // alreadyWarned 保证连着卡住时也只提醒一次，不刷屏。
-    // 输出循环:先把这一轮要发出去的那段重复内容清掉,再提醒模型自己收尾。
-    // 清理只动这一轮的 messages,日志里的原文留着 —— 理由见 loop-clean.js 的头注释。
-    // 不先清只提醒的话,那段退化内容下一轮照样发给模型,既占地方又把模式喂回去。
-    const loop = detectLoop(agent.session)
-    if (loop !== undefined) {
-      const cleaned = cleanMessages(messages)
-      if (cleaned.removedLines > 0) {
-        messages.length = 0
-        messages.push(...cleaned.messages)
-        transformLog.record({
-          sessionId: agent.session?.id,
-          layer: 'loop',
-          ruleId: 'loop-clean',
-          outcome: 'applied',
-          detail: `清掉「${loop.line.slice(0, 40)}」重复 ${loop.count} 次,去掉 ${cleaned.removedLines} 行`,
-        })
-      }
-      // 提醒与清理是两件事:清理负责"别再发出去",提醒负责"你该落盘了"。
-      // alreadyWarned 保证连着卡住时也只提醒一次,不刷屏。
-      if (!alreadyWarned(agent.session, loopPlugin)) {
-        messages.push(notice(loopPlugin, loopNoticeText(loop), 'Output loop detected'))
-      }
-    }
-
-    // 提示规则:命中就往这一轮注入。规则没跑起来不该毁掉整个请求,
-    // 但也不能静默 —— 所以记 warn。
-    try {
-      for (const ruleMessage of noticeRules.collect({ agent, messages: decision.messages })) messages.push(ruleMessage)
-    } catch (error) {
-      ctx.logger.warn(`context-care: 提示规则没有跑起来: ${error instanceof Error ? error.message : String(error)}`)
-    }
-
-    // 通知通道:别的插件有话要告诉模型,在这里问、在这里注入。
-    try {
-      const userMessage = lastUserMessage(decision.messages)
-      const assistantMessage = lastAssistantMessage(decision.messages)
-      const notices = await noticeChannel.collect({
-        agentId: agent.id,
+    // 清理与提醒是两件事,判据也不同,别串在一起:
+    //   · 清理由 loop-clean 自己判 —— 它的模式表门槛低(filler-lines 只要 5 行),
+    //     因为它只删自己认得出来的那些行,误杀面小;
+    //   · 提醒仍用 loop-guard 的 detectLoop(同一行重复 ≥ 15 次)——那是明确的严重退化,
+    //     值得打断模型让它落盘。
+    // 一开始我把清理挂在 detectLoop 里面,于是 filler-lines 永远没机会跑 ——
+    // 实测就是"加了模式但循环照旧"。
+    const cleaned = cleanMessages(messages)
+    if (cleaned.removedLines > 0) {
+      messages.length = 0
+      messages.push(...cleaned.messages)
+      transformLog.record({
         sessionId: agent.session?.id,
-        userText: userMessage === undefined ? '' : textOf(userMessage),
-        assistantText: assistantMessage === undefined ? lastAssistantText(agent.session) : textOf(assistantMessage),
-        signal,
+        layer: 'loop',
+        ruleId: `loop-clean:${cleaned.pattern}`,
+        outcome: 'applied',
+        detail: `去掉 ${cleaned.removedLines} 行`,
       })
-      for (const incoming of notices) {
-        messages.push(notice(`${name}:notice:${incoming.source}`, incoming.text,
-          incoming.summary ?? `Notice from ${incoming.source}`))
-      }
-    } catch (error) {
-      ctx.logger.warn(`context-care: 通知通道没有跑起来: ${error instanceof Error ? error.message : String(error)}`)
     }
 
-    const text = renderState(current.state, outcome)
+    const loop = detectLoop(agent.session)
+    if (loop !== undefined && !alreadyWarned(agent.session, loopPlugin)) {
+      messages.push(notice(loopPlugin, loopNoticeText(loop), 'Output loop detected'))
+    }
+
+const text = renderState(current.state, outcome)
     const previous = previousState(agent.session)
     if (!requested && !shouldNotify(previous, text, current.state)) {
       // 即便状态没变，只要循环提醒挂上了就得把消息带回去。

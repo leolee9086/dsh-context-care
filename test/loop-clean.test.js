@@ -75,6 +75,7 @@ test('cleanMessages 只清最后一条助手消息', () => {
   const result = cleanMessages(messages)
   assert.ok(result.removedLines > 0)
   assert.equal(result.index, 1)
+  assert.equal(result.pattern, 'line-repeat')
   assert.match(result.messages[1].content[0].text, /已清理/)
   assert.equal(messages[1].content[0].text.includes('已清理'), false)
 })
@@ -208,4 +209,39 @@ test('围栏外的填充行照清,围栏内的留着', () => {
   // 围栏里的三行留着,外面那五行清掉。
   assert.equal(cleaned.text.includes('```'), true)
   assert.match(cleaned.text, /```\n做。\n做。\n做。\n```/)
+})
+
+test('这次真的踩到的坑:第二轮循环的样本，旧判据抓不到、新判据抓得到', () => {
+  // 2026-09-23 截图原样。它的问题在于「做。」只出现 8 次 ——
+  // loop-guard 的 detectLoop 要同一行 ≥ 15 次，所以返回 undefined。
+  // 一开始我把清理挂在 detectLoop 里面，于是 filler-lines 永远没机会跑。
+  const text = [
+    '嗯，那么验证「篡改通路通不通」？',
+    '嗯，加一条真规则 ✓ 但那要有需求 ✗',
+    '嗯，或者我自己测（已经在 test 里测过了 ✓）',
+    '嗯。',
+    '嗯，或者……',
+    '嗯。',
+    '嗯，好，写报告 ✓',
+    '嗯，简洁 ✓',
+    '做。',
+    '嗯，还要提：rule 列原来会显示 passthrough ✗ 那是说谎 ✓ 我修了 ✓',
+    '做。',
+    '嗯，写。',
+    '做。',
+    '嗯，一次写完。',
+    '做。',
+  ].join('\n')
+
+  const session = {
+    surface: { nodes: [1] },
+    eventAt: () => ({ type: 'assistant/message', seq: 1, time: 0, data: { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'reasoning', text }] }, stream: [] } }),
+  }
+  // 旧判据确实抓不到 —— 这就是当初漏掉的原因。
+  assert.equal(detectLoop(session), undefined)
+
+  // 新判据抓得到。
+  const cleaned = cleanTail(text)
+  assert.equal(cleaned.pattern, 'filler-lines')
+  assert.ok(cleaned.removedLines > 0)
 })
