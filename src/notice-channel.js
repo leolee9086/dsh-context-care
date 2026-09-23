@@ -13,6 +13,31 @@
 export const NOTICE_CHANNEL = 'contextNotices'
 
 /**
+ * 进程内唯一的通道。
+ *
+ * **为什么必须是单例**:context_care 有两个入口 —— root 的 `src/host.js` 和
+ * agent 作用域的 `src/index.js` —— 两个都跑 `installContextCare`。
+ * 服务名是全局的,同一个进程里注册两次会让插件挂载失败。
+ * 实测报错(preset 挂载时):
+ *
+ *     service "contextNotices" has been registered at <dsh-context-care>
+ *
+ * 所以通道做成进程内单例,provide 只做一次。两个入口共享同一个注册表,
+ * 不管最后是哪个实例在跑 pre-step,源注册进来的东西都看得见。
+ */
+let shared
+
+/**
+ * 取那个唯一的通道;第一次调用时建它。
+ * @param {object} options 同 createNoticeChannel。
+ * @returns {object} 通道。
+ */
+export function sharedNoticeChannel(options) {
+  if (shared === undefined) shared = createNoticeChannel(options)
+  return shared
+}
+
+/**
  * 建一个通道。
  *
  * @param {object} [options]

@@ -50,6 +50,13 @@ function harness({ shadowed = false, hasProvider = true } = {}) {
     tokenMeter: { measure: measurement, estimateMessage: () => 10 },
     llm: { resolveModelInfo: async () => ({ context: { contextWindow: 10000 } }) },
     sessionProjections: { register: () => () => {} },
+    sessions: {
+      messageProjections: [],
+      registerMessageProjection(projection) {
+        this.messageProjections.push(projection)
+        return () => { this.messageProjections.splice(this.messageProjections.indexOf(projection), 1) }
+      },
+    },
     systemPrompt: {
       context(section) { sections.set(section.name, section); return () => sections.delete(section.name) },
     },

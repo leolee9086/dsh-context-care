@@ -5,16 +5,16 @@ import { contextCareProjection } from './projection.js'
 import { selectClearRange, selectRestRange } from './selection.js'
 import { clearRange } from './deep-rest.js'
 import { alreadyWarned, detectLoop, loopNoticeText } from './loop-guard.js'
-import { cleanMessages } from './loop-clean.js'
+import { LOOP_CLEAN_EVENT, loopCleanProjection, pendingLoopClean } from './loop-clean-projection.js'
 import { createStreamWatch } from './stream-watch.js'
 import { installNoticeRules } from './notice-rules.js'
-import { createNoticeChannel, NOTICE_CHANNEL } from './notice-channel.js'
+import { NOTICE_CHANNEL, sharedNoticeChannel } from './notice-channel.js'
 import { lastAssistantMessage, lastAssistantText, lastUserMessage, textOf } from './prompt-text.js'
 import { createRequestRewriter, REWRITER_NAME } from './request-rewrite.js'
 import { createTransformLog } from './transform-log.js'
 
 export const name = 'dsh-context-care'
-export const inject = ['agents', 'tools', 'systemPrompt', 'tokenMeter', 'llm', 'compaction', 'sessionProjections']
+export const inject = ['agents', 'sessions', 'tools', 'systemPrompt', 'tokenMeter', 'llm', 'compaction', 'sessionProjections']
 // Standard Schema is consumed by Cordis before activation; no DSH schema helper.
 export const Config = z.object({
   budgetRatio: z.number().optional(), wakefulnessRatio: z.number().optional(),
@@ -179,8 +179,32 @@ export function installContextCare(ctx, raw, compactionSource) {
   //
   // 通用通道:别的插件有话要告诉模型时,注册一个源;这里在每个请求边界问一遍。
   // 通道不认识「召回」「分数」这些东西 —— 它只知道要通知什么、什么时候能通知。
-  const noticeChannel = createNoticeChannel({ warn: message => ctx.logger.warn(message) })
-  ctx.provide(NOTICE_CHANNEL, { register: noticeChannel.register })
+  const noticeChannel = sharedNoticeChannel({ warn: message => ctx.logger.warn(message) })
+  // 两个入口都会跑到这里,而服务名只有一个 —— 已经有了就不再注册。
+  // 注册两次会让插件的 agent 行挂载失败(见 notice-channel.js 里的报错原文)。
+  if (ctx.get(NOTICE_CHANNEL) === undefined) {
+    ctx.provide(NOTICE_CHANNEL, { register: noticeChannel.register })
+  }
+
+  // ---------------------------------------------------------- 循环清理的投影
+  //
+  // 循环清理不是一个"直接改请求体"的动作,而是一条持久决策 + 一个纯投影:
+  // 决策事件记下"哪条助手输出的尾巴是循环",投影在 fold 时把那条消息的
+  // 模型可见内容换成清理版。为什么要这么绕,见 loop-clean-projection.js 的头注释
+  // (根因:pre-step 的 messages 里根本没有助手消息,原来那段清理够不着)。
+  //
+  // 两个入口(root 的 host.js 和 agent 作用域的 index.js)都会跑到这里,
+  // 而同一个 type 注册两次会抛 already registered —— 先看有没有,有就不再注册。
+  // 跟上面通知通道的双注册是同一个坑。
+  if (!ctx.sessions.messageProjections.some(item => item.type === LOOP_CLEAN_EVENT)) {
+    ctx.sessions.registerMessageProjection(loopCleanProjection)
+  }
+  // 注册后记一条,真机上能直接确认投影在不在 —— 修复的成败第一步就是它。
+  if (ctx.sessions.messageProjections.some(item => item.type === LOOP_CLEAN_EVENT)) {
+    ctx.logger.info('context-care: 循环清理投影已注册 (context-care/loop-clean)')
+  } else {
+    ctx.logger.warn('context-care: 循环清理投影注册失败 —— 后续 loop-clean 决策事件会被日志拒绝')
+  }
 
   // ---------------------------------------------------------- 请求层篡改
   //
@@ -514,27 +538,35 @@ export function installContextCare(ctx, raw, compactionSource) {
     }
     const messages = [...decision.messages]
 
-    // 输出循环检测：模型卡带时，提醒它先把笔记写详细、再压缩 ——
-    // 顺序反了的话，压缩会把还没落盘的细节一起带走。
-    // alreadyWarned 保证连着卡住时也只提醒一次，不刷屏。
+    // 输出循环的清理:改的是**已经落在 surface 上的那条助手输出**。
+    // 在这里改 decision.messages 是够不着的 —— pre-step 拿到的 messages 是本轮
+    // 新领取的输入(全是 user 角色),上一轮的助手输出不在里面。
+    // 做法是落一条决策事件,由上面注册的纯投影把那条消息的模型可见内容换成
+    // 清理版:日志原文不动,随后的 deriveMessages() 拿到的就是干净的。
+    //
     // 清理与提醒是两件事,判据也不同,别串在一起:
-    //   · 清理由 loop-clean 自己判 —— 它的模式表门槛低(filler-lines 只要 5 行),
+    //   · 清理由 loop-clean 自己的模式表判 —— 门槛低(filler-lines 只要 5 行),
     //     因为它只删自己认得出来的那些行,误杀面小;
     //   · 提醒仍用 loop-guard 的 detectLoop(同一行重复 ≥ 15 次)——那是明确的严重退化,
     //     值得打断模型让它落盘。
-    // 一开始我把清理挂在 detectLoop 里面,于是 filler-lines 永远没机会跑 ——
-    // 实测就是"加了模式但循环照旧"。
-    const cleaned = cleanMessages(messages)
-    if (cleaned.removedLines > 0) {
-      messages.length = 0
-      messages.push(...cleaned.messages)
-      transformLog.record({
-        sessionId: agent.session?.id,
-        layer: 'loop',
-        ruleId: `loop-clean:${cleaned.pattern}`,
-        outcome: 'applied',
-        detail: `去掉 ${cleaned.removedLines} 行`,
-      })
+    const loopClean = pendingLoopClean(agent.session)
+    if (loopClean !== undefined) {
+      try {
+        agent.session.append(LOOP_CLEAN_EVENT, {
+          targets: [{ seq: loopClean.seq, ruleId: loopClean.ruleId }],
+        })
+        transformLog.record({
+          sessionId: agent.session?.id,
+          layer: 'loop',
+          ruleId: `loop-clean:${loopClean.ruleId}`,
+          outcome: 'applied',
+          detail: `seq ${loopClean.seq} 去掉 ${loopClean.removedLines} 行`,
+        })
+        ctx.logger.info(`context-care: 循环清理命中 seq ${loopClean.seq},去掉 ${loopClean.removedLines} 行 (${loopClean.ruleId})`)
+      } catch (error) {
+        // 清理落不下去不该毁掉这次请求,但必须有记录 —— 不静默。
+        ctx.logger.warn(`context-care: 循环清理没能落进会话日志: ${error instanceof Error ? error.message : String(error)}`)
+      }
     }
 
     const loop = detectLoop(agent.session)

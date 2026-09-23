@@ -8,7 +8,7 @@ import { installContextCare } from './index.js'
 // 唯一按 agent 的东西是 compaction provider,在这里用 agentPresets 现取
 // (`serviceFor` 在未提供时返回 undefined,由安装方在边界上报"无 provider")。
 export const name = 'dsh-context-care'
-export const inject = ['sessionProjections', 'tools', 'systemPrompt', 'tokenMeter', 'llm']
+export const inject = ['sessions', 'sessionProjections', 'tools', 'systemPrompt', 'tokenMeter', 'llm']
 
 export function apply(ctx, config = {}) {
   const presets = ctx.get('agentPresets')

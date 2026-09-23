@@ -57,6 +57,13 @@ async function mounted(options = {}) {
   const compacted = []
   ctx.provide('agents', {})
   ctx.provide('sessionProjections', { register: () => () => {} })
+  ctx.provide('sessions', {
+    messageProjections: [],
+    registerMessageProjection(projection) {
+      this.messageProjections.push(projection)
+      return () => { this.messageProjections.splice(this.messageProjections.indexOf(projection), 1) }
+    },
+  })
   ctx.provide('tools', { register(tool) { registered.set(tool.name, tool); return () => registered.delete(tool.name) } })
   ctx.provide('systemPrompt', { context(section) { sections.set(section.name, section); return () => sections.delete(section.name) } })
   ctx.provide('tokenMeter', { measure: measurement, estimateMessage: () => 10 })
