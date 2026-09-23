@@ -5,6 +5,7 @@ import { contextCareProjection } from './projection.js'
 import { selectClearRange, selectRestRange } from './selection.js'
 import { clearRange } from './deep-rest.js'
 import { alreadyWarned, detectLoop, loopNoticeText } from './loop-guard.js'
+import { cleanMessages } from './loop-clean.js'
 import { createStreamWatch } from './stream-watch.js'
 import { installNoticeRules } from './notice-rules.js'
 import { createNoticeChannel, NOTICE_CHANNEL } from './notice-channel.js'
@@ -516,9 +517,28 @@ export function installContextCare(ctx, raw, compactionSource) {
     // 输出循环检测：模型卡带时，提醒它先把笔记写详细、再压缩 ——
     // 顺序反了的话，压缩会把还没落盘的细节一起带走。
     // alreadyWarned 保证连着卡住时也只提醒一次，不刷屏。
+    // 输出循环:先把这一轮要发出去的那段重复内容清掉,再提醒模型自己收尾。
+    // 清理只动这一轮的 messages,日志里的原文留着 —— 理由见 loop-clean.js 的头注释。
+    // 不先清只提醒的话,那段退化内容下一轮照样发给模型,既占地方又把模式喂回去。
     const loop = detectLoop(agent.session)
-    if (loop !== undefined && !alreadyWarned(agent.session, loopPlugin)) {
-      messages.push(notice(loopPlugin, loopNoticeText(loop), 'Output loop detected'))
+    if (loop !== undefined) {
+      const cleaned = cleanMessages(messages)
+      if (cleaned.removedLines > 0) {
+        messages.length = 0
+        messages.push(...cleaned.messages)
+        transformLog.record({
+          sessionId: agent.session?.id,
+          layer: 'loop',
+          ruleId: 'loop-clean',
+          outcome: 'applied',
+          detail: `清掉「${loop.line.slice(0, 40)}」重复 ${loop.count} 次,去掉 ${cleaned.removedLines} 行`,
+        })
+      }
+      // 提醒与清理是两件事:清理负责"别再发出去",提醒负责"你该落盘了"。
+      // alreadyWarned 保证连着卡住时也只提醒一次,不刷屏。
+      if (!alreadyWarned(agent.session, loopPlugin)) {
+        messages.push(notice(loopPlugin, loopNoticeText(loop), 'Output loop detected'))
+      }
     }
 
     // 提示规则:命中就往这一轮注入。规则没跑起来不该毁掉整个请求,
