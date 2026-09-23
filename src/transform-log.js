@@ -1,18 +1,28 @@
 // src/transform-log.js — 变换记录:写进会话日志的 log-only 事件。
 //
-// 为什么是这个做法(查证过 DSH 的实现,不是猜的):
-//   · core/session/src/surface.ts 第 153-157 行:
-//     「A non-surface event (boundary, attempt, log-only record) projects to no message.
-//      Merge-extensible union: no assertNever here.」
-//     —— 非 surface 事件投影成「没有消息」,模型看不到它。
-//   · core/session/src/types.ts 第 81-82 行:
-//     「Adding an ordinary event type does not bump — the per-event ignorable guard
-//      covers vocabulary growth instead.」
-//     —— 加一个普通事件类型不触发格式版本升级,词汇增长由 ignorable 兜。
-//   · validateSessionEventData 只校验 request/header 和 tool/result,其它类型一律放过。
-//   · 现成的先例一抓一把:plan-mode 的 plan/mode、tool-workflow 的四个包内事件、
-//     workspace-changes 的 workspace/changes、session-title 的 session/title,
-//     全是「package-owned log-only event」。
+// 为什么是这个做法:从「产生」到「落盘」到「加载」整条路都查过了,没有坑。
+// 六处独立证据(都在 deepseek-harness\packages\core\session\src\):
+//
+//   产生 —— append 时的数据校验(index.ts 调 surface.ts 的 validateSessionEventData):
+//     只校验 request/header 和 tool/result,其它类型一律放过。data 只要 JSON 可序列化。
+//   产生 —— 事件关系的合法性(invariant.ts):
+//     第 69-70 行「Context and plugin-owned log-only events may be appended between
+//     model executions」;第 161-162 行的 default 分支
+//     「Merge-extensible event relations belong to their owning plugin」——
+//     不要求 turn 内,也不强加关系。所以请求层异步 append 也不违规。
+//   落盘 —— 只是写进 append-only 的 JSONL,类型就是字符串。
+//   加载 —— seed 校验的 switch(index.ts 229-238)**没有 default**,
+//     只对 request/header、system/message、user/message、assistant/attempt、
+//     assistant/message、tool/result 六个类型做额外检查,别的直接跳过。
+//   回放 —— surface 判定是四个类型的白名单(surface.ts 50-63),
+//     不在里面就不是 surface 事件;投影成 null(surface.ts 153-157,以及 deriveEventMessage
+//     的注释「a non-surface event (attempt, boundary, log-only record)」)。
+//   版本 —— types.ts 81-82「Adding an ordinary event type does not bump — the per-event
+//     ignorable guard covers vocabulary growth instead」,不用升 SESSION_FORMAT_VERSION。
+//
+// 现成的先例一抓一把,全是「package-owned log-only event」:plan-mode 的 plan/mode、
+// tool-workflow 的四个包内事件、workspace-changes 的 workspace/changes、
+// session-title 的 session/title、compaction/*。
 //
 // 这么写的好处:记录自动获得「持久、可回放、能通过 session.follow 推给界面」。
 // 不用自己发明一套轮询,也不用把状态藏在进程内存里 ——
