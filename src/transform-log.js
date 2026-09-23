@@ -1,7 +1,7 @@
 // src/transform-log.js — 变换记录:写进会话日志的 log-only 事件。
 //
 // 为什么是这个做法:从「产生」到「落盘」到「加载」整条路都查过了,没有坑。
-// 六处独立证据(都在 deepseek-harness\packages\core\session\src\):
+// 六处独立证据(都在 DSH 的 core/session 包,文件名叫 surface.ts / invariant.ts / index.ts / types.ts):
 //
 //   产生 —— append 时的数据校验(index.ts 调 surface.ts 的 validateSessionEventData):
 //     只校验 request/header 和 tool/result,其它类型一律放过。data 只要 JSON 可序列化。
