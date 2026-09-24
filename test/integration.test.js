@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url'
 import { resolve } from 'node:path'
 import { readFile } from 'node:fs/promises'
 import * as plugin from '../src/index.js'
+import { producedBy } from '../src/producer-source.js'
 
 // This explicitly selected test acts as an external Host. The plugin itself never
 // locates or imports a Harness checkout, and the default test suite is standalone.
@@ -89,7 +90,7 @@ test('real Loader/loop preserves request prefix and compacts after tool result, 
   const result = events.find(event => event.type === 'tool/result')
   const start = events.find(event => event.type === 'compaction/start')
   assert.ok(result.seq < start.seq)
-  const statuses = events.filter(event => event.type === 'user/message' && event.data.source.plugin === 'dsh-context-care:state')
+  const statuses = events.filter(event => event.type === 'user/message' && producedBy(event.data.source, 'dsh-context-care:state'))
   assert.match(statuses.at(-1).data.content[0].text, /completed: older history summarized/)
   assert.equal(adapter.calls, 4)
   const final = adapter.requests.at(-1)

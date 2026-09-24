@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { createUserMessage } from './message.js'
+import { CHECKPOINT_KIND } from './producer-source.js'
 
 /**
  * 清空式压缩：把选中的 surface 区间换成一条交接，不调用模型。
@@ -33,9 +34,9 @@ export function inspectSession(session) {
   return { openTurn, unmatchedCompactionStart }
 }
 
-/** 交接消息在 surface 上的来源标记；与 DSH 的 checkpoint 约定一致。 */
+/** 交接消息在 surface 上的来源标记；与 DSH 的 checkpoint 约定一致（V3 的 `compact` 迁移后就是它）。 */
 function checkpointSource(compactionId) {
-  return { kind: 'plugin', plugin: 'compact', compactionId }
+  return { kind: CHECKPOINT_KIND, compactionId }
 }
 
 /**

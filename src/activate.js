@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { installContextCare, inject as agentInject, previousState, shouldNotify } from './index.js'
 import { calculateState, renderState, resolveConfig } from './policy.js'
 import { createUserMessage } from './message.js'
+import { producedBy, producerKind } from './producer-source.js'
 
 export const name = 'dsh-context-care-activate'
 export const inject = ['agents', 'agentPresets', 'tools']
@@ -21,7 +22,7 @@ export async function apply(ctx, config) {
         scoped.on('agent/pre-step', async ({ agent: owner, signal }, next) => {
           const decision = await next()
           if (decision.kind === 'reject' || signal.aborted) return decision
-          const isState = message => message.source.kind === 'plugin' && message.source.plugin === 'dsh-context-care:state'
+          const isState = message => producedBy(message.source, 'dsh-context-care:state')
           const existing = decision.messages.find(isState)
           if (existing?.source.contextCare) return decision
           const header = owner.session.requestHeader()?.config
@@ -32,13 +33,13 @@ export async function apply(ctx, config) {
           const state = calculateState(measurement.totalTokens + incoming, measurement.surfaceTokens + incoming, info?.context?.contextWindow, resolveConfig())
           const prior = previousState(owner.session)
           const notificationText = existing ? existing.content.filter(block => block.type === 'text').map(block => block.text).join('\n') : renderState(state)
-          const requested = decision.messages.some(message => message.source.kind === 'plugin' && message.source.plugin === 'dsh-context-care:request')
+          const requested = decision.messages.some(message => producedBy(message.source, 'dsh-context-care:request'))
           if (!requested && !shouldNotify(prior, notificationText, state)) {
             return existing ? { ...decision, messages: decision.messages.filter(message => !isState(message)) } : decision
           }
           const numeric = createUserMessage({
             content: [{ type: 'text', text: renderState(state) }],
-            source: { kind: 'plugin', plugin: 'dsh-context-care:state', form: 'notice', summary: 'Context state', contextCare: { fatigueValue: state.fatigueValue, wakefulnessValue: state.wakefulnessValue } },
+            source: { kind: producerKind('dsh-context-care:state'), form: 'notice', summary: 'Context state', contextCare: { fatigueValue: state.fatigueValue, wakefulnessValue: state.wakefulnessValue } },
           })
           // Keep any outcome text from the old producer; values are display-only.
           const messages = existing

@@ -12,6 +12,7 @@
 
 import { createEngine } from '@leolee9086/dsh-rule-engine'
 import { createUserMessage } from './message.js'
+import { producerKind } from './producer-source.js'
 import { lastAssistantText, lastUserMessage, recentToolCalls, textOf } from './prompt-text.js'
 
 /** 规则里写 action.by: 'context-care' 就落到这里。 */
@@ -82,8 +83,7 @@ export function installNoticeRules(ctx, { plugin, onHit = () => {} }) {
     return createUserMessage({
       content: [{ type: 'text', text: say }],
       source: {
-        kind: 'plugin',
-        plugin: `${plugin}:rules:${payload.ruleId}`,
+        kind: producerKind(`${plugin}:rules:${payload.ruleId}`),
         form: 'notice',
         summary: `Notice rule: ${payload.ruleId}`,
       },

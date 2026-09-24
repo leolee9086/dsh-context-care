@@ -171,7 +171,7 @@ test('deep rest clears the history to the handoff and never calls the compaction
   // 三条历史压成一条：替换物自己。
   assert.equal(h.session.surface.nodes.length, 1)
   const checkpoint = h.session.eventAt(h.session.surface.nodes[0])
-  assert.equal(checkpoint.data.source.plugin, 'compact')
+  assert.equal(checkpoint.data.source.kind, 'compact-checkpoint')
   assert.equal(checkpoint.type, 'user/message')
   assert.match(checkpoint.data.content[0].text, /Goal: ship the clear path/)
   assert.match(checkpoint.data.content[0].text, /Search the session log for "deep rest"/)

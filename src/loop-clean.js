@@ -1,213 +1,105 @@
-// src/loop-clean.js — 把退化成循环的内容,从这一轮要发出去的东西里清掉。
+// src/loop-clean.js — 把退化成循环的内容，从这一轮要发出去的东西里清掉。
 //
-// **这件事只能打地鼠。** 循环没有通用判据可写 —— 它是模型侧的退化,
-// 换一组词、换一种退化方式就是另一个模式。所以这里不追求"认出所有循环",
-// 只追求**加一个模式要足够便宜**:一个模式就是 PATTERNS 里的一项,
-// 写一个 detect、写一个 clean,别的都不用动。
+// **这件事只能打地鼠。** 循环没有通用判据可写 —— 它是模型侧的退化，
+// 换一组词、换一种退化方式就是另一个模式。所以这里不追求"认出所有循环"，
+// 只追求**加一个模式要足够便宜**：判定表里加一项（loop-patterns.js），
+// 这里配一个清法（CLEANERS），别的都不用动。
 //
-// 与 loop-guard.js 的分工:那边是流式生成中的掐断与提醒(via stream-watch 的触发器表),
-// 这边是事后的清理。两处的模式表早晚该合成一份,现在先各自成表。
+// 判定表在 loop-patterns.js，与 loop-guard.js（agent 层的提醒）共用同一份 ——
+// 两张表各自成表的代价实测过：弱循环能清却从不提醒。这里只保留"清法"。
 //
-// 改的是这一轮组装好的 messages,**不是日志** —— 原文留在会话日志里,随时查得回来;
+// **这里只清严重档**（`hit.severity === 'severe'`，见 loop-patterns.js 开头）：
+//   · 轻微档（稀疏轮转、行首单调）交给提醒。那些内容多半还带着信息，切掉是损失；
+//     而且"清了又提醒"会让模型被叫去找一段已经不存在的文本。
+//   · 严重档（重复占满尾巴）才是噪声，清掉纯赚。
+//   注意严重度是按**这一轮的占比**算的，不是模式的静态属性：同样是短句重复，
+//   占 93% 是卡带（清），占 33% 是稀疏轮转（报）。
+//
+// 反过来，严重档在清理执行者缺席时也**必须**由提醒兜底 —— 那条兜底在 loop-guard.js 的
+// loopNeedsReminder：执行者就是本文件注册上去的那个改写器。
+//
+// 改的是这一轮组装好的 messages，**不是日志** —— 原文留在会话日志里，随时查得回来；
 // 清理只是"这一次不把它发出去"。执行点在 fetch-router 的请求改写通道
-// (见 request-rewrite.js):pre-step 够不着上一轮的助手输出,请求体里才有。
+// （见 request-rewrite.js）：pre-step 够不着上一轮的助手输出，请求体里才有。
 //
-// **清理不往模型可见内容里放任何标记**(2026-09-23 哥哥定的):模型看到的
-// 就是干净的截断内容,不用知道"这里被清理过";要让人知道,走 UI 记录那条路。
+// **清理不往模型可见内容里放任何标记**（2026-09-23 哥哥定的）：模型看到的
+// 就是干净的截断内容，不用知道"这里被清理过"；要让人知道，走 UI 记录那条路。
 
-/** 只看末尾这么多行 —— 循环总是拖在尾巴上。 */
-const TAIL_LINES = 80
-/** 太短的行不参与统计:代码里的 `}`、空行之类天然会重复。 */
-const MIN_LINE_LEN = 3
-/** 代码围栏行不参与:写文档时围栏成对出现,天然重复。 */
-const FENCE_LINE = new RegExp('^(`{3,}|~{3,})[\\w+-]*$')
-/** 同一行在窗口里出现这么多次才算循环。 */
-const REPEAT_THRESHOLD = 15
-/** 还要占够窗口比例,免得把「正常但啰嗦」也输出判成循环。 */
-const REPEAT_RATIO = 0.2
-
-/** 超过这么长的行不可能是填充行 —— 长句总能承载信息。 */
-const MAX_FILLER_LEN = 6
-/** 填充行到这个数才算刷屏。 */
-const MIN_FILLER_LINES = 5
-/** 同时要占够窗口比例。 */
-const MIN_FILLER_RATIO = 0.4
-/**
- * 填充词。**只收最高频的应答词与虚字** —— 表越长越容易误杀。
- * 判定不要求整行都是它,只要行足够短、又含其中一个,就算填充行
- * (「嗯，简洁。」这种一行一句的碎念也算 —— 它承载不了信息)。
- */
-const FILLER_CHARS = new Set([...'做干搞走来了好嗯对是吧呢啊呀行成可以继续那就先再'])
+import { CLEANABLE_IDS, detectDegradation } from './loop-patterns.js'
 
 /**
- * 标出每一行是不是在代码块里(含围栏行本身)。
- *
- * 代码块里什么都可能出现:短行、`}`、中文注释、示例文本 —— 那些都不该参与循环判定。
- * **误清代码比漏清一段退化输出严重得多**:前者毁任务材料,后者只是多留一点噪声。
- * 所以任何新加的模式都得先过这一层,不是可选优化。
- *
- * @param {string[]} lines 原文的行。
- * @returns {boolean[]} 与 lines 等长;true 表示这行在代码块里。
+ * 各严重档模式的清法。判定（含"这一轮算不算严重"）全在 loop-patterns.js，
+ * 这里只回答"命中之后怎么清"。
  */
-function fenceMask(lines) {
-  const mask = []
-  let inside = false
-  for (const line of lines) {
-    if (FENCE_LINE.test(line.trim())) {
-      mask.push(true)
-      inside = !inside
-      continue
+const CLEANERS = {
+  /** 同一行刷满尾巴：从这个循环行在窗口里第一次出现的地方截断。 */
+  'line-repeat'(text, hit) {
+    let cut = hit.lines.length
+    for (let index = hit.windowStart; index < hit.lines.length; index += 1) {
+      if (hit.marks[index] && hit.lines[index].trim() === hit.line) {
+        cut = index
+        break
+      }
     }
-    mask.push(inside)
-  }
-  return mask
-}
-
-/** 一行参不参与统计。 */
-function counts(line, inCode) {
-  if (inCode) return false
-  const trimmed = line.trim()
-  return trimmed.length >= MIN_LINE_LEN && !FENCE_LINE.test(trimmed)
+    // 截断点落在第 0 行就保一段：整块清空会让模型看到一段凭空消失的思考。
+    if (cut === 0) cut = Math.max(1, Math.floor(hit.lines.length / 4))
+    return hit.lines.slice(0, cut).join('\n')
+  },
+  /** 填充行成片：这些行逐条删掉，其余保留 —— 它们本来就不承载信息。 */
+  'filler-lines'(text, hit) {
+    return hit.lines.filter((_line, index) => !hit.marks[index]).join('\n')
+  },
 }
 
 /**
- * 模式表。**加一个模式就是加一项**:detect 认出来,clean 负责清。
+ * 模式表。**加一个可清理的模式就是加一项**：判定表里加 detect 并标 cleanable，
+ * 这里加同名的清法。
  *
- * detect(text) → 命中信息 | undefined
- * clean(text, hit) → 清理后的文本
- *
- * 一开始只有"同一行反复出现"这一种 —— 实测样本(DeepSeek V4 Flash 失控时):
- *
- *     （输出。）
- *     **做。**
- *     go.
- *     （输出。）
- *     **做。**
- *     go.
- *     …重复上百行
- *
- * 再遇到别的退化形状,在这里加一项,并把那个样本抄进注释 —— 样本比描述有用。
+ * 表里的 id 与顺序都取自 loop-patterns.js 的 `CLEANABLE_IDS` ——
+ * 判定层是唯一的事实来源，两张表不会各自漂开。
  */
-export const PATTERNS = [
-  {
-    id: 'line-repeat',
-    detect(text) {
-      const lines = String(text).split('\n')
-      const fences = fenceMask(lines)
-      const marks = lines.map((line, index) => counts(line, fences[index]))
-      const counted = []
-      for (let index = 0; index < lines.length; index += 1) {
-        if (marks[index]) counted.push(index)
-      }
-      if (counted.length === 0) return undefined
+export const PATTERNS = CLEANABLE_IDS.map(id => ({ id, clean: CLEANERS[id] }))
 
-      const windowStart = counted.length > TAIL_LINES ? counted[counted.length - TAIL_LINES] : counted[0]
-      const window = []
-      for (let index = windowStart; index < lines.length; index += 1) {
-        if (marks[index]) window.push(lines[index].trim())
-      }
-      if (window.length === 0) return undefined
-
-      const tallies = new Map()
-      for (const line of window) tallies.set(line, (tallies.get(line) ?? 0) + 1)
-      let line
-      let count = 0
-      for (const [candidate, seen] of tallies) {
-        if (seen > count) {
-          line = candidate
-          count = seen
-        }
-      }
-      if (count < REPEAT_THRESHOLD || count / window.length < REPEAT_RATIO) return undefined
-      return { pattern: 'line-repeat', line, count, total: window.length, ratio: count / window.length, windowStart, lines, marks }
-    },
-    clean(text, hit) {
-      // 从这个循环行在窗口里第一次出现的地方截断。
-      let cut = hit.lines.length
-      for (let index = hit.windowStart; index < hit.lines.length; index += 1) {
-        if (hit.marks[index] && hit.lines[index].trim() === hit.line) {
-          cut = index
-          break
-        }
-      }
-      // 截断点落在第 0 行就保一段:整块清空会让模型看到一段凭空消失的思考。
-      if (cut === 0) cut = Math.max(1, Math.floor(hit.lines.length / 4))
-      return hit.lines.slice(0, cut).join('\n')
-    },
-  },
-  {
-    id: 'filler-lines',
-    /**
-     * 单行短、又只由应答词之类组成,却成片出现 —— 这是另一种退化形状。
-     * 实测样本(2026-09-23,同一次失控的后半段):
-     *
-     *     做。
-     *     嗯，简洁。
-     *     做。
-     *     嗯，先记忆 + 落盘，然后回复 ✓
-     *     做。
-     *     嗯，一次做完。
-     *     做。
-     *     好。
-     *     做。
-     *     （直接做。）
-     *     做。
-     *
-     * 「做。」只出现 6 次,够不到 line-repeat 的 15 次门槛,
-     * 但它和同类碎句加起来占了窗口六成 —— 这一类要靠"行的性质"认,不是靠同一行重复。
-     */
-    detect(text) {
-      const lines = String(text).split('\n')
-      const fences = fenceMask(lines)
-      const marks = lines.map((line, index) => {
-        if (fences[index]) return false
-        const trimmed = line.trim()
-        if (trimmed.length === 0 || trimmed.length > MAX_FILLER_LEN) return false
-        return [...trimmed].some(char => FILLER_CHARS.has(char))
-      })
-      const filled = marks.filter(Boolean).length
-      if (filled < MIN_FILLER_LINES || filled / lines.length < MIN_FILLER_RATIO) return undefined
-      return { pattern: 'filler-lines', count: filled, total: lines.length, ratio: filled / lines.length, lines, marks }
-    },
-    clean(text, hit) {
-      // 这些行逐条删掉,其余保留 —— 它们本来就不承载信息,不像 line-repeat 那样要截断。
-      return hit.lines.filter((_line, index) => !hit.marks[index]).join('\n')
-    },
-  },
-]
+for (const id of CLEANABLE_IDS) {
+  if (typeof CLEANERS[id] !== 'function') {
+    throw new Error(`loop-clean: 判定表把 "${id}" 标成可清理，但这里没有它的清法`)
+  }
+}
 
 /**
- * 跑一遍所有模式,清掉命中的那段。
+ * 跑一遍判定表，严重档就清掉命中的那段。
  *
- * 同一个输入必须产出同一个结果 —— 清理不稳定的话,每轮请求都会重新废一次前缀缓存。
- * 而且它必须**幂等**:清过的再清一次不再变。
+ * 同一个输入必须产出同一个结果 —— 清理不稳定的话，每轮请求都会重新废一次前缀缓存。
+ * 而且它必须**幂等**：清过的再清一次不再变。
  *
  * @param {string} text 原文。
- * @returns {{ text: string, removedLines: number, pattern: string|undefined }} 清理结果;没命中时原样返回。
+ * @returns {{ text: string, removedLines: number, pattern: string|undefined }} 清理结果；没命中时原样返回。
  */
 export function cleanTail(text) {
   const source = String(text)
-  for (const pattern of PATTERNS) {
-    const hit = pattern.detect(source)
-    if (hit === undefined) continue
-    const kept = pattern.clean(source, hit).replace(/\s+$/, '')
-    const lines = source.split('\n').length
-    const keptLines = kept.length === 0 ? 0 : kept.split('\n').length
-    return {
-      // 不给模型留"已清理"的标记(哥哥 2026-09-23 定的) —— 看到的就是干净截断。
-      text: kept,
-      removedLines: lines - keptLines,
-      pattern: hit.pattern,
-    }
+  // 判定只看一次：全表第一个命中说了算。轻微档也认得出，但不在这里动手 —— 那是提醒的活。
+  const hit = detectDegradation(source)
+  if (hit === undefined || hit.severity !== 'severe') {
+    return { text: source, removedLines: 0, pattern: undefined }
   }
-  return { text: source, removedLines: 0, pattern: undefined }
+  const pattern = PATTERNS.find(entry => entry.id === hit.pattern)
+  if (pattern === undefined) return { text: source, removedLines: 0, pattern: undefined }
+  const kept = pattern.clean(source, hit).replace(/\s+$/, '')
+  const lines = source.split('\n').length
+  const keptLines = kept.length === 0 ? 0 : kept.split('\n').length
+  return {
+    // 不给模型留"已清理"的标记（哥哥 2026-09-23 定的） —— 看到的就是干净截断。
+    text: kept,
+    removedLines: lines - keptLines,
+    pattern: hit.pattern,
+  }
 }
 
 /**
  * 清掉一条消息里所有思考块和正文块末尾的循环。
  *
- * @param {object} message 消息(会被复制,不改原件)。
- * @returns {{ message: object, removedLines: number }} 清理后的消息与总行数变化。
+ * @param {object} message 消息（会被复制，不改原件）。
+ * @returns {{ message: object, removedLines: number, pattern: string|undefined }} 清理后的消息与总行数变化。
  */
 export function cleanMessage(message) {
   if (!Array.isArray(message?.content)) return { message, removedLines: 0, pattern: undefined }
@@ -226,13 +118,13 @@ export function cleanMessage(message) {
 }
 
 /**
- * 在准备发出去的消息里,清掉最后一条助手输出末尾的循环。
+ * 在准备发出去的消息里，清掉最后一条助手输出末尾的循环。
  *
- * 只碰最后一条:循环总是刚发生的那一条,往前翻会把正常的历史也改掉。
+ * 只碰最后一条：循环总是刚发生的那一条，往前翻会把正常的历史也改掉。
  *
  * @param {object[]} messages 这一轮组装好的消息。
  * @returns {{ messages: object[], removedLines: number, index: number, pattern: string|undefined }}
- *   清理后的消息、去掉的行数、被清理的是第几条(-1 表示没找到助手消息)、哪个模式命中的。
+ *   清理后的消息、去掉的行数、被清理的是第几条（-1 表示没找到助手消息）、哪个模式命中的。
  */
 export function cleanMessages(messages) {
   for (let index = messages.length - 1; index >= 0; index -= 1) {

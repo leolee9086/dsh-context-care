@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { producedBy } from './producer-source.js'
 
 const level = z.enum(['unknown', 'low', 'normal', 'elevated', 'high', 'very-high'])
 const value = z.number().min(0).max(100).nullable()
@@ -33,8 +34,8 @@ export const contextCareProjection = {
   stateSchema: schema,
   init: () => null,
   apply(state, event) {
-    if (event.type !== 'user/message' || event.data.source.kind !== 'plugin'
-      || event.data.source.plugin !== 'dsh-context-care:state') return state
+    if (event.type !== 'user/message'
+      || !producedBy(event.data.source, 'dsh-context-care:state')) return state
     const text = event.data.content.filter(block => block.type === 'text').map(block => block.text).join('\n')
     const match = STATE_LINE.exec(text)
     if (!match) return state

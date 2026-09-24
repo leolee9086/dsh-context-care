@@ -37,9 +37,9 @@ test('命中提示规则时注入一条提醒', () => {
   const messages = rules.collect({ agent: { id: 'a1' }, messages: [userMessage('记住：我在长沙')] })
   assert.equal(messages.length, 1)
   assert.equal(messages[0].content[0].text, REMEMBER_RULE.action.say)
-  assert.equal(messages[0].source.kind, 'plugin')
+  assert.equal(messages[0].source.kind, 'plugin:dsh-context-care:rules:memory-remember-request')
   assert.equal(messages[0].source.form, 'notice')
-  assert.match(messages[0].source.plugin, /rules:memory-remember-request/)
+  assert.equal(messages[0].source.plugin, undefined)
 })
 
 test('没命中就不注入', () => {

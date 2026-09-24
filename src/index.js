@@ -1,10 +1,11 @@
 import { z } from 'zod'
 import { createUserMessage } from './message.js'
+import { producedBy, producerKind } from './producer-source.js'
 import { calculateState, GUIDANCE, renderState, resolveConfig } from './policy.js'
 import { contextCareProjection } from './projection.js'
 import { selectClearRange, selectRestRange } from './selection.js'
 import { clearRange } from './deep-rest.js'
-import { alreadyWarned, detectLoop, loopNoticeText } from './loop-guard.js'
+import { alreadyWarned, detectLoop, loopNeedsReminder, loopNoticeText } from './loop-guard.js'
 import { createStreamWatch } from './stream-watch.js'
 import { installNoticeRules } from './notice-rules.js'
 import { NOTICE_CHANNEL, sharedNoticeChannel } from './notice-channel.js'
@@ -31,7 +32,7 @@ const watchPlugin = triggerId => `${name}:watch:${triggerId}`
 function notice(plugin, text, summary, state, extra) {
   return createUserMessage({
     content: [{ type: 'text', text }],
-    source: { kind: 'plugin', plugin, form: 'notice', summary,
+    source: { kind: producerKind(plugin), form: 'notice', summary,
       ...(state ? { contextCare: { fatigueValue: state.fatigueValue, wakefulnessValue: state.wakefulnessValue } } : {}),
       ...extra,
     },
@@ -114,8 +115,7 @@ export const WATCH_NOTICES = {
 export function previousState(session) {
   for (let index = session.surface.nodes.length - 1; index >= 0; index--) {
     const event = session.eventAt(session.surface.nodes[index])
-    if (event?.type === 'user/message' && event.data.source.kind === 'plugin'
-      && event.data.source.plugin === statePlugin) {
+    if (event?.type === 'user/message' && producedBy(event.data.source, statePlugin)) {
       return {
         text: event.data.content.filter(block => block.type === 'text').map(block => block.text).join('\n'),
         fatigueValue: event.data.source.contextCare?.fatigueValue,
@@ -207,6 +207,10 @@ export function installContextCare(ctx, raw, compactionSource) {
   // 篡改的执行在请求层,那里看得见整段组装好的请求体。执行者由别的插件提供
   // (fetch-router 的 requestRewrite 服务);没装就没有执行者,篡改规则不生效,
   // 引擎会在 gate 阶段判掉并留下 no-consumer 记录 —— 请求保持原样。
+  // 清理执行者在不在：严重档的兜底提醒要用它（见 loop-guard.js 的 loopNeedsReminder）——
+  // fetch-router 没装或没启用时这段 inject 不会跑，严重循环就清不掉，那就必须提醒，
+  // 不能既不清也不说。
+  let cleanupActive = false
   ctx.inject(['requestRewrite'], (scope) => {
     const rewrite = createRequestRewriter({
       // 跟提醒规则共用一个服务:规则里用 placement 区分它该在哪一层生效。
@@ -226,7 +230,10 @@ export function installContextCare(ctx, raw, compactionSource) {
         ctx.logger.info(`context-care: 请求层改写 ${record.ruleId},废掉 ${(record.loss * 100).toFixed(2)}% 缓存`)
       },
     })
-    return scope.requestRewrite.register(REWRITER_NAME, rewrite)
+    const dispose = scope.requestRewrite.register(REWRITER_NAME, rewrite)
+    cleanupActive = true
+    ctx.effect(() => () => { cleanupActive = false })
+    return dispose
   })
 
   // ---------------------------------------------------------- 流式监视
@@ -488,7 +495,7 @@ export function installContextCare(ctx, raw, compactionSource) {
       const visible = ctx.tools.get('context_rest', agent)
       if (visible !== undefined && visible !== contextRestTool) return decision
     }
-    const restRequest = decision.messages.find(message => message.source.kind === 'plugin' && message.source.plugin === requestPlugin)
+    const restRequest = decision.messages.find(message => producedBy(message.source, requestPlugin))
     const requested = restRequest !== undefined
     let outcome
     let current
@@ -541,8 +548,9 @@ export function installContextCare(ctx, raw, compactionSource) {
     // messages 只是本轮新领取的输入,上一轮助手输出不在这里 —— 请求体里才有。
     // 所以这里不清理;见 request-rewrite.js 的 cleanLoopInBody。
 
+    // 轻微档一律提醒；严重档交给请求层硬清理，只有清理执行者不在时才在这里兜底提醒。
     const loop = detectLoop(agent.session)
-    if (loop !== undefined && !alreadyWarned(agent.session, loopPlugin)) {
+    if (loopNeedsReminder(loop, cleanupActive) && !alreadyWarned(agent.session, loopPlugin)) {
       messages.push(notice(loopPlugin, loopNoticeText(loop), 'Output loop detected'))
     }
 

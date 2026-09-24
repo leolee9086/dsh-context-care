@@ -1,5 +1,54 @@
 # 更新记录
 
+## v0.6.2
+
+三件事：修掉 0.1.7（V4 会话）里**消息根本发不出去**的问题；把循环判定合成一份并按严重度分层；
+补上两种新的退化形状。
+
+### 一、V4 会话里每轮都失败（致命）
+
+现象：在桌面版（0.1.7）里这个会话每一轮 5ms 就失败，报
+`format v4 message requires a producer-owned source kind`，会话日志一个字节都不写
+（被拒的那一行压根没落盘，所以文件 mtime 冻在失败那一刻）。
+
+原因：V4 起消息源由生产者拥有，退役的 `{ kind: 'plugin', plugin }` 包装在会话准入处被直接拒绝
+（`packages/session/session-format-v3-to-v4/src/message-sources.ts` 的 `assertV4SourceRowAdmission`）。
+本插件在 `agent/pre-step` 注入状态通知时一直用那个包装 —— 于是只要一注入，整轮就死。
+
+改法：新增 `src/producer-source.js`。发出的 kind 与 V3→V4 迁移对本插件历史的改写**逐字相同**
+（未知生产者 `plugin:<原名>`、`compact` → `compact-checkpoint`），读取侧新旧两种写法都认，
+所以迁移前后的事件只有一套判据。发射点（`index.js` 的 notice、`activate.js`、`notice-rules.js`、
+`deep-rest.js`）与读取点（`previousState`、`projection`、`selection`、`loop-guard`、`activate`）全部改过。
+
+### 二、循环判定合成一份，并按严重度分层
+
+以前两张表各自成表（`loop-guard.js` 的 detectLoop 与 `loop-clean.js` 的 PATTERNS），后果实测：
+2026-09-25 她的会话里 217 条助手回复，「好。/做。/输出。」轮转最凶的那几轮（单行占尾巴 50%）
+**一条都没提醒过** —— 单行够门槛时占比不够，靠行的性质认的 filler-lines 又只清不报。
+
+现在判定只有一份（`src/loop-patterns.js`），处置按**这一轮的占比**分层：
+
+- **轻微** → 提醒。稀疏轮转、行首单调这类内容还带着信息，切掉是损失。
+- **严重** → 交给请求层硬清理。重复占满尾巴（≥70%）或填充行占半数以上，才是纯噪声。
+- **清理执行者不在时，严重档也必须提醒**：清理挂在 fetch-router 的 `requestRewrite` 服务上，
+  它没装/没启用就没有执行者，那就只能报 —— 不能既不清也不说（`loopNeedsReminder(hit, cleanupActive)`）。
+- 两者互斥：清了就不再提醒，否则模型被叫去找一段已经不存在的文本。
+
+### 三、两种新的退化形状（都是轻微档）
+
+- `line-cycle`：短句轮转（「看代码。/写测试。/跑一遍。」），任何单行都到不了 15 次，旧判据永远看不见。
+- `prefix-monotony`：每一行都以同一个短前缀开头（「嗯，……」）。只提醒、不清理 —— 那些行是带内容的。
+
+顺带修掉一个门槛错误：`MIN_LINE_LEN` 曾是 3，而循环体本身常是两个字（「好。」「做。」），
+等于把循环本体滤掉。围栏行另有 `FENCE_LINE` 单管，所以放到 2。
+
+### 验证
+
+- 全量测试 **139 项通过**（新增 `loop-patterns.test.js` 12 项、`producer-source.test.js` 4 项；
+  `loop-clean.test.js` 补了"轻微档提醒 / 严重档在有执行者时不提醒、无执行者时提醒"的契约）。
+- 真机会话复验：217 条助手回复命中 17 条（7.8%），全部落在 00:16–00:28 那几轮已知失控区间，
+  全部判为轻微档 → 提醒；正常回复零误报。
+
 ## v0.6.1
 
 修掉循环检测的一个误报：**代码围栏行不再参与统计**。

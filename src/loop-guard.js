@@ -1,8 +1,18 @@
 /**
  * 输出循环检测 —— 认出模型"卡带"式的退化输出，提醒它落盘并压缩。
  *
- * 什么算循环：助手某条回复的末尾一大段里，同一行反复出现几十次。
- * 实测样本（DeepSeek V4 Flash 失控时）长这样：
+ * 判定表在 loop-patterns.js（与请求层的清理共用同一份）：这里只管三件事 ——
+ * 从会话里取最近一条助手输出、决定要不要提醒、把提醒写成给模型看的话。
+ *
+ * **要不要提醒由严重度和清理执行者共同决定**（见 loop-patterns.js 开头）：
+ * 轻微档一律提醒；严重档本来交给请求层硬清理、不必再提醒，但清理要有执行者
+ * （fetch-router 的 `requestRewrite` 服务），执行者不在时严重档也清不掉 —— 那就得提醒。
+ * 判据是 {@link loopNeedsReminder}，它只看这两个输入，不自己去找服务。
+ *
+ * **提醒只在 agent 层**（由 index.js 的请求边界注入）：请求层的清理只是"这一次不把它发出去"，
+ * 模型看不见，所以清理不能替代提醒；要让模型自己改掉这个腔调，只有这条提醒能办到。
+ *
+ * 实测样本（DeepSeek V4 Flash 失控时）：
  *
  *     （输出。）
  *     **做。**
@@ -12,30 +22,20 @@
  *     go.
  *     …重复上百行
  *
- * 判据只看**末尾窗口内同一行的重复次数与占比**，不看具体内容 ——
- * 换一组词同样能认出来，也就不必维护什么关键词表。
+ * 以及 2026-09-25 的弱循环（隔着空行的短句轮转，单行永远到不了门槛）：
  *
- * 只做检测与措辞，不碰会话：注入由调用方（index.js 的请求边界）负责。
+ *     好。
+ *
+ *     做。
+ *
+ *     输出。
+ *     …
+ *
+ * 只做检测与措辞，不碰会话：注入由调用方负责。
  */
 
-/** 只看回复末尾这么多行 —— 循环总是拖在尾巴上。 */
-const WINDOW_LINES = 80
-/** 行数太少就不判：样本不足时任何比例都不可信。 */
-const MIN_LINES = 30
-/** 太短的行不参与统计（代码里的 `}`、空行之类天然会重复）。 */
-const MIN_LINE_LEN = 3
-/**
- * 代码围栏行（``` 或 ~~~ 开头，含带语言标记的形式）。
- *
- * 围栏行长度正好是 3，过得了 MIN_LINE_LEN；而写代码或文档时围栏天然成对出现 ——
- * 一段回复里十来个代码块就是二十来行 ```，正好撞上 REPEAT_THRESHOLD 与 REPEAT_RATIO。
- * 那是正常写作，不是循环，所以围栏行一律不参与统计。
- */
-const FENCE_LINE = /^(`{3,}|~{3,})[\w+-]*$/
-/** 同一行在窗口里出现这么多次才算循环。 */
-const REPEAT_THRESHOLD = 15
-/** 同时还要占够窗口的比例，避免把"正常但啰嗦"的输出也判成循环。 */
-const REPEAT_RATIO = 0.2
+import { producedBy } from './producer-source.js'
+import { describeHit, detectDegradation } from './loop-patterns.js'
 
 /**
  * 取会话里最近一条助手回复的全部文本（思考块 + 正文块）。
@@ -69,35 +69,36 @@ function latestAssistantText(session) {
 /**
  * 检查最近的助手回复是不是退化成循环了。
  *
+ * 这是**纯判定**：命中什么就返回什么，不替调用方决定提不提醒 ——
+ * 提醒与否还取决于清理执行者在不在，见 {@link loopNeedsReminder}。
+ *
  * @param {object} session 当前会话
- * @returns {{ line: string, count: number, total: number, ratio: number }|undefined}
- *   命中时返回那行内容与统计；没命中返回 undefined
+ * @returns {object|undefined} 命中信息（形状见 loop-patterns.js）；没命中返回 undefined
  */
 export function detectLoop(session) {
   const text = latestAssistantText(session)
   if (text === undefined) return undefined
+  return detectDegradation(text)
+}
 
-  const lines = text.split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line.length >= MIN_LINE_LEN && !FENCE_LINE.test(line))
-  if (lines.length < MIN_LINES) return undefined
-
-  const tail = lines.slice(-WINDOW_LINES)
-  const counts = new Map()
-  for (const line of tail) counts.set(line, (counts.get(line) ?? 0) + 1)
-
-  let worstLine = ''
-  let worstCount = 0
-  for (const [line, count] of counts) {
-    if (count > worstCount) {
-      worstLine = line
-      worstCount = count
-    }
-  }
-
-  const ratio = worstCount / tail.length
-  if (worstCount < REPEAT_THRESHOLD || ratio < REPEAT_RATIO) return undefined
-  return { line: worstLine, count: worstCount, total: tail.length, ratio }
+/**
+ * 这一轮的退化要不要提醒模型。
+ *
+ * 语义（2026-09-25 哥哥定）：
+ *   · 轻微档 —— 提醒。这类内容还带信息，不该被清掉，让模型自己看见、自己改腔调。
+ *   · 严重档 —— 交给请求层硬清理，**清了就不再提醒**：否则模型被叫去找一段
+ *     已经不存在的文本（房间里的大象）。但清理挂在 fetch-router 提供的
+ *     `requestRewrite` 服务上，服务不在就没有执行者 —— 那时严重档也清不掉，
+ *     所以必须提醒，不能既不清也不说。
+ *
+ * @param {object|undefined} hit `detectLoop` 的结果。
+ * @param {boolean} cleanupActive 请求层清理的执行者在不在（index.js 由 `ctx.inject(['requestRewrite'])` 维护）。
+ * @returns {boolean} 该不该注入提醒。
+ */
+export function loopNeedsReminder(hit, cleanupActive) {
+  if (hit === undefined) return false
+  if (hit.severity === 'mild') return true
+  return cleanupActive !== true
 }
 
 /**
@@ -105,8 +106,8 @@ export function detectLoop(session) {
  * 而模型真卡住时靠的是压缩，不是多喊几遍。
  *
  * @param {object} session 当前会话
- * @param {string} plugin 提醒消息的 source.plugin
- * @returns {boolean} 最近一条消息已经是本插件发的提醒时为 true
+ * @param {string} plugin 提醒消息的生产者名
+ * @returns {boolean} 最近一条 user 消息已经是本插件发的提醒时为 true
  */
 export function alreadyWarned(session, plugin) {
   const nodes = session?.surface?.nodes
@@ -115,7 +116,7 @@ export function alreadyWarned(session, plugin) {
     const event = session.eventAt(nodes[index])
     if (event?.type !== 'user/message') continue
     // 只看最后一条 user 消息：中间隔着别的消息就说明情况变了，该重新提醒。
-    return event.data?.source?.kind === 'plugin' && event.data?.source?.plugin === plugin
+    return producedBy(event.data?.source, plugin)
   }
   return false
 }
@@ -125,19 +126,18 @@ export function alreadyWarned(session, plugin) {
  *
  * 措辞要点：明确说这是**模型侧的退化、不是任务的错**，并给出两步可执行动作
  * （先落盘、再压缩）；顺序不能反 —— 压缩会带走细节，笔记必须先写。
+ * 具体命中了哪一种形状由 loop-patterns.js 的 describeHit 负责，
+ * 这里不重复判断模式，免得两处措辞各自漂移。
  *
- * @param {{ line: string, count: number, total: number, ratio: number }} hit 检测结果
+ * @param {object} hit 命中信息
  * @param {boolean} aborted 这次是不是已经在流式阶段中止了本轮响应 —— 是的话要说清楚
  *   「不是你自己停的」，否则模型会以为自己正常收尾了
  * @returns {string} 提醒正文
  */
 export function loopNoticeText(hit, aborted = false) {
-  const percent = Math.round(hit.ratio * 100)
-  const shown = hit.line.length > 40 ? `${hit.line.slice(0, 40)}…` : hit.line
   return [
     '<context-care>',
-    `检测到输出循环：最近一条回复里「${shown}」重复了 ${hit.count} 次，`
-      + `占末尾 ${hit.total} 行的 ${percent}%。`,
+    `检测到输出循环：${describeHit(hit)}。`,
     ...(aborted
       ? ['', '**本轮响应已经在生成过程中被中止**（不是你自己停下来的），以免继续刷屏。']
       : []),

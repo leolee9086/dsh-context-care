@@ -1,3 +1,5 @@
+import { isCheckpointSource, producedUnder } from './producer-source.js'
+
 /** Select a balanced prefix, retaining a recent tail and refusing summary-only recompression. */
 export function selectRestRange(session, measurement, retainTokens, minFreshTokens, pluginName) {
   const nodes = measurement.nodes
@@ -32,9 +34,8 @@ export function selectRestRange(session, measurement, retainTokens, minFreshToke
   for (let index = 0; index < keep; index++) {
     const event = session.eventAt(nodes[index].seq)
     if (!event) throw new Error('context-care: missing history event')
-    if (event.type === 'user/message' && ((event.data.source.kind === 'plugin' && event.data.source.plugin === 'compact')
-      || (event.data.source.kind === 'plugin' && (event.data.source.plugin === pluginName
-        || event.data.source.plugin.startsWith(`${pluginName}:`))))) continue
+    if (event.type === 'user/message' && (isCheckpointSource(event.data.source)
+      || producedUnder(event.data.source, `${pluginName}:`))) continue
     fresh += nodes[index].tokens
   }
   if (fresh < minFreshTokens) return null

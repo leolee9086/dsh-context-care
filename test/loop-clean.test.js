@@ -1,7 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { cleanTail, cleanMessage, cleanMessages, PATTERNS } from '../src/loop-clean.js'
-import { detectLoop } from '../src/loop-guard.js'
+import { detectLoop, loopNeedsReminder } from '../src/loop-guard.js'
+import { CLEANABLE_IDS } from '../src/loop-patterns.js'
 
 /** 造一段像真实循环的文本:前面正常,尾巴上同一行刷了几十遍。 */
 function loopingText() {
@@ -107,11 +108,12 @@ test('跟 loop-guard 串起来:检测到就清得掉', () => {
 })
 
 test('模式表是加模式的唯一入口', () => {
-  // 「打地鼠」的现实:只能一个个抓。结构要保证加一个模式只动 PATTERNS 一处。
-  assert.equal(PATTERNS.length, 2)
+  // 「打地鼠」的现实:只能一个个抓。结构要保证加一个模式只动两处:判定表(loop-patterns.js)
+  // 加一项并标 cleanable,这里加同名的清法。判定只有一份,所以这里不再各留一个 detect。
+  assert.deepEqual(PATTERNS.map(pattern => pattern.id), [...CLEANABLE_IDS])
+  assert.deepEqual(PATTERNS.map(pattern => pattern.id), ['line-repeat', 'filler-lines'])
   for (const pattern of PATTERNS) {
     assert.equal(typeof pattern.id, 'string')
-    assert.equal(typeof pattern.detect, 'function')
     assert.equal(typeof pattern.clean, 'function')
   }
 })
@@ -213,7 +215,7 @@ test('围栏外的填充行照清,围栏内的留着', () => {
 
 test('这次真的踩到的坑:第二轮循环的样本，旧判据抓不到、新判据抓得到', () => {
   // 2026-09-23 截图原样。它的问题在于「做。」只出现 8 次 ——
-  // loop-guard 的 detectLoop 要同一行 ≥ 15 次，所以返回 undefined。
+  // 旧 loop-guard 的 detectLoop 只认「同一行 ≥ 15 次」，所以返回 undefined。
   // 一开始我把清理挂在 detectLoop 里面，于是 filler-lines 永远没机会跑。
   const text = [
     '嗯，那么验证「篡改通路通不通」？',
@@ -237,10 +239,17 @@ test('这次真的踩到的坑:第二轮循环的样本，旧判据抓不到、�
     surface: { nodes: [1] },
     eventAt: () => ({ type: 'assistant/message', seq: 1, time: 0, data: { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'reasoning', text }] }, stream: [] } }),
   }
-  // 旧判据确实抓不到 —— 这就是当初漏掉的原因。
-  assert.equal(detectLoop(session), undefined)
+  // 2026-09-25 哥哥定的语义：清与报按**严重度**分，而且清理执行者不在时严重档也要报。
+  // 这段填充行占了 15 行里的 11 行（73%），是严重档。
+  const hit = detectLoop(session)
+  assert.equal(hit?.pattern, 'filler-lines')
+  assert.equal(hit?.severity, 'severe')
+  // 有执行者 → 交给请求层硬清理，不再提醒（提醒会让模型去找已经被清掉的文本）。
+  assert.equal(loopNeedsReminder(hit, true), false)
+  // 没有执行者（fetch-router 没装/没启用）→ 清不掉，必须提醒。
+  assert.equal(loopNeedsReminder(hit, false), true)
 
-  // 新判据抓得到。
+  // 清理照旧。
   const cleaned = cleanTail(text)
   assert.equal(cleaned.pattern, 'filler-lines')
   assert.ok(cleaned.removedLines > 0)
