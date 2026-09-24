@@ -157,6 +157,8 @@ export function createRequestRewriter({ rules, onRecord, journal }) {
           removedLines: loop?.removedLines,
           charsBefore: block.charsBefore,
           charsAfter: block.charsAfter,
+          removed: block.removed,
+          added: block.added,
         })
       }
     }

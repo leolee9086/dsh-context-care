@@ -107,9 +107,11 @@ test('属性表写不进去时退到进程内,且不抛', async () => {
 test('属性表与进程内合并去重', async () => {
   const store = {
     putAttribute: async () => 'id',
+    // 属性表里的 value 自带 sessionId（record 写入时就带），去重键靠它拼；
+    // 漏了它两条同哈希的记录会被当成不同会话，去重就形同虚设。
     listAttributes: async () => [
-      { value: { hash: 'same', pattern: 'p', removedLines: 1, charsBefore: 2, charsAfter: 1, at: 1 } },
-      { value: { hash: 'only-stored', pattern: 'p', removedLines: 1, charsBefore: 2, charsAfter: 1, at: 2 } },
+      { sessionId: 's1', value: { sessionId: 's1', hash: 'same', pattern: 'p', removedLines: 1, charsBefore: 2, charsAfter: 1, at: 1 } },
+      { sessionId: 's1', value: { sessionId: 's1', hash: 'only-stored', pattern: 'p', removedLines: 1, charsBefore: 2, charsAfter: 1, at: 2 } },
     ],
   }
   const journal = createRewriteJournal({ store: () => store })

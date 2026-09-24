@@ -78,6 +78,40 @@ export function textBlocksOf(message) {
   return blocks
 }
 
+/** 片段上限:卡片是给人扫一眼的,不是全文 diff。 */
+const SNIPPET_LIMIT = 80
+
+/**
+ * 取改动前后的差异片段。
+ *
+ * 掐掉公共前缀和后缀,中间那段就是这次改写真正动过的地方 ——
+ * 卡片要回答的是「改了什么」,字符数只说明「改了多少」。
+ * 纯插入/纯删除时其中一端会是空串,照实返回。
+ *
+ * @param {string} before 改写前的文本。
+ * @param {string} after 改写后的文本。
+ * @returns {{removed: string, added: string}} 截断后的差异片段。
+ */
+function diffSnippet(before, after) {
+  let head = 0
+  while (head < before.length && head < after.length && before[head] === after[head]) head += 1
+  let tailBefore = before.length
+  let tailAfter = after.length
+  while (tailBefore > head && tailAfter > head && before[tailBefore - 1] === after[tailAfter - 1]) {
+    tailBefore -= 1
+    tailAfter -= 1
+  }
+  return {
+    removed: clip(before.slice(head, tailBefore)),
+    added: clip(after.slice(head, tailAfter)),
+  }
+}
+
+/** 片段过长时截断,保留开头 —— 改动的形状通常在开头就看得出来。 */
+function clip(text) {
+  return text.length <= SNIPPET_LIMIT ? text : text.slice(0, SNIPPET_LIMIT) + '…'
+}
+
 /**
  * 找出清理前后真正变了的块,给每个算哈希。
  *
@@ -86,7 +120,7 @@ export function textBlocksOf(message) {
  *
  * @param {object[]} before 清理前的 messages。
  * @param {object[]} after 清理后的 messages。
- * @returns {Array<{hash: string, charsBefore: number, charsAfter: number}>} 变化的块。
+ * @returns {Array<{hash: string, charsBefore: number, charsAfter: number, removed: string, added: string}>} 变化的块。
  */
 export function changedBlocks(before, after) {
   const changed = []
@@ -102,10 +136,13 @@ export function changedBlocks(before, after) {
     for (const block of textBlocksOf(original)) {
       const counterpart = afterBlocks.find(candidate => candidate.index === block.index)
       if (counterpart === undefined || counterpart.text === block.text) continue
+      const snippet = diffSnippet(block.text, counterpart.text)
       changed.push({
         hash: contentHash(block.text),
         charsBefore: block.text.length,
         charsAfter: counterpart.text.length,
+        removed: snippet.removed,
+        added: snippet.added,
       })
     }
   }
@@ -152,6 +189,8 @@ export function createRewriteJournal({ store, warn = () => {} }) {
           removedLines: entry.removedLines,
           charsBefore: entry.charsBefore,
           charsAfter: entry.charsAfter,
+          removed: entry.removed,
+          added: entry.added,
           at: entry.at ?? Date.now(),
         },
         origin: 'plugin',

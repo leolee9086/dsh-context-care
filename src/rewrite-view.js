@@ -73,6 +73,34 @@ export function createRewriteDefinition() {
   }
 }
 
+/** 片段里的换行在卡片上会撑开行高，换成可见记号保持单行。 */
+function oneLine(text) {
+  return text.replace(/\n/g, '↵')
+}
+
+/**
+ * 改动片段：去掉的用 −，换成的用 +。
+ *
+ * 只报字符数等于只说「有事发生」——这里回答的是「改了什么」。
+ * 纯插入或纯删除时其中一端为空，就只画有内容的那一行。
+ */
+function snippetRows(hit) {
+  const rows = []
+  const removed = typeof hit.removed === 'string' ? hit.removed : ''
+  const added = typeof hit.added === 'string' ? hit.added : ''
+  if (removed.length > 0) {
+    rows.push(React.createElement('div', {
+      key: 'removed', style: { color: 'var(--dsw-alias-state-error-primary)' },
+    }, '− ' + oneLine(removed)))
+  }
+  if (added.length > 0) {
+    rows.push(React.createElement('div', {
+      key: 'added', style: { color: 'var(--dsw-alias-state-success-primary)' },
+    }, '+ ' + oneLine(added)))
+  }
+  return rows
+}
+
 /** 记录通过框架生成的 hook 到达，不要求重新折叠会话历史。 */
 export function RewriteNodeView({ node, sessionId, useRewriteRecords, t }) {
   // 选择器是必需参数：不传就等价于让 uSES 调用 undefined，渲染器会被判崩溃而退役。
@@ -94,5 +122,6 @@ export function RewriteNodeView({ node, sessionId, useRewriteRecords, t }) {
     (hit.pattern ?? t('rewriteUnknown')) + ' · ' + hit.charsBefore + ' → ' + hit.charsAfter + ' ' + t('rewriteChars'),
     Number.isSafeInteger(hit.removedLines)
       ? ' · ' + t('rewriteRemoved') + ' ' + hit.removedLines + ' ' + t('rewriteLines') : '',
+    ...snippetRows(hit),
   )))
 }

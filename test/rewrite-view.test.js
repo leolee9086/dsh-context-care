@@ -112,6 +112,8 @@ test('RewriteNodeView renders a record only for the matching session and hash', 
     pattern: 'probe-request-rewrite',
     charsBefore: 75,
     charsAfter: 71,
+    removed: '去掉的片段',
+    added: '换成的片段',
   }
   const hit = renderNode(node, new Map([['session-a:' + hash, record]]))
 
@@ -119,7 +121,11 @@ test('RewriteNodeView renders a record only for the matching session and hash', 
   assert.equal(hit.type, 'div')
   assert.equal(hit.props.className, 'dsh-context-care-rewrite')
   assert.equal(hit.props.children[0].props.children, '[rewriteTitle]')
-  assert.match(String(hit.props.children[1].props.children), /probe-request-rewrite · 75 → 71/)
+  const texts = hit.props.children[1].props.children
+    .map(row => typeof row === 'object' ? String(row.props?.children) : String(row))
+  assert.ok(texts.some(text => /probe-request-rewrite · 75 → 71/.test(text)))
+  // 改动片段画成什么样不在这里断言 —— 手工构造记录再断言拼串只能证明字段名没拼错。
+  // 两侧对接由 scripts/verify-rewrite-card-e2e.mjs 用索引插件的真实库验证。
   assert.equal(renderNode(node, new Map([['session-b:' + hash, record]])), null)
   assert.equal(renderNode(node, new Map()), null)
 })

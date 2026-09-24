@@ -212,21 +212,7 @@ export function installContextCare(ctx, raw, compactionSource) {
       // 跟提醒规则共用一个服务:规则里用 placement 区分它该在哪一层生效。
       rules: () => {
         const rules = ctx.get('memoryNoticeRules')
-        const base = rules === undefined || rules === null ? [] : rules
-        // 【临时探针 2026-09-24】验证「请求改写 → 界面卡片」这条链路。
-        // 找到一个独一家的标记(不会碰到任何常见词 —— 改写改的是模型可见内容,
-        // 规则太宽会把我自己的上下文改乱),把它换成另一个。验证完删掉这一段。
-        return [...base, {
-          id: 'probe-request-rewrite',
-          order: 999,
-          placement: ['request'],
-          when: { findRegex: '/\\[\\[REWRITE-PROBE\\]\\]/g', replaceString: '[[REWRITTEN]]' },
-          action: { kind: 'transform' },
-          // maxCacheLoss 是 0~1 的比例,不是字节数 —— 写错会被引擎拒掉,
-          // 而那个错现在会经改写通道直接让请求失败(见 fetch-router 的 2026-09-24 记录),
-          // 不再被静默跳过,所以这里给 1(=不限制)。
-          budget: { maxCacheLoss: 1 },
-        }]
+        return rules === undefined || rules === null ? [] : rules
       },
       // 改写记录必须交给改写器,否则被改过的文本在界面上看不出来 ——
       // 卡片认的是内容哈希,哈希只有改写器算得出来。
