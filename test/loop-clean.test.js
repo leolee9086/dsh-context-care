@@ -29,11 +29,11 @@ test('十条短填充行就该判 —— filler-lines 的门槛比 line-repeat �
   assert.equal(cleaned.removedLines, 10)
 })
 
-test('循环文本被截断并留下说明', () => {
+test('循环文本被截断,不再留"已清理"标记', () => {
   const cleaned = cleanTail(loopingText())
   assert.ok(cleaned.removedLines > 0)
   assert.match(cleaned.text, /先读 surface 的实现/)
-  assert.match(cleaned.text, /已清理/)
+  assert.equal(cleaned.text.includes('已清理'), false)
   assert.equal(cleaned.text.includes('（做。）'), false)
   assert.equal(cleaned.pattern, 'line-repeat')
 })
@@ -76,7 +76,7 @@ test('cleanMessages 只清最后一条助手消息', () => {
   assert.ok(result.removedLines > 0)
   assert.equal(result.index, 1)
   assert.equal(result.pattern, 'line-repeat')
-  assert.match(result.messages[1].content[0].text, /已清理/)
+  assert.equal(result.messages[1].content[0].text.includes('已清理'), false)
   assert.equal(messages[1].content[0].text.includes('已清理'), false)
 })
 
@@ -101,7 +101,7 @@ test('跟 loop-guard 串起来:检测到就清得掉', () => {
   const cleaned = cleanMessages(messages)
   assert.ok(cleaned.removedLines > 0)
   assert.equal(cleaned.index, 1)
-  assert.match(cleaned.messages[1].content[0].text, /已清理/)
+  assert.equal(cleaned.messages[1].content[0].text.includes('已清理'), false)
   // 原文不动 —— 日志里那份还在。
   assert.equal(message.content[0].text.includes('已清理'), false)
 })
@@ -139,7 +139,7 @@ test('第二个真实样本:填充行成片出现，靠行的性质认出来', (
   assert.equal(cleaned.pattern, 'filler-lines')
   assert.ok(cleaned.removedLines > 0)
   assert.equal(cleaned.text.includes('做。'), false)
-  assert.match(cleaned.text, /已清理/)
+  assert.equal(cleaned.text.includes('已清理'), false)
   // 承载信息的那两行留着。
   assert.match(cleaned.text, /先记忆 \+ 落盘/)
   assert.match(cleaned.text, /一次做完/)

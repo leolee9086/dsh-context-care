@@ -5,11 +5,15 @@ export const dictionaries = {
     fatigue: '疲劳度', wakefulness: '唤醒值', unknown: '未校准', low: '低', normal: '正常',
     elevated: '较高', high: '高', 'very-high': '很高',
     waiting: '等待首次状态', description: '最近一次请求准备时的负荷与保留信息量估算；不是记忆可靠性判断，也不是任务时限。',
+    rewriteTitle: '请求改写', rewriteRemoved: '去掉', rewriteLines: '行重复内容',
+    rewriteUnknown: '未记录', rewriteChars: '字符',
   },
   en: {
     fatigue: 'Fatigue', wakefulness: 'Wakefulness', unknown: 'Uncalibrated', low: 'Low', normal: 'Normal',
     elevated: 'Elevated', high: 'High', 'very-high': 'Very high',
     waiting: 'Awaiting first sample', description: 'Load and retained-information estimates at the latest request preparation; not a memory-quality diagnosis or a task deadline.',
+    rewriteTitle: 'Request rewrite', rewriteRemoved: 'removed', rewriteLines: 'repeated lines',
+    rewriteUnknown: 'not recorded', rewriteChars: 'characters',
   },
 }
 

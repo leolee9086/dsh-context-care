@@ -11,7 +11,7 @@
   "exports": { ".": "./src/host.js", "./agent": "./src/index.js", "./activate": "./src/activate.js", "./client": "./lib/client.js", "./package.json": "./package.json" },
   "dsh": { "client": { "platform": "web", "inject": ["@deepseek-ai/dsh-client-ui-conversation", "@deepseek-ai/dsh-client-locale"] } },
   "files": ["src", "lib", "cordis.patch.yml", "README.md", "DESIGN.md", "CHANGELOG.md", "agent.example.cordis.yml"],
-  "scripts": { "build": "tsdown", "test": "node --test test/activate.test.js test/client.test.js test/context-care.test.js test/dependencies.test.js test/general.test.js test/stream-watch.test.js", "test:integration": "node --test test/integration.test.js", "check": "node --check src/index.js && node --check src/host.js" },
+  "scripts": { "build": "tsdown", "test": "node --test test/activate.test.js test/client.test.js test/context-care.test.js test/dependencies.test.js test/rewrite-view.test.js test/stream-watch.test.js", "test:integration": "node --test test/integration.test.js", "check": "node --check src/index.js && node --check src/host.js" },
   "dependencies": { "zod": "^4.4.3", "react": "^18.3.1", "@leolee9086/dsh-rule-engine": "^0.1.0" },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.2",

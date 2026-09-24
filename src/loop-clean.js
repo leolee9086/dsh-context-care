@@ -9,13 +9,11 @@
 // 这边是事后的清理。两处的模式表早晚该合成一份,现在先各自成表。
 //
 // 改的是这一轮组装好的 messages,**不是日志** —— 原文留在会话日志里,随时查得回来;
-// 清理只是"这一次不把它发出去"。
+// 清理只是"这一次不把它发出去"。执行点在 fetch-router 的请求改写通道
+// (见 request-rewrite.js):pre-step 够不着上一轮的助手输出,请求体里才有。
 //
-// 为什么不替换 surface 节点:pre-step 跑在 step/start **之前**,而 core/session 的
-// invariant 要求 assistant/message 处在 open step 内(requireOpenStep)。那条路会被拒。
-
-/** 清理后补的那行说明。模型需要知道这里被处理过,否则看到的是一段突然中断的思考。 */
-const CLEANED_MARK = '（这里原本有一段重复输出，已清理）'
+// **清理不往模型可见内容里放任何标记**(2026-09-23 哥哥定的):模型看到的
+// 就是干净的截断内容,不用知道"这里被清理过";要让人知道,走 UI 记录那条路。
 
 /** 只看末尾这么多行 —— 循环总是拖在尾巴上。 */
 const TAIL_LINES = 80
@@ -196,7 +194,8 @@ export function cleanTail(text) {
     const lines = source.split('\n').length
     const keptLines = kept.length === 0 ? 0 : kept.split('\n').length
     return {
-      text: kept.length === 0 ? CLEANED_MARK : `${kept}\n${CLEANED_MARK}`,
+      // 不给模型留"已清理"的标记(哥哥 2026-09-23 定的) —— 看到的就是干净截断。
+      text: kept,
       removedLines: lines - keptLines,
       pattern: hit.pattern,
     }

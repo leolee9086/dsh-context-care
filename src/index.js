@@ -5,13 +5,13 @@ import { contextCareProjection } from './projection.js'
 import { selectClearRange, selectRestRange } from './selection.js'
 import { clearRange } from './deep-rest.js'
 import { alreadyWarned, detectLoop, loopNoticeText } from './loop-guard.js'
-import { LOOP_CLEAN_EVENT, loopCleanProjection, pendingLoopClean } from './loop-clean-projection.js'
 import { createStreamWatch } from './stream-watch.js'
 import { installNoticeRules } from './notice-rules.js'
 import { NOTICE_CHANNEL, sharedNoticeChannel } from './notice-channel.js'
 import { lastAssistantMessage, lastAssistantText, lastUserMessage, textOf } from './prompt-text.js'
 import { createRequestRewriter, REWRITER_NAME } from './request-rewrite.js'
 import { createTransformLog } from './transform-log.js'
+import { createRewriteJournal } from './rewrite-journal.js'
 
 export const name = 'dsh-context-care'
 export const inject = ['agents', 'sessions', 'tools', 'systemPrompt', 'tokenMeter', 'llm', 'compaction', 'sessionProjections']
@@ -160,6 +160,12 @@ export function installContextCare(ctx, raw, compactionSource) {
   // 写进会话日志的 log-only 事件:模型看不到,但持久、可回放、能推给界面。
   // 为什么这么做见 transform-log.js 的头注释。
   const transformLog = createTransformLog({ ctx })
+  // 改写记录:会话日志之外的旁路。索引插件的属性表在就落它那里(持久、可与块索引 JOIN),
+  // 不在就只在进程内。服务名是索引插件自己的,这里现取 —— 它可能晚于本插件注册。
+  const rewriteJournal = createRewriteJournal({
+    store: () => ctx.get('sessionBlockQuery'),
+    warn: message => ctx.logger.warn(message),
+  })
   /** 两个来源的命中都记到一处,面板和排查都只看这一张表。 */
   const recordHit = (layer, record, where) => transformLog.record({
     sessionId: where.sessionId,
@@ -186,25 +192,15 @@ export function installContextCare(ctx, raw, compactionSource) {
     ctx.provide(NOTICE_CHANNEL, { register: noticeChannel.register })
   }
 
-  // ---------------------------------------------------------- 循环清理的投影
+  // ---------------------------------------------------------- 循环清理
   //
-  // 循环清理不是一个"直接改请求体"的动作,而是一条持久决策 + 一个纯投影:
-  // 决策事件记下"哪条助手输出的尾巴是循环",投影在 fold 时把那条消息的
-  // 模型可见内容换成清理版。为什么要这么绕,见 loop-clean-projection.js 的头注释
-  // (根因:pre-step 的 messages 里根本没有助手消息,原来那段清理够不着)。
-  //
-  // 两个入口(root 的 host.js 和 agent 作用域的 index.js)都会跑到这里,
-  // 而同一个 type 注册两次会抛 already registered —— 先看有没有,有就不再注册。
-  // 跟上面通知通道的双注册是同一个坑。
-  if (!ctx.sessions.messageProjections.some(item => item.type === LOOP_CLEAN_EVENT)) {
-    ctx.sessions.registerMessageProjection(loopCleanProjection)
-  }
-  // 注册后记一条,真机上能直接确认投影在不在 —— 修复的成败第一步就是它。
-  if (ctx.sessions.messageProjections.some(item => item.type === LOOP_CLEAN_EVENT)) {
-    ctx.logger.info('context-care: 循环清理投影已注册 (context-care/loop-clean)')
-  } else {
-    ctx.logger.warn('context-care: 循环清理投影注册失败 —— 后续 loop-clean 决策事件会被日志拒绝')
-  }
+  // 输出循环的清理改在**请求层**执行(2026-09-23):执行点就是下面 requestRewrite
+  // 登记的那个改写器 —— 请求体里就是完整 messages,上一轮助手输出在里面,
+  // 这正是 pre-step 够不着的部分。清理不写任何会话事件:
+  // 自定义事件被 DSH 读侧校验否决(重启拒载),而且清理本来也不需要事件 ——
+  // 它只是"这一次不把循环发出去",日志原文不动。
+  // 判定逻辑在 loop-clean.js(模式表);loop-clean-projection.js 的 pendingLoopClean
+  // 保留但已不再被引用;投影注册不再需要 —— 投影靠决策事件驱动,没有事件就没载体。
 
   // ---------------------------------------------------------- 请求层篡改
   //
@@ -216,8 +212,25 @@ export function installContextCare(ctx, raw, compactionSource) {
       // 跟提醒规则共用一个服务:规则里用 placement 区分它该在哪一层生效。
       rules: () => {
         const rules = ctx.get('memoryNoticeRules')
-        return rules === undefined || rules === null ? [] : rules
+        const base = rules === undefined || rules === null ? [] : rules
+        // 【临时探针 2026-09-24】验证「请求改写 → 界面卡片」这条链路。
+        // 找到一个独一家的标记(不会碰到任何常见词 —— 改写改的是模型可见内容,
+        // 规则太宽会把我自己的上下文改乱),把它换成另一个。验证完删掉这一段。
+        return [...base, {
+          id: 'probe-request-rewrite',
+          order: 999,
+          placement: ['request'],
+          when: { findRegex: '/\\[\\[REWRITE-PROBE\\]\\]/g', replaceString: '[[REWRITTEN]]' },
+          action: { kind: 'transform' },
+          // maxCacheLoss 是 0~1 的比例,不是字节数 —— 写错会被引擎拒掉,
+          // 而那个错现在会经改写通道直接让请求失败(见 fetch-router 的 2026-09-24 记录),
+          // 不再被静默跳过,所以这里给 1(=不限制)。
+          budget: { maxCacheLoss: 1 },
+        }]
       },
+      // 改写记录必须交给改写器,否则被改过的文本在界面上看不出来 ——
+      // 卡片认的是内容哈希,哈希只有改写器算得出来。
+      journal: rewriteJournal,
       onRecord(record, where) {
         recordHit('request', record, where)
         if (record.outcome !== 'applied') {
@@ -538,36 +551,9 @@ export function installContextCare(ctx, raw, compactionSource) {
     }
     const messages = [...decision.messages]
 
-    // 输出循环的清理:改的是**已经落在 surface 上的那条助手输出**。
-    // 在这里改 decision.messages 是够不着的 —— pre-step 拿到的 messages 是本轮
-    // 新领取的输入(全是 user 角色),上一轮的助手输出不在里面。
-    // 做法是落一条决策事件,由上面注册的纯投影把那条消息的模型可见内容换成
-    // 清理版:日志原文不动,随后的 deriveMessages() 拿到的就是干净的。
-    //
-    // 清理与提醒是两件事,判据也不同,别串在一起:
-    //   · 清理由 loop-clean 自己的模式表判 —— 门槛低(filler-lines 只要 5 行),
-    //     因为它只删自己认得出来的那些行,误杀面小;
-    //   · 提醒仍用 loop-guard 的 detectLoop(同一行重复 ≥ 15 次)——那是明确的严重退化,
-    //     值得打断模型让它落盘。
-    const loopClean = pendingLoopClean(agent.session)
-    if (loopClean !== undefined) {
-      try {
-        agent.session.append(LOOP_CLEAN_EVENT, {
-          targets: [{ seq: loopClean.seq, ruleId: loopClean.ruleId }],
-        })
-        transformLog.record({
-          sessionId: agent.session?.id,
-          layer: 'loop',
-          ruleId: `loop-clean:${loopClean.ruleId}`,
-          outcome: 'applied',
-          detail: `seq ${loopClean.seq} 去掉 ${loopClean.removedLines} 行`,
-        })
-        ctx.logger.info(`context-care: 循环清理命中 seq ${loopClean.seq},去掉 ${loopClean.removedLines} 行 (${loopClean.ruleId})`)
-      } catch (error) {
-        // 清理落不下去不该毁掉这次请求,但必须有记录 —— 不静默。
-        ctx.logger.warn(`context-care: 循环清理没能落进会话日志: ${error instanceof Error ? error.message : String(error)}`)
-      }
-    }
+    // 输出循环的清理改在**请求层**(requestRewrite 改写器)执行:pre-step 拿到的
+    // messages 只是本轮新领取的输入,上一轮助手输出不在这里 —— 请求体里才有。
+    // 所以这里不清理;见 request-rewrite.js 的 cleanLoopInBody。
 
     const loop = detectLoop(agent.session)
     if (loop !== undefined && !alreadyWarned(agent.session, loopPlugin)) {
@@ -583,4 +569,8 @@ const text = renderState(current.state, outcome)
     messages.push(notice(statePlugin, text, 'Context state', current.state))
     return { ...decision, messages }
   }, { prepend: true })
+
+  // 交给 host 入口去注册路由 —— 客户端卡片靠它拿到「哪些内容被改写过」。
+  // 记录本身与路由分开:记录在改写路径上,路由是纯读取。
+  return { rewriteJournal }
 }

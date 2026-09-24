@@ -85,3 +85,60 @@ test('不同接口各记各的上一次', async () => {
   assert.equal(records[0].loss, 1)
   assert.equal(records[1].loss, 1)
 })
+
+test('循环清理:请求体里最后一条助手消息的循环尾巴被清掉', async () => {
+  const records = []
+  const rewrite = createRequestRewriter({ rules: () => [], onRecord: record => records.push(record) })
+  // 30 行重复长句 —— line-repeat 模式(阈值 15 行、窗口比例 20%)。
+  // 不能用 '做。'(2 字符):MIN_LINE_LEN=3 够不到,反而会被 filler-lines 整段删光。
+  const loopTail = '继续做这件事。\n'.repeat(30)
+  const body = JSON.stringify({
+    model: 'deepseek-v4',
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: '继续' }] },
+      { role: 'assistant', content: [{ type: 'text', text: '好的。\n' + loopTail }] },
+    ],
+  })
+  const next = await rewrite({ body, url: 'https://api.deepseek.com/chat/completions' })
+  assert.equal(typeof next, 'string')
+  const parsed = JSON.parse(next)
+  const last = parsed.messages[parsed.messages.length - 1]
+  // 循环尾巴被清掉,而且不再有 CLEANED_MARK(模型可见内容里不留"已清理"的痕迹)。
+  assert.equal(last.content[0].text.includes('做。'), false)
+  assert.equal(last.content[0].text.includes('已清理'), false)
+  // 有记录,且走的是 loop-clean 通道。
+  assert.equal(records.some(r => r.ruleId === 'loop-clean:line-repeat'), true)
+})
+
+test('循环清理:没有循环时不改 body', async () => {
+  const records = []
+  const rewrite = createRequestRewriter({ rules: () => [], onRecord: record => records.push(record) })
+  const body = JSON.stringify({
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: '继续' }] },
+      { role: 'assistant', content: [{ type: 'text', text: '正常的回答。' }] },
+    ],
+  })
+  assert.equal(await rewrite({ body, url: 'https://api.deepseek.com/chat/completions' }), undefined)
+  assert.equal(records.length, 0)
+})
+
+test('循环清理:body 不是 JSON 时不动', async () => {
+  const rewrite = createRequestRewriter({ rules: () => [], onRecord: () => {} })
+  assert.equal(await rewrite({ body: 'not json', url: 'https://api.example.com/v1/chat' }), undefined)
+})
+
+test('循环清理:引擎规则和循环清理同时命中时都生效', async () => {
+  const rewrite = createRequestRewriter({ rules: () => [requestRule()], onRecord: () => {} })
+  const loopTail = '做。\n'.repeat(30)
+  const body = JSON.stringify({
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: 'secret' }] },
+      { role: 'assistant', content: [{ type: 'text', text: '好的。\n' + loopTail }] },
+    ],
+  })
+  const next = await rewrite({ body, url: 'https://api.deepseek.com/chat/completions' })
+  const parsed = JSON.parse(next)
+  assert.equal(parsed.messages[0].content[0].text, '[已隐藏]')
+  assert.equal(parsed.messages[1].content[0].text.includes('做。'), false)
+})
