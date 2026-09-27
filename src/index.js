@@ -544,6 +544,34 @@ export function installContextCare(ctx, raw, compactionSource) {
     }
     const messages = [...decision.messages]
 
+    // 提示规则:别的插件声明「什么情况下该提醒模型做什么」(memoryNoticeRules),
+    // 判定与发起都在这里。规则没跑起来不该毁掉整个请求,但也不能静默 —— 记 warn。
+    // 读 decision.messages 而不是 messages:底下要拿的是"本轮领取的输入",
+    // 不该把上面刚注进去的东西再扫一遍。
+    try {
+      for (const ruleMessage of noticeRules.collect({ agent, messages: decision.messages })) messages.push(ruleMessage)
+    } catch (error) {
+      ctx.logger.warn(`context-care: 提示规则没有跑起来: ${error instanceof Error ? error.message : String(error)}`)
+    }
+
+    // 通知通道:别的插件有话要告诉模型(索引插件的被动召回就走这里),在这一边界问一遍、注入。
+    try {
+      const userMessage = lastUserMessage(decision.messages)
+      const assistantMessage = lastAssistantMessage(decision.messages)
+      const notices = await noticeChannel.collect({
+        agentId: agent.id,
+        userText: userMessage === undefined ? '' : textOf(userMessage),
+        assistantText: assistantMessage === undefined ? lastAssistantText(agent.session) : textOf(assistantMessage),
+        signal,
+      })
+      for (const incoming of notices) {
+        messages.push(notice(`${name}:notice:${incoming.source}`, incoming.text,
+          incoming.summary ?? `Notice from ${incoming.source}`))
+      }
+    } catch (error) {
+      ctx.logger.warn(`context-care: 通知通道没有跑起来: ${error instanceof Error ? error.message : String(error)}`)
+    }
+
     // 输出循环的清理改在**请求层**(requestRewrite 改写器)执行:pre-step 拿到的
     // messages 只是本轮新领取的输入,上一轮助手输出不在这里 —— 请求体里才有。
     // 所以这里不清理;见 request-rewrite.js 的 cleanLoopInBody。

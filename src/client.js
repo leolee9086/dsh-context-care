@@ -1,5 +1,6 @@
 import { ContextCareStatus, dictionaries } from './client-view.js'
 import { REWRITE_NODE, RewriteNodeView, createRewriteDefinition } from './rewrite-view.js'
+import { NOTICE_NODE, NoticeNodeView, createNoticeDefinition } from './notice-view.js'
 
 export const inject = ['slots', 'locale', 'uiConversation']
 
@@ -55,6 +56,12 @@ export function apply(ctx) {
   void load()
   const timer = setInterval(() => { void load() }, POLL_MS)
   ctx.effect(() => () => { disposed = true; clearInterval(timer); listeners.clear() })
+
+  // 注入通知:宿主把这些消息归到折叠的上下文行,而它们是人需要逐条看到的内容。
+  ctx.effect(() => ctx.uiConversation.events.register(createNoticeDefinition()))
+  ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
+    name: 'conversation.chat.node', key: NOTICE_NODE, locale: 'dsh-context-care',
+  }, NoticeNodeView))
 
   ctx.effect(() => ctx.uiConversation.events.register(createRewriteDefinition()))
   ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({

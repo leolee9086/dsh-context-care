@@ -7,6 +7,9 @@ export const dictionaries = {
     waiting: '等待首次状态', description: '最近一次请求准备时的负荷与保留信息量估算；不是记忆可靠性判断，也不是任务时限。',
     rewriteTitle: '请求改写', rewriteRemoved: '去掉', rewriteLines: '行重复内容',
     rewriteUnknown: '未记录', rewriteChars: '字符',
+    noticeTitle: '上下文照料', noticeUnknown: '未知来源',
+    noticeSubState: '状态', noticeSubRequest: '请求改写', noticeSubLoop: '循环清理',
+    noticeSubWatch: '流式提醒', noticeSubRules: '规则',
   },
   en: {
     fatigue: 'Fatigue', wakefulness: 'Wakefulness', unknown: 'Uncalibrated', low: 'Low', normal: 'Normal',
@@ -14,6 +17,9 @@ export const dictionaries = {
     waiting: 'Awaiting first sample', description: 'Load and retained-information estimates at the latest request preparation; not a memory-quality diagnosis or a task deadline.',
     rewriteTitle: 'Request rewrite', rewriteRemoved: 'removed', rewriteLines: 'repeated lines',
     rewriteUnknown: 'not recorded', rewriteChars: 'characters',
+    noticeTitle: 'Context care', noticeUnknown: 'unknown producer',
+    noticeSubState: 'state', noticeSubRequest: 'request rewrite', noticeSubLoop: 'loop cleanup',
+    noticeSubWatch: 'stream watch', noticeSubRules: 'rule',
   },
 }
 

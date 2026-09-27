@@ -328,3 +328,60 @@ test('真实循环仍然认得出：同一行反复出现', () => {
   assert.equal(hit.line, 'go.')
   assert.equal(hit.count, 60)
 })
+
+// ── 跨插件接线的端到端验证 ────────────────────────────────────────────
+//
+// 这两条测的是「别的插件声明的东西，真的会进这一轮的 messages 吗」。
+// 它们存在的原因：那段接线曾经被删掉过（cc39d99），而当时代码注释、契约、错误文案
+// 全都还在，测试却一条都没覆盖 —— 于是删了没人知道，直到有人发现被动召回不再触发。
+
+test('提示规则接线：索引插件声明的规则命中后，进这一轮的 messages', async () => {
+  const m = await mounted()
+  // 真实部署里这行是索引插件做的（ctx.provide('memoryNoticeRules', NOTICE_RULES)）。
+  m.ctx.provide('memoryNoticeRules', [{
+    id: 'memory-remember-request', order: 10, placement: ['user'],
+    when: { said: '/记一下/' },
+    action: { kind: 'notify', by: 'context-care', say: '用户说了「记住」。用 session_blocks_remember 写下来。' },
+    cooldownMinutes: 0, oncePerSurface: true,
+  }])
+  const decision = await m.step([{
+    id: 'u1', role: 'user', source: { kind: 'user' },
+    content: [{ type: 'text', text: '记一下：这条要测接线' }],
+  }])
+  const hit = decision.messages.find(message => message.source?.kind === 'plugin:dsh-context-care:rules:memory-remember-request')
+  assert.ok(hit, '规则命中却没进 messages —— 说明 noticeRules.collect 又没接线了')
+  assert.match(hit.content[0].text, /记住/)
+  assert.equal(hit.source.form, 'notice')
+})
+
+test('通知通道接线：别的插件注册的源会被问一遍，并进这一轮的 messages', async () => {
+  const m = await mounted()
+  // 真实部署里这是索引插件的被动召回源（lib/index.js 的 ctx.inject(['contextNotices'])）。
+  const channel = m.ctx.get('contextNotices')
+  assert.ok(channel, 'contextNotices 服务没暴露 —— 别的插件根本注册不了')
+  const off = channel.register('passive-recall', () => [{
+    id: 'passive-recall:b1',
+    text: '<被动召回>\n你以前记过这个\n</被动召回>',
+    summary: 'Passive recall (1)',
+  }])
+  const decision = await m.step([{
+    id: 'u2', role: 'user', source: { kind: 'user' },
+    content: [{ type: 'text', text: '这段话足够长，够抽关键词了' }],
+  }])
+  const hit = decision.messages.find(message => String(message.source?.kind).includes('notice:passive-recall'))
+  assert.ok(hit, '通道里的通知没被注入 —— 说明 noticeChannel.collect 又没接线了')
+  assert.match(hit.content[0].text, /被动召回/)
+  off()
+})
+
+test('规则引擎炸了不该毁掉整个请求：记 warn 后照常返回', async () => {
+  const m = await mounted()
+  m.ctx.provide('memoryNoticeRules', [{ id: 'broken' }])
+  const decision = await m.step([{
+    id: 'u3', role: 'user', source: { kind: 'user' },
+    content: [{ type: 'text', text: '记一下：规则写错了' }],
+  }])
+  assert.equal(decision.kind, 'enter', '规则出错时这一轮仍要照常发出去')
+  assert.ok(Array.isArray(decision.messages))
+})
+
