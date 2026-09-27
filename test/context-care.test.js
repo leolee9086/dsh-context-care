@@ -385,3 +385,49 @@ test('规则引擎炸了不该毁掉整个请求：记 warn 后照常返回', as
   assert.ok(Array.isArray(decision.messages))
 })
 
+test('事实值接线：规则能用 numbers 读到这一轮的 token 量', async () => {
+  const m = await mounted()
+  // 真实部署里这条会是「聊了 N 轮还没记东西」，这里用 token 量测同一根线：
+  // 值必须在 context-care 的 pre-step 里算出来、并填进引擎的 ctx。
+  m.ctx.provide('memoryNoticeRules', [{
+    id: 'by-volume', order: 5, placement: ['user'],
+    when: { numbers: { surfaceTokens: { gte: 1 } } },
+    action: { kind: 'notify', by: 'context-care', say: '按积累量提醒' },
+    cooldownMinutes: 0, oncePerSurface: true,
+  }])
+  const decision = await m.step([{
+    id: 'u9', role: 'user', source: { kind: 'user' },
+    content: [{ type: 'text', text: '随便说点什么' }],
+  }])
+  const hit = decision.messages.find(message => message.source?.kind === 'plugin:dsh-context-care:rules:by-volume')
+  assert.ok(hit, '规则用 numbers 读不到事实值 —— facts 没接上 ctx')
+  assert.match(hit.content[0].text, /按积累量提醒/)
+})
+
+test('事实值接线：算不出来的指标给 null，判不命中，且不连累同一批里别的规则', async () => {
+  const m = await mounted()
+  // 这个测试会话里没有 turn/start 事件，turns 会是 null（"此刻不可知"），
+  // 而不是 undefined —— 后者会被引擎当成漏填而抛错，把整批规则一起带走。
+  m.ctx.provide('memoryNoticeRules', [
+    {
+      id: 'by-turns', order: 5, placement: ['user'],
+      when: { numbers: { turns: { gte: 3 } } },
+      action: { kind: 'notify', by: 'context-care', say: '这条不该出现' },
+      cooldownMinutes: 0, oncePerSurface: true,
+    },
+    {
+      id: 'by-volume-2', order: 6, placement: ['user'],
+      when: { numbers: { surfaceTokens: { gte: 1 } } },
+      action: { kind: 'notify', by: 'context-care', say: '这条该照常出现' },
+      cooldownMinutes: 0, oncePerSurface: true,
+    },
+  ])
+  const decision = await m.step([{
+    id: 'u10', role: 'user', source: { kind: 'user' },
+    content: [{ type: 'text', text: '再随便说点什么' }],
+  }])
+  const kinds = decision.messages.map(message => message.source?.kind).filter(Boolean)
+  assert.equal(kinds.includes('plugin:dsh-context-care:rules:by-turns'), false, 'turns 不可知时不该命中')
+  assert.ok(kinds.includes('plugin:dsh-context-care:rules:by-volume-2'),
+    'turns 不可知不该连累同一批里算得出来的规则')
+})

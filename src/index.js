@@ -145,6 +145,47 @@ export function apply(ctx, raw = {}) {
  * resolver `agent => provider | undefined` (the root entry, where the provider
  * differs per agent and is resolved at the boundary that uses it).
  */
+/** 有限数原样返回,其它一律 null —— 表示"此刻不可知",不是 0。 */
+function finiteOrNull(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+/** 最后一个已开始的轮号;一个都没有时给 null。 */
+function lastTurnNumber(session) {
+  if (typeof session?.snapshotEvents !== 'function') return null
+  let last
+  for (const event of session.snapshotEvents()) {
+    if (event?.type === 'turn/start' && Number.isFinite(event.data?.turn)) last = event.data.turn
+  }
+  return last ?? null
+}
+
+/**
+ * 把这一轮的实测值摊成规则能用的指标。
+ *
+ * **键名是跨插件的契约**:写规则的插件按这些名字用 when.numbers。只增不改 ——
+ * 改名等于改了契约,得先跟用它的人说。引擎不认识这些名字,它只按 key 取值比较。
+ *
+ * 算不出来的给 null(finiteOrNull),**不给 undefined**:后者会被引擎当成
+ * "规则写错或调用方漏填"而抛错,连累同一批里别的规则。
+ *
+ * @param {object|undefined} current sample() 的结果。
+ * @param {object} session 会话,用来数轮次。
+ * @returns {object} 指标名 → 有限数或 null。
+ */
+function careFacts(current, session) {
+  const state = current?.state ?? {}
+  const measurement = current?.measurement
+  return {
+    fatigue: finiteOrNull(state.fatigueValue),
+    wakefulness: finiteOrNull(state.wakefulnessValue),
+    totalTokens: finiteOrNull(measurement?.totalTokens),
+    surfaceTokens: finiteOrNull(measurement?.surfaceTokens),
+    // 轮次跟时间无关,所以「聊了 N 轮还没记东西」这类判据在从没记过的会话上也成立 ——
+    // 这正是 idle 那条规则漏掉的情况。
+    turns: finiteOrNull(lastTurnNumber(session)),
+  }
+}
 export function installContextCare(ctx, raw, compactionSource) {
   const resolveCompaction = typeof compactionSource === 'function' ? compactionSource : () => compactionSource
   const spec = resolveConfig(raw)
@@ -549,7 +590,12 @@ export function installContextCare(ctx, raw, compactionSource) {
     // 读 decision.messages 而不是 messages:底下要拿的是"本轮领取的输入",
     // 不该把上面刚注进去的东西再扫一遍。
     try {
-      for (const ruleMessage of noticeRules.collect({ agent, messages: decision.messages })) messages.push(ruleMessage)
+      for (const ruleMessage of noticeRules.collect({
+        agent,
+        messages: decision.messages,
+        // 事实值只有这一侧算得出来(它持有 tokenMeter 与状态计算),规则引擎不认识这些名字。
+        facts: careFacts(current, agent.session),
+      })) messages.push(ruleMessage)
     } catch (error) {
       ctx.logger.warn(`context-care: 提示规则没有跑起来: ${error instanceof Error ? error.message : String(error)}`)
     }

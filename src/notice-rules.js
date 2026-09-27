@@ -96,9 +96,12 @@ export function installNoticeRules(ctx, { plugin, onHit = () => {} }) {
    * @param {object} input
    * @param {object} input.agent 当前 agent。
    * @param {object[]} input.messages 这一轮组装好、准备发出去的消息。
+   * @param {object} [input.facts] 这一轮的事实值（疲劳度、唤醒值、token 量…），键名就是规则里写的指标名。
+   *   值算不出来时给 null（表示"此刻不可知"，规则会判为不命中），
+   *   **不要给 undefined 或干脆不给键** —— 那会被引擎当成"规则写错或漏填"而抛错。
    * @returns {object[]} 要注入的消息。
    */
-  function collect({ agent, messages }) {
+  function collect({ agent, messages, facts }) {
     const message = lastUserMessage(messages)
     if (message === undefined) return []
     const text = textOf(message)
@@ -115,6 +118,9 @@ export function installNoticeRules(ctx, { plugin, onHit = () => {} }) {
           assistantText: lastAssistantText(agent.session),
           toolCalls: recentToolCalls(agent.session),
           now: Date.now(),
+          // 事实值放到最后展开：它们只有算得出来的那一侧（本插件的 pre-step）知道，
+          // 而引擎不认识这些指标名 —— 它只按 key 取值比较。约定好的键写在本插件的文档里。
+          ...(facts ?? {}),
         },
       })
     } finally {
