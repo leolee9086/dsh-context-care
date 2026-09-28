@@ -126,12 +126,16 @@ export function previousState(session) {
   return undefined
 }
 
-/** Notify only on an integer percentage transition, a changed grade or a new outcome. */
-export function shouldNotify(previous, text, state) {
-  const percent = value => Number.isFinite(value) ? Math.floor(value) : null
+/**
+ * Notify only when the model-visible status or outcome changes.
+ *
+ * Numeric values live in source metadata for the UI; the model-facing text deliberately
+ * contains only grades and guidance. A numeric-only change therefore adds no information
+ * to the model, but it does append another user message and can make the status look like
+ * a countdown. Keep the notification keyed to the text the model can actually read.
+ */
+export function shouldNotify(previous, text, _state) {
   return previous?.text !== text
-    || percent(previous?.fatigueValue) !== percent(state.fatigueValue)
-    || percent(previous?.wakefulnessValue) !== percent(state.wakefulnessValue)
 }
 
 /** Attach tools and durable boundary-time status, leaving the compaction provider unchanged. */

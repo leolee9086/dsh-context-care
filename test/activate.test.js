@@ -41,18 +41,21 @@ test('existing-session numeric upgrade preserves outcomes, admission fields and 
   assert.equal(active.dispose(), true)
 })
 
-test('numeric sampling notifies once per integer percentage instead of once per step', async () => {
+test('numeric-only changes do not notify until the model-visible grade changes', async () => {
   const active = await activate()
   const first = await active.run({ kind: 'enter', messages: [] })
   active.retain(first.messages[0])
   assert.equal((await active.run({ kind: 'enter', messages: [] })).messages.length, 0)
-  active.setTokens(4030) // 35.8 remains in the already-notified 35 percent interval.
+  active.setTokens(4030) // The measured value changes, but the model-visible grade is unchanged.
   assert.equal((await active.run({ kind: 'enter', messages: [] })).messages.length, 0)
-  active.setTokens(4060) // 36.2 crosses into the next interval.
-  const crossed = await active.run({ kind: 'enter', messages: [] })
-  assert.equal(crossed.messages.length, 1)
-  assert.equal(crossed.messages[0].source.contextCare.fatigueValue, 36.2)
-  active.retain(crossed.messages[0])
+  active.setTokens(4060)
+  assert.equal((await active.run({ kind: 'enter', messages: [] })).messages.length, 0)
+
+  active.setTokens(6000) // Cross the fatigue grade boundary; this changes the guidance.
+  const changed = await active.run({ kind: 'enter', messages: [] })
+  assert.equal(changed.messages.length, 1)
+  assert.match(changed.messages[0].content[0].text, /疲劳：高；唤醒值：正常/)
+  active.retain(changed.messages[0])
   assert.equal((await active.run({ kind: 'enter', messages: [] })).messages.length, 0)
   active.dispose()
 })
