@@ -75,13 +75,13 @@ UI 显示最近一次请求准备时的状态，与模型读取的同一条持�
 
 ## 安装
 
-### 使用 Release 发布包（推荐）
-
-[下载 v0.1.1](https://github.com/leolee9086/dsh-context-care/releases/tag/v0.1.1) 中的 `dsh-context-care-0.1.1.tgz` 已包含前端构建产物，可以直接安装到现有 Web profile：
+### 从 GitHub 安装（推荐）
 
 ```sh
-dsh plugin --profile web add https://github.com/leolee9086/dsh-context-care/releases/download/v0.1.1/dsh-context-care-0.1.1.tgz
+dsh plugin --profile web add "github:leolee9086/dsh-context-care#v0.6.2"
 ```
+
+`lib/`（前端构建产物）不入库，安装时由 `prepare` 钩子现编 —— 不需要预先构建，也不需要手工打包上传 tgz。带上标签安装，版本不会跟着分支漂。
 
 安装不拉取 DSH 本体或内部包，也不需要 DSH 源码目录。所有 DSH 能力都通过 Cordis 的 `inject`、`ctx` 服务及事件参数取得；运行环境需预先提供这些服务。本项目暂不发布到 npm registry。**安装后只需一步挂载**（profile patch 里的一行），所有会话自动生效。
 
