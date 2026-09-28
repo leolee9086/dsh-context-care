@@ -1,6 +1,6 @@
 node_modules/
-lib/
 dist/
+lib/*.map
 *.tgz
 .env
 .env.*
