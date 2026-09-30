@@ -6,7 +6,7 @@
 
 参考 S-forge MAGI 的指标曲线和 Codex 的上下文生命周期设计，以独立 Cordis 插件接入，不修改 Harness、S-forge 或 Codex 源码。本文档以中文为主。
 
-> 当前版本：`v0.5.0`，依赖 DSH 的预稳定接口。已在 Harness 提交 `c291e7961a515f6d7af9304e7fd1d257929aef26` 对应的本地构建上验证；不承诺兼容所有旧版或未来版本。
+> 当前版本：`v0.6.3`，依赖 DSH 的预稳定接口。已在 Harness 提交 `c291e7961a515f6d7af9304e7fd1d257929aef26` 对应的本地构建上验证；不承诺兼容所有旧版或未来版本。
 
 ## 指标与行为
 
@@ -78,7 +78,7 @@ UI 显示最近一次请求准备时的状态，与模型读取的同一条持�
 ### 从 GitHub 安装（推荐）
 
 ```sh
-dsh plugin --profile web add "github:leolee9086/dsh-context-care#v0.6.2"
+dsh plugin --profile web add "github:leolee9086/dsh-context-care#v0.6.3"
 ```
 
 构建产物 `lib/` 已入库，装完即可用 —— 不需要额外构建，也不需要手工打包上传 tgz。带上标签安装，版本不会跟着分支漂。
