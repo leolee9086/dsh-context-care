@@ -21,6 +21,7 @@ export const Config = z.object({
   budgetRatio: z.number().optional(), wakefulnessRatio: z.number().optional(),
   fatigueExponent: z.number().optional(), retainRatio: z.number().optional(),
   minFreshTokens: z.number().int().optional(), minNoteChars: z.number().int().optional(), maxNoteChars: z.number().int().optional(),
+  providerUsageRatio: z.number().optional(),
 }).strict()
 
 const requestPlugin = `${name}:request`
@@ -136,6 +137,43 @@ export function previousState(session) {
  */
 export function shouldNotify(previous, text, _state) {
   return previous?.text !== text
+}
+
+/**
+ * 自数的请求内容量：留存的内容加上工具定义。工具部分与 DSH token-meter 的
+ * estimateToolsTokens 同算法（4 字符/token + 4 结构开销）。
+ *
+ * 它有两个用途：provider 上报不可信时作为疲劳度的分子，以及作校准的参照。
+ *
+ * @param header - 折叠后的请求信封，取它的 tools。
+ * @param retained - 留存内容（surface 定价 + 本轮新增）的 token 数。
+ * @returns 自数的请求内容量。
+ */
+export function requestContentTokens(header, retained) {
+  const tools = header?.tools
+  if (tools === undefined || tools.length === 0) return retained
+  return retained + Math.ceil(JSON.stringify(tools).length / 4) + 4
+}
+
+/**
+ * 这一轮疲劳度用的请求量：默认采信 provider 上报的计费量，比例不合理时退回自数的量。
+ *
+ * provider 报的是它实际计费的量，比 DSH 的字符数估计准，所以正常时用它。
+ * 但它偶尔报出物理上不可能的值：2026-09-29 那一轮报 209879 token，而同一份 surface
+ * 只有 148813 个字符（85% 是 ASCII）—— token 数不可能超过字符总数。
+ * 能用的判据只有比例，因为我们数不到 provider 那侧的东西；超过 `ratio` 倍就说明
+ * 这一轮的上报与请求内容对不上，这一轮不采信。退回的是自数的量，
+ * 不是把上报值改小，也不是给它设一个上限。
+ *
+ * @param measurement - tokenMeter.measure() 的返回值，取它的 totalTokens。
+ * @param selfMeasured - 自数的请求内容量。
+ * @param ratio - 采信上限倍数。
+ * @returns 这一轮用于疲劳度的请求量。
+ */
+export function requestLoadTokens(measurement, selfMeasured, ratio) {
+  const reported = measurement.totalTokens
+  if (Number.isFinite(reported) && reported <= selfMeasured * ratio) return reported
+  return selfMeasured
 }
 
 /** Attach tools and durable boundary-time status, leaving the compaction provider unchanged. */
@@ -448,8 +486,12 @@ export function installContextCare(ctx, raw, compactionSource) {
     signal.throwIfAborted()
     const capacity = info.context?.contextWindow
     const incoming = proposed.reduce((sum, message) => sum + ctx.tokenMeter.estimateMessage(message), 0)
+    // 留存信息量是唤醒值的分子；请求内容量是疲劳度的分子，采信前先过一道校准。
+    const retained = measurement.surfaceTokens + incoming
+    const selfMeasured = requestContentTokens(header, retained)
+    const load = requestLoadTokens(measurement, selfMeasured, spec.providerUsageRatio)
     return {
-      state: calculateState(measurement.totalTokens + incoming, measurement.surfaceTokens + incoming, capacity, spec),
+      state: calculateState(load, retained, capacity, spec),
       measurement,
       capacity,
     }

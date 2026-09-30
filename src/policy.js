@@ -10,10 +10,14 @@ export function resolveConfig(raw = {}) {
     // 一份写到几百字的笔记，下一个自己不用再去翻日志就能接着干。
     minNoteChars: 1000,
     maxNoteChars: 10000,
+    // provider 上报的计费量容许高出请求内容量的倍数。
+    // 超过就说明这一轮的上报与请求内容对不上（2026-09-29 实测到 5 倍，
+    // 而且报出的 token 数超过当时 surface 的全部字符数），那一轮退回自己数的量。
+    providerUsageRatio: 2.5,
     ...raw,
   }
   for (const key of Object.keys(raw)) {
-    if (!['budgetRatio', 'wakefulnessRatio', 'fatigueExponent', 'retainRatio', 'minFreshTokens', 'minNoteChars', 'maxNoteChars'].includes(key)) {
+    if (!['budgetRatio', 'wakefulnessRatio', 'fatigueExponent', 'retainRatio', 'minFreshTokens', 'minNoteChars', 'maxNoteChars', 'providerUsageRatio'].includes(key)) {
       throw new Error(`context-care: unknown config ${key}`)
     }
   }
@@ -24,6 +28,7 @@ export function resolveConfig(raw = {}) {
   }
   if (spec.retainRatio >= spec.budgetRatio) throw new Error('context-care: retainRatio must be below budgetRatio')
   if (!Number.isFinite(spec.fatigueExponent) || spec.fatigueExponent <= 0) throw new Error('context-care: invalid fatigueExponent')
+  if (!Number.isFinite(spec.providerUsageRatio) || spec.providerUsageRatio <= 1) throw new Error('context-care: providerUsageRatio must be above 1')
   for (const key of ['minFreshTokens', 'minNoteChars', 'maxNoteChars']) {
     if (!Number.isSafeInteger(spec[key]) || spec[key] <= 0) throw new Error(`context-care: ${key} must be a positive integer`)
   }

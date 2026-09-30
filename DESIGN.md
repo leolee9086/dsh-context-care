@@ -22,6 +22,12 @@ Status strings are discrete and bounded. Numeric values are retained in message 
 
 The status prose rejects unsupported memory-quality inferences and artificial deadlines. This choice intentionally does not port S-forge's claim that higher fatigue means unreliable memories. The feature supplies an actionable context operation instead of suggesting stopping work. No real-model A/B measurement of anxiety-related outputs has been performed.
 
+## Request-load calibration
+
+Fatigue and wakefulness read two different quantities from one measurement: wakefulness divides the retained surface, fatigue divides the request load. The request load defaults to the provider's billed token count, which is normally closer to the wire than the fixed-density estimate. A provider report is discarded for that round when it exceeds the self-measured request content (surface pricing plus tool-definition pricing) by `providerUsageRatio`; the round then divides the self-measured value instead. The ratio test is the only available check, because the provider's own accounting is not observable from here.
+
+Recorded on 2026-09-29 in one session: the report claimed 209879 tokens while the same surface held 148813 characters, 85% of them ASCII. No tokenizer emits more tokens than it has characters at that ASCII share, so the report was impossible rather than merely different. Because the plugin divided it directly, fatigue reached 100% while wakefulness read 69.8% from the same measurement — a pair the curves cannot produce from one consistent quantity. Replayed through the shipped curve after calibration, that sample yields 9.0% fatigue and 68.8% wakefulness, while three neighbouring rounds with ordinary ratios (1.49, 1.76, 2.15) keep their previous values unchanged.
+
 ## Detection self-reference
 
 Both anxiety detectors match phrases in the reasoning stream, and the plugin is authored in that same stream. Measured while adding `context-anxiety`: 8 of 8 hits in the authoring session came from writing trigger comments, README prose, notice text or the phrase list itself — not from the model being anxious about its budget. The earlier session that built `time-anxiety` has the same shape: 9 hits, all inside the range where that detector was being written.

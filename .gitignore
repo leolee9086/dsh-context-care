@@ -5,3 +5,5 @@ lib/*.map
 .env
 .env.*
 DELIVERY-CHECKPOINT.md
+# 本机复现与验证脚本：依赖外部 DSH checkout，产物含大体积扫描 JSON，不入库。
+.diagnostics/
