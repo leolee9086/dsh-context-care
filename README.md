@@ -133,7 +133,9 @@ $env:DSH_TEST_CHECKOUT = '/path/to/built/deepseek-harness'
 pnpm run test:integration
 ```
 
-这个命令的测试宿主显式加载 DSH 来注入服务；该测试文件不会进入发布包，插件自身从不查找或导入这个路径。未指定路径时测试明确报错，不静默跳过。源码开发后可使用 `dsh plugin --profile web add link:/absolute/path/to/dsh-context-care`，再按上面的步骤 1 挂载主入口即可。
+这个命令的测试宿主显式加载 DSH 来注入服务；该测试文件不会进入发布包，插件自身从不查找或导入这个路径。未指定路径时测试明确报错，不静默跳过。
+
+本机开发可以用 `link:` 指向工作区（`dsh plugin --profile web add link:/absolute/path/to/dsh-context-care`），再按上面的步骤 1 挂载主入口。这是**仅限本机的开发写法**：跨盘的 `link:` 会让应用自带的 pnpm 在重建依赖树时创建符号链接失败（`ERR_PNPM_EPERM`），所以它只适合同盘、只适合开发阶段，发布的声明和安装说明一律用版本范围或 `#标签`。
 
 ### 注入接口
 
