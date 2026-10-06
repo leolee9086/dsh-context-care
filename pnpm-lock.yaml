@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@leolee9086/dsh-rule-engine':
-        specifier: ^0.1.0
-        version: 0.1.1
+        specifier: ^0.2.0
+        version: 0.2.0
       react:
         specifier: ^18.3.1
         version: 18.3.1
@@ -45,8 +45,8 @@ packages:
   '@deepseek-ai/cosmokit@1.8.5':
     resolution: {integrity: sha512-LXsrlem9z8dq4sLflj2yuCuYX7KqhdzF5hZly3eZyuTo8d6oDSOXuEgC5DbQWKW+lksm6zmOutQLsP/ma6wR6A==}
 
-  '@leolee9086/dsh-rule-engine@0.1.1':
-    resolution: {integrity: sha512-UKJ/WgjCzHGJtF/8c8zBt3UvuLSBQ3K1q1TPcyof/2Kl8zn6WMS7pGat3w1RCjTMDVdeNcluqza2ysGSfnv7mA==}
+  '@leolee9086/dsh-rule-engine@0.2.0':
+    resolution: {integrity: sha512-+7kfHfv1qjpfmhnQx4tuk7a1yfpYXBYAG2dDwGaDKbAc2IfcJYoefM5RyFfXBSyOINuvwmrd6qh7HliTAZFRaQ==}
 
   '@oxc-project/types@0.148.0':
     resolution: {integrity: sha512-Nm4s/jB+4FpFsPhWGEC4h7rzksesmtnMXomo6rCMcg/b8zLQuOziRgkCS1fxDCXOlJB/6Q8oABOZ/OP6RIPj9A==}
@@ -466,7 +466,7 @@ snapshots:
 
   '@deepseek-ai/cosmokit@1.8.5': {}
 
-  '@leolee9086/dsh-rule-engine@0.1.1': {}
+  '@leolee9086/dsh-rule-engine@0.2.0': {}
 
   '@oxc-project/types@0.148.0': {}
 

@@ -7,3 +7,6 @@ lib/*.map
 DELIVERY-CHECKPOINT.md
 # 本机复现与验证脚本：依赖外部 DSH checkout，产物含大体积扫描 JSON，不入库。
 .diagnostics/
+# pnpm 装「刚发布的版本」时自己写的供应链豁免（minimumReleaseAgeExclude）。
+# 它描述的是本机装包状态，不是项目的依赖声明；换台机器装时 pnpm 会自己再写一次。
+pnpm-workspace.yaml
