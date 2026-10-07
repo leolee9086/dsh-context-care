@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { recordSecondaryFailure } from './secondary-failure.js'
 import { createUserMessage } from './message.js'
 import { CHECKPOINT_KIND } from './producer-source.js'
 
@@ -68,7 +69,7 @@ export function clearRange(session, meter, range, text, pricing) {
   if (current.length !== range.shadowedSeqs.length || current.some((seq, index) => seq !== range.shadowedSeqs[index])) {
     throw new Error('context-care: handoff source changed; history retained')
   }
-  const measurement = pricing === undefined ? meter.measureInput(session) : pricing.measure()
+  const measurement = pricing === undefined ? meter.measure(session) : pricing.measure()
   const priced = new Map(measurement.nodes.map(node => [node.seq, node.heuristicTokens]))
   const selected = new Set(range.shadowedSeqs)
   const selectedTokens = measurement.nodes.filter(node => selected.has(node.seq)).reduce((sum, node) => sum + node.tokens, 0)
@@ -76,7 +77,7 @@ export function clearRange(session, meter, range, text, pricing) {
   const compactionId = randomUUID()
   const replacement = createUserMessage({ content, source: checkpointSource(compactionId) })
   const replacementTokens = pricing === undefined
-    ? meter.priceMessages([replacement], measurement.pricingBasis) : pricing.priceMessages([replacement])
+    ? meter.estimateMessage(replacement) : pricing.priceMessages([replacement])
   if (replacementTokens >= selectedTokens) {
     throw new Error('context-care: handoff-larger-than-history; history retained')
   }
@@ -114,7 +115,7 @@ export function clearRange(session, meter, range, text, pricing) {
         turn: openTurn,
         error: error instanceof Error ? error.message : String(error),
       })
-    } catch (closeError) { void closeError } // Preserve the failure; the unmatched start remains observable.
+    } catch (closeError) { recordSecondaryFailure(error, closeError, 'deep-rest transaction close') }
     throw error
   }
   session.append('compaction/end', { compactionId, turn: openTurn })

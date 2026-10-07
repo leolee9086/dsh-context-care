@@ -7,6 +7,21 @@ import { ActionDetails } from '../src/action-view.js'
 import { createActionRecords } from '../src/action-records.js'
 import { dictionaries } from '../src/client-view.js'
 
+test('action polling preserves the Host storage diagnostic in its visible error state', async () => {
+  const records = createActionRecords({ fetcher: async () => new Response(JSON.stringify({ error: 'journal-unavailable', message: 'Persistent journal write failed' }),
+    { status: 500, headers: { 'content-type': 'application/json' } }), setTimer: () => 1, clearTimer() {} })
+  const stop = records.watch('failed-session')
+  for (let step = 0; step < 16; step++) await Promise.resolve()
+  const value = records.source.getSnapshot().get('failed-session:0')
+  assert.equal(value.status, 'error')
+  assert.match(value.error, /actions: HTTP 500: Persistent journal write failed/)
+  const markup = renderToStaticMarkup(React.createElement(ActionDetails, { value, t: key => dictionaries.zh[key] }))
+  assert.match(markup, /role="alert"/)
+  assert.match(markup, /Persistent journal write failed/)
+  stop()
+  records.dispose()
+})
+
 const record = (key, data, kind = 'maintenance') => ({ key, at: 10, kind, data })
 
 test('action display groups transactions, separates pricing units and reports missing audit after a durable commit', () => {

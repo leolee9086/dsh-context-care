@@ -29,7 +29,9 @@ test('the distributed client mounts real framework hooks, pages within the selec
   await runtime.sessions.setProjection('session-one', 'contextCareNumeric', { fatigueValue: 40, wakefulnessValue: 60, fatigue: 'normal', wakefulness: 'elevated' })
   const one = runtime.sessions.retainFor(runtime.ctx, 'session-one')
   const two = runtime.sessions.retainFor(runtime.ctx, 'session-two')
+  let routeFailure = false
   const fetcher = vi.fn(async url => {
+    if (routeFailure) return { ok: false, status: 404 }
     if (url.includes('rewrite-journal')) return { ok: true, json: async () => ({ records: [] }) }
     const query = new URL(url, 'http://localhost').searchParams
     return { ok: true, json: async () => ({ total: 21, nextOffset: query.get('offset') === '0' ? 20 : null,
@@ -59,6 +61,10 @@ test('the distributed client mounts real framework hooks, pages within the selec
     await waitFor(() => expect(view.container.textContent).toContain('session-two-0'))
     expect(view.container.textContent).not.toContain('session-one-20')
     expect(fetcher.mock.calls.some(([url]) => url.includes('sessionId=session-two&limit=20&offset=0'))).toBe(true)
+    routeFailure = true
+    await waitFor(() => expect(view.container.textContent).toContain('HTTP 404'), { timeout: 5000 })
+    expect(view.container.querySelector('[role="alert"]')?.textContent).toContain('HTTP 404')
+    expect(view.container.textContent).not.toContain('等待首次状态')
     await feature.dispose()
     expect(view.container.textContent).not.toContain('预算与维护记录')
     expect(runtime.slots.entries('conversation.composer.dock')).toHaveLength(0)

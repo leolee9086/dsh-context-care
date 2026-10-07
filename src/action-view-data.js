@@ -31,7 +31,7 @@ export function contextCareActions(records, session) {
     const previous = groups.get(id) ?? { id, phases: [] }
     const fields = ['action', 'reason', 'phase', 'rule', 'outcome', 'beforeSeq', 'afterSeq', 'beforeGeneration', 'afterGeneration',
       'beforeInput', 'afterInput', 'routeSaving', 'heuristicSaving', 'sourceSeqs', 'shadowedSeqs', 'oldSourceSeqs', 'replacements',
-      'summaryTransactions', 'summarySeq', 'checkpointSeq', 'endSeq', 'coverage', 'progressed', 'error', 'failure',
+      'summaryTransactions', 'summarySeq', 'checkpointSeq', 'endSeq', 'coverage', 'progressed', 'error', 'failure', 'secondaryFailures',
       'beforeSummaryInput', 'afterSummaryInput', 'comparisons']
     const display = Object.fromEntries(fields.filter(field => data[field] !== undefined).map(field => [field, data[field]]))
     groups.set(id, { ...previous, ...display, at: record.at, journalPersisted: true, phases: [...previous.phases, data.phase] })

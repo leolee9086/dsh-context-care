@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { recordSecondaryFailure } from './secondary-failure.js'
 import { isDeepStrictEqual } from 'node:util'
 import { createUserMessage } from './message.js'
 import { CHECKPOINT_KIND } from './producer-source.js'
@@ -80,7 +81,7 @@ export function createSummaryExecutor({ meter, llm, requests, spec, recover = ()
       for (;;) {
         assertStable()
         if (spec.maxSummaryCallsPerAction !== undefined && calls >= spec.maxSummaryCallsPerAction) throw lastError ?? failure('context-care: summary call limit reached', 'SUMMARY_CALL_LIMIT')
-        const prepared = await llm.prepareCall({ provider: config.provider, model: config.model, maxTokens: config.maxTokens }, signal)
+        const prepared = await requests.prepareCall({ provider: config.provider, model: config.model, maxTokens: config.maxTokens }, signal)
         let auxiliary
         let seqs
         let request
@@ -114,7 +115,7 @@ export function createSummaryExecutor({ meter, llm, requests, spec, recover = ()
               failure: { code: error.code, message: error instanceof Error ? error.message : String(error) } })
           } catch (journalError) {
             // flush() retains the storage failure; preserve the stream failure here.
-            void journalError
+            recordSecondaryFailure(error, journalError, 'summary audit')
           }
           lastError = error
           if (signal.aborted) throw error
@@ -122,7 +123,7 @@ export function createSummaryExecutor({ meter, llm, requests, spec, recover = ()
           let recovered = false
           if (mayRepair) {
             try { recovered = recover({ session, sourceEventSeqs: seqs, error, signal }) }
-            catch (repairError) { signal.throwIfAborted(); void repairError; throw error }
+            catch (repairError) { recordSecondaryFailure(error, repairError, 'summary repair'); signal.throwIfAborted(); throw error }
           }
           if (recovered) {
             signal.throwIfAborted()
@@ -139,7 +140,7 @@ export function createSummaryExecutor({ meter, llm, requests, spec, recover = ()
             try {
               await requests.recordAction(session, { action: 'summary', phase: 'repaired', compactionId,
                 oldSourceSeqs: seqs, sourceSeqs: rebased, beforeSummaryInput: selectedPrice, afterSummaryInput: auxiliary.pricing.priceRequest(repaired) })
-            } catch (journalError) { void journalError; throw error }
+            } catch (journalError) { recordSecondaryFailure(error, journalError, 'summary audit'); throw error }
             continue
           }
           assertStable()
@@ -189,15 +190,15 @@ export function createSummaryExecutor({ meter, llm, requests, spec, recover = ()
         try { session.append('compaction/end', { compactionId, turn: openTurn, error: error instanceof Error ? error.message : String(error) }) }
         catch (closeError) {
           // The unmatched durable start remains visible; preserve the primary failure.
-          void closeError
+          recordSecondaryFailure(error, closeError, 'summary transaction close')
         }
       }
       try {
         await requests.recordAction(session, { action: 'summary', phase: closed ? 'commit-record-failed' : 'failed', compactionId,
-          error: error instanceof Error ? error.message : String(error) })
+          error: error instanceof Error ? error.message : String(error), secondaryFailures: error.secondaryFailures })
       } catch (journalError) {
         // Audit ACK failures remain observable through flush, without masking this error.
-        void journalError
+        recordSecondaryFailure(error, journalError, 'summary audit')
       }
       throw error
     }

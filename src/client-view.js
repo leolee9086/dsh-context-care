@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useEffect } from 'react'
 
 export const dictionaries = {
   zh: {
@@ -69,13 +69,18 @@ function indicator(label, value, level, kind, t) {
 }
 
 /** Pure display receives the framework-owned projection hook. */
-export function ContextCareStatus({ useProjection, t }) {
+export function ContextCareStatus({ useProjection, useCareActions, useRewriteHealth, watchActions, sessionId, t }) {
   const state = useProjection('contextCareNumeric')
+  const actions = useCareActions(table => table.get(`${sessionId}:0`))
+  const health = useRewriteHealth(value => value)
+  useEffect(() => watchActions(sessionId, 0), [sessionId, watchActions])
+  const error = actions?.status === 'error' ? actions.error : health?.status === 'error' ? health.error : undefined
   return React.createElement('div', {
     'data-context-care': '', role: 'status', title: t('description'),
     style: { display: 'flex', flexWrap: 'wrap', gap: '12px', alignItems: 'center', fontSize: '12px', color: 'var(--dsw-alias-label-secondary)', padding: '2px 4px' },
   },
   indicator(t('fatigue'), state?.fatigueValue, state?.fatigue ?? 'unknown', 'fatigue', t),
   indicator(t('wakefulness'), state?.wakefulnessValue, state?.wakefulness ?? 'unknown', 'wakefulness', t),
-  !state ? React.createElement('span', null, t('waiting')) : null)
+  error ? React.createElement('span', { role: 'alert', style: { color: 'var(--dsw-alias-state-error-primary)' } }, `${t('actionsUnavailable')}: ${error}`)
+    : !state ? React.createElement('span', null, t('waiting')) : null)
 }

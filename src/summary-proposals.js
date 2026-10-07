@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { recordSecondaryFailure } from './secondary-failure.js'
 import { producedUnder } from './producer-source.js'
 
 /**
@@ -32,7 +33,7 @@ export function createProposalExecutor(requests, compact) {
             rule: proposal.rule, sourceSeqs: proposal.sourceSeqs, failure: { code: error.code, message: error.message } })
         } catch (journalError) {
           // The journal flush reports this error; the original summary failure wins.
-          void journalError
+          recordSecondaryFailure(error, journalError, 'selection audit')
         }
       }
       throw error

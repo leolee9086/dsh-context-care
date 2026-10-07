@@ -12,24 +12,30 @@ async function activate() {
   let textScale = 1
   let capacity = 10000
   const tools = []
-  const events = []
+  const events = [{ type: 'user/message', data: { role: 'user', retained: true, content: [] } }]
   const agent = {
     ctx: { async plugin(definition) {
       definition.apply({
         on(_event, callback) { listener = callback },
-        llm: { async resolveModelInfo() { return { context: { contextWindow: capacity } } } },
+        get: name => name === 'contextCareRequests'
+          ? { calibration: (_session, _header, basis) => ({ ...basis, textScale }) } : undefined,
+        llm: { async resolveModelInfo() { return { context: { contextWindow: capacity } } },
+          imageRequestPricing: () => undefined, fileRequestText: ref => ref.name },
+        // Model only the official estimator. The old output-pressure anchor may
+        // vary independently, while the plugin journal supplies input scaling.
         tokenMeter: {
-          measure: () => ({ totalTokens: providerTokens, surfaceTokens }), estimateMessage: () => 0,
-          measureInput: () => ({ surfaceTokens: surfaceTokens * textScale,
-            inputTokens: (surfaceTokens + (tools.length ? Math.ceil(JSON.stringify(tools).length / 4) + 4 : 0)) * textScale,
-            pricingBasis: { textScale } }),
-          priceMessages: () => 0,
+          measure: () => ({ totalTokens: providerTokens, surfaceTokens }),
+          estimateMessage: message => message.retained ? surfaceTokens
+            : message.role === 'system' ? Math.ceil(message.content[0].text.length / 4) + 4 : 0,
         },
       })
       return { dispose() { disposed = true } }
     } },
     session: {
-      surface: { nodes: [] },
+      surface: { nodes: [0] },
+      get seq() { return events.length },
+      deriveEventMessage: event => event.data,
+      deriveMessages() { return this.surface.nodes.map(seq => events[seq].data) },
       eventAt: seq => events[seq],
       requestHeader: () => ({ config: { provider: 'test', model: 'test' }, tools }),
     },
@@ -49,7 +55,7 @@ async function activate() {
 
 const careOf = result => result.messages[0].source.contextCare
 
-// Legacy pressure alone cannot calibrate the next input; the meter decides sample eligibility.
+// Legacy output pressure cannot calibrate the next input; the plugin journal owns eligibility.
 const REPRO = { surface: 41330, providerTokens: 209879, capacity: 262144 }
 
 test('existing-session numeric upgrade preserves outcomes, admission fields and cleanup', async () => {
@@ -80,7 +86,7 @@ test('legacy output pressure does not change an uncalibrated input observation',
   active.dispose()
 })
 
-test('eligible fivefold text calibration supplied by the meter is never clipped by the consumer', async () => {
+test('eligible fivefold text calibration supplied by the plugin journal is never clipped by the consumer', async () => {
   const active = await activate()
   active.setTextScale(5)
   const result = await active.run({ kind: 'enter', messages: [] })

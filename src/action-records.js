@@ -1,3 +1,5 @@
+import { httpFailure } from './http-failure.js'
+
 /**
  * Own session-scoped HTTP snapshots for the framework's injected observable hook.
  * The component receives plain watch callbacks; no subscription logic lives in it.
@@ -19,7 +21,7 @@ export function createActionRecords({ fetcher = fetch, pollMs = 2000, setTimer =
     watch.loading = true
     try {
       const response = await fetcher(`/context-care/actions?sessionId=${encodeURIComponent(watch.sessionId)}&limit=20&offset=${watch.offset}`, { signal: watch.controller.signal, headers: { accept: 'application/json' } })
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      if (!response.ok) throw await httpFailure(response, '/context-care/actions')
       const body = await response.json()
       if (!Array.isArray(body.actions)) throw new Error('Invalid action response')
       if (!watch.controller.signal.aborted) publish(watch.key, { status: 'ready', ...body })

@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { captureInputPricing } from './input-pricing.js'
 import { installContextCare, inject as agentInject, previousState, shouldNotify } from './index.js'
 import { calculateState, renderState, resolveConfig } from './policy.js'
 import { createUserMessage } from './message.js'
@@ -29,8 +30,10 @@ export async function apply(ctx, config) {
           const config = envelope?.config
           const info = config?.provider && config.model ? await scoped.llm.resolveModelInfo(config.provider, config.model, signal) : null
           signal.throwIfAborted()
-          const measurement = scoped.tokenMeter.measureInput(owner.session, envelope)
-          const incoming = scoped.tokenMeter.priceMessages(decision.messages.filter(message => !isState(message)), measurement.pricingBasis)
+          const pricing = captureInputPricing({ meter: scoped.tokenMeter, llm: scoped.llm, session: owner.session, header: envelope,
+            requests: scoped.get('contextCareRequests') })
+          const measurement = pricing.measure()
+          const incoming = pricing.priceMessages(decision.messages.filter(message => !isState(message)))
           const retained = measurement.surfaceTokens
           const spec = resolveConfig()
           const load = Math.ceil(measurement.inputTokens + incoming)

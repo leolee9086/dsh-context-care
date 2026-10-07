@@ -1,16 +1,18 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { pathToFileURL } from 'node:url'
+import { createRequire } from 'node:module'
 import { resolve } from 'node:path'
 import { mkdtemp, readFile, rm, copyFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import * as plugin from '../src/index.js'
-import * as hostPlugin from '../src/host.js'
-import * as completionPlugin from '../src/completion-host.js'
-import * as requestPlugin from '../src/request-host.js'
+const pluginModule = path => import(process.env.DSH_TEST_PLUGIN_ROOT
+  ? pathToFileURL(resolve(process.env.DSH_TEST_PLUGIN_ROOT, 'src', path)).href : new URL(`../src/${path}`, import.meta.url).href)
+const [plugin, hostPlugin, completionPlugin, requestPlugin] = await Promise.all(
+  ['index.js', 'host.js', 'completion-host.js', 'request-host.js'].map(pluginModule))
 import { completionStateKey, createCompletionObserver, createCompletionStateStore } from '../src/completion-observer.js'
 import { producedBy } from '../src/producer-source.js'
 import { captureInputPricing } from '../src/input-pricing.js'
+import { journalCalibration, calibrationHeaderKey } from '../src/input-calibration.js'
 import { createSummaryExecutor } from '../src/summary-executor.js'
 import { buildSummaryRequest, frameSummary } from '../src/summary-request.js'
 import { resolveConfig } from '../src/policy.js'
@@ -18,10 +20,21 @@ import { detectorFixture } from './fixtures/detector.js'
 
 // This explicitly selected test acts as an external Host. The plugin itself never
 // locates or imports a Harness checkout, and the default test suite is standalone.
-if (!process.env.DSH_TEST_CHECKOUT) throw new Error('test:integration requires DSH_TEST_CHECKOUT pointing to a built Harness checkout')
-const checkout = resolve(process.env.DSH_TEST_CHECKOUT)
-const source = process.env.DSH_TEST_SOURCE === '1'
-const load = async path => import(pathToFileURL(resolve(checkout, source ? path.replace('/lib/index.js', '/src/index.ts') : path)).href)
+const runtimeRoot = process.env.DSH_TEST_RUNTIME_ROOT
+if (!runtimeRoot && !process.env.DSH_TEST_CHECKOUT) throw new Error('test:integration requires an explicit DSH_TEST_CHECKOUT or DSH_TEST_RUNTIME_ROOT')
+const checkout = resolve(runtimeRoot ?? process.env.DSH_TEST_CHECKOUT)
+const source = !runtimeRoot && process.env.DSH_TEST_SOURCE === '1'
+const runtimeRequire = runtimeRoot ? createRequire(pathToFileURL(resolve(runtimeRoot, 'package.json'))) : undefined
+const vendorNames = { cordis: '@deepseek-ai/cordis', loader: '@deepseek-ai/cordis-plugin-loader', include: '@deepseek-ai/cordis-plugin-include' }
+const load = async path => {
+  // Desktop artifacts live inside ASAR, resolved by Electron's official loader.
+  // The test consumes them read-only; runtime plugin imports remain independent.
+  const parts = path.split('/')
+  const target = runtimeRequire ? runtimeRequire.resolve(parts[0] === 'vendor' ? vendorNames[parts[1]]
+    : `@deepseek-ai/dsh-${parts[2] === 'webserver' ? 'host-webserver' : parts[2]}`)
+    : resolve(checkout, source ? path.replace('/lib/index.js', '/src/index.ts') : path)
+  return import(pathToFileURL(target).href)
+}
 const { Context } = await load('vendor/cordis/lib/index.js')
 const { LlmAdapter, createUserMessage, createMessage } = await load('packages/llm/llm/lib/index.js')
 const { Session } = await load('packages/core/session/lib/index.js')
@@ -115,6 +128,15 @@ test('exported Host rows mount together, serve the journal, and remove routes an
   const lastPage = await (await fetch(`${actionsUrl}?sessionId=s1&limit=2&offset=2`)).json()
   assert.equal(lastPage.actions.length, 1)
   assert.equal(lastPage.nextOffset, null)
+  const originalFlush = ctx.contextCareRequests.flush
+  ctx.contextCareRequests.flush = async () => { throw new Error('Persistent journal write failed') }
+  const diagnostics = []
+  t.mock.method(ctx.logger, 'warn', message => diagnostics.push(message))
+  const failedPage = await fetch(`${actionsUrl}?sessionId=s1&limit=2`)
+  assert.equal(failedPage.status, 500, 'A stale readable table must not hide a retained write failure')
+  assert.deepEqual(await failedPage.json(), { error: 'journal-unavailable', message: 'Persistent journal write failed' })
+  assert.match(diagnostics.at(-1), /Persistent journal write failed/)
+  ctx.contextCareRequests.flush = originalFlush
   const row = [...ctx.loader.entries()].find(entry => entry.options.name === 'dsh-context-care')
   await row.fiber.dispose()
   assert.equal((await fetch(actionsUrl + '?sessionId=s1&limit=2')).status, 404)
@@ -260,6 +282,32 @@ test('unloading the contribution cancels a live summary and releases session occ
   assert.equal(events.filter(event => event.type === 'compaction/start').length, events.filter(event => event.type === 'compaction/end').length)
 })
 
+test('auxiliary prepared requests keep their registration across replacement and compose scoped text once', async t => {
+  const owned = await fixture(t, false, { modelScopedPrompts: [{ ruleId: 'summary-only', version: '1', provider: 'care-test',
+    model: 'care-test', purposes: ['compaction'], trigger: 'static', text: 'Keep the verified recovery paths.' }] })
+  const ctx = await owned.open()
+  const original = new ScriptedAdapter()
+  const removeOriginal = ctx.llm.registerAdapter(['care-test'], original)
+  const agent = await ctx.agentLoop.create('prepared-registration', { provider: 'care-test', model: 'care-test' })
+  const signal = new AbortController().signal
+  const prepared = await ctx.contextCareRequests.prepareCall({ provider: 'care-test', model: 'care-test', maxTokens: 128 }, signal)
+  removeOriginal()
+  const replacement = new ScriptedAdapter()
+  ctx.llm.registerAdapter(['care-test'], replacement)
+  const request = { ...prepared.config, sessionId: agent.session.id, purpose: 'compaction', signal,
+    messages: [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Summarize verified work.' }] })] }
+  const chunks = []
+  for await (const chunk of prepared.stream(request)) chunks.push(chunk)
+  assert.equal(original.requests.length, 1)
+  assert.equal(replacement.requests.length, 0, 'Planning and dispatch must use the same adapter registration')
+  assert.equal(original.requests[0].messages.filter(message => message.content.some(block => block.text === 'Keep the verified recovery paths.')).length, 1)
+  assert.equal(chunks.at(-1).reason.kind, 'stop')
+  assert.equal(ctx.contextCareRequests.snapshot(prepared.callId).record.dispatchBasis, 'prepared-stream-handoff')
+  assert.equal(agent.session.deriveMessages().some(message => message.content.some(block => block.text === 'Keep the verified recovery paths.')), false)
+  assert.throws(() => prepared.stream(request), /already consumed/)
+  ctx.contextCareRequests.release(prepared.callId)
+})
+
 test('operation prices keep captured calibration and image projection across adapter and usage changes', async t => {
   const owned = await fixture(t)
   const ctx = await owned.open()
@@ -279,8 +327,14 @@ test('operation prices keep captured calibration and image projection across ada
     { type: 'file', attachment: { attachmentId: 'sha256:abcdef12', name: 'records.txt', bytes: 100 } },
   ] })
   session.append('user/message', message, { surfaceOp: 'append' })
-  const raw = ctx.tokenMeter.measureInput(session, header).inputTokens
+  const rawPricing = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session, header })
+  const raw = rawPricing.priceRequest({ messages: [message], tools: header.tools })
+  const calibrationRecords = []
+  const calibration = { calibration: (_session, selectedHeader, basis) => journalCalibration(calibrationRecords, selectedHeader, basis) }
   function usageCall(inputTokens, step) {
+    const rawInput = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session, header }).decomposeRequest({ messages: session.deriveMessages(), tools: header.tools })
+    calibrationRecords.push({ kind: 'request', data: { purpose: 'conversation', dispatched: true, outcome: 'completed',
+      eventType: 'assistant/message', eventSeq: session.seq, rawInput, usage: { inputTokens }, calibrationHeaderKey: calibrationHeaderKey(header) } })
     session.append('step/start', { turn: 1, step })
     session.append('request/header', { header, reason: 'initial' })
     session.append('assistant/message', { turn: 1, step, stream: [], usage: { inputTokens, outputTokens: 99999 },
@@ -289,16 +343,18 @@ test('operation prices keep captured calibration and image projection across ada
     session.append('step/end', { turn: 1, step })
   }
   usageCall((raw - 200) * 3 + 200, 1)
-  const pricing = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session })
+  const pricing = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session, requests: calibration })
   assert.equal(pricing.pricingBasis.textScale, 3)
-  assert.deepEqual(pricing.measure(), ctx.tokenMeter.measureInput(session))
+  assert.equal(pricing.measure().inputTokens, pricing.priceRequest({ messages: session.deriveMessages(), tools: header.tools }))
   const request = { messages: [message], tools: header.tools, system: 'One-shot system' }
   const before = pricing.priceRequest(request)
-  assert.equal(before, ctx.tokenMeter.priceRequest(request, pricing.pricingBasis))
+  const parts = pricing.decomposeRequest(request)
+  assert.equal(before, parts.textTokens * 3 + parts.visualTokens)
   adapter.pricing = nextPricing
   usageCall(50000, 2)
-  assert.notEqual(ctx.tokenMeter.measureInput(session).pricingBasis.textScale, 3)
-  assert.notEqual(ctx.tokenMeter.priceRequest(request, ctx.tokenMeter.measureInput(session).pricingBasis), before)
+  const repriced = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session, requests: calibration })
+  assert.notEqual(repriced.pricingBasis.textScale, 3)
+  assert.notEqual(repriced.priceRequest(request), before)
   assert.equal(pricing.priceRequest(request), before)
   assert.equal(pricing.measure().pricingBasis, pricing.pricingBasis)
   assert.equal(pricing.measure().logRevision, session.seq)
@@ -486,6 +542,8 @@ test('summary overflow shrinks its candidate once and a changed surface closes w
 })
 
 test('summary repair rebases replaced endpoints, preserves the original failure without progress, and obeys explicit caps', async t => {
+  const secondaryReports = []
+  t.mock.method(console, 'error', (...args) => secondaryReports.push(args))
   for (const mode of ['endpoint', 'noop', 'outside', 'repair-cap', 'call-cap', 'repair-audit-fails', 'settlement-fails', 'repair-throws', 'end-fails']) {
     const owned = await fixture(t)
     const ctx = await owned.open()
@@ -548,6 +606,7 @@ test('summary repair rebases replaced endpoints, preserves the original failure 
     const events = agent.session.snapshotEvents()
     assert.equal(events.filter(event => event.type === 'compaction/start').length, events.filter(event => event.type === 'compaction/end').length + (mode === 'end-fails' ? 1 : 0))
   }
+  assert.deepEqual(secondaryReports.map(args => args[1].message), ['Repair audit failed', 'Settlement audit failed', 'Repair listener failed', 'End append failed'])
 })
 
 test('summary uses calibrated replacement cost and retains history when the framed text is larger', async t => {
@@ -564,14 +623,18 @@ test('summary uses calibrated replacement cost and retains history when the fram
   } }] })
   agent.session.append('user/message', image, { surfaceOp: 'append' })
   const header = { config: { provider: 'care-vision', model: 'vision' } }
-  const raw = ctx.tokenMeter.measureInput(agent.session, header).inputTokens
+  const raw = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session, header }).priceMessages([image])
   agent.session.append('step/start', { turn: 1, step: 1 })
   agent.session.append('request/header', { header, reason: 'initial' })
   agent.session.append('assistant/message', { turn: 1, step: 1, stream: [], usage: { inputTokens: (raw - 300) * 4 + 300, outputTokens: 1 },
     message: createMessage({ role: 'assistant', source: { kind: 'model', provider: 'care-vision', model: 'vision' }, content: [{ type: 'text', text: 'Recent tail' }] }),
   }, { surfaceOp: 'append' })
   agent.session.append('step/end', { turn: 1, step: 1 })
-  const pricing = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session })
+  const rawInput = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session, header }).decomposeRequest({ messages: [image] })
+  const calibrationRecords = [{ kind: 'request', data: { purpose: 'conversation', dispatched: true, outcome: 'completed',
+    eventType: 'assistant/message', eventSeq: agent.session.seq - 2, rawInput, usage: { inputTokens: (raw - 300) * 4 + 300 }, calibrationHeaderKey: calibrationHeaderKey(header) } }]
+  const pricing = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session,
+    requests: { calibration: (_session, selectedHeader, basis) => journalCalibration(calibrationRecords, selectedHeader, basis) } })
   assert.equal(pricing.pricingBasis.textScale, 4)
   class LongSummary extends ScriptedAdapter {
     async *stream(options) {
@@ -886,8 +949,8 @@ test('real deep rest commits one handoff, fixed shadow prices, and replayable co
   assert.equal(deepActions[0].journalPersisted, true)
   assert.ok(deepActions[0].replacements.some(item => item.newSeq === replacement.seq))
   const restored = Session.create('care-deep-replay', events, undefined, undefined, ctx.sessions.messageProjections)
-  const { logRevision: restoredRevision, ...restoredInput } = ctx.tokenMeter.measureInput(restored)
-  const { logRevision: liveRevision, ...liveInput } = ctx.tokenMeter.measureInput(agent.session)
+  const { logRevision: restoredRevision, ...restoredInput } = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: restored }).measure()
+  const { logRevision: liveRevision, ...liveInput } = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session }).measure()
   // Session.create owns an additional constructor-seed event, with no input cost.
   assert.equal(restoredRevision, liveRevision + 1)
   assert.deepEqual(restoredInput, liveInput)

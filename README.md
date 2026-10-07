@@ -6,11 +6,11 @@
 
 参考 S-forge MAGI 的指标曲线和 Codex 的上下文生命周期设计，以独立 Cordis 插件接入，不修改 Harness、S-forge 或 Codex 源码。本文档以中文为主。
 
-> 版本：`v0.7.0`。安装示例固定到同名 GitHub 标签，包含以下功能，依赖 DSH 的预稳定接口。源码集成验收通过显式外部 Host 的 `pnpm test:integration:source` 运行，直接读取未修改的 Harness 源码，不依赖已有构建产物；不承诺兼容所有旧版或未来版本。
+> 修复版本：`v0.7.1`，面向官方 DSH `0.2.0-rc.2`。安装 GitHub 版本前确认对应标签已经发布；本地修复包可使用下文的 tgz 装法。源码组合验收使用显式外部 Host 的 `pnpm test:integration:source`，不依赖残留构建产物；桌面产物验收由 Electron 从其封装目录只读加载官方模块。
 
 ## 指标与行为
 
-疲劳度采用 `min(100, 100 × (上下文估算量 / 策略预算)^1.5)`；唤醒值采用 `min(100, 100 × sqrt(保留历史估算量 / (模型容量 / 3)))`。默认按 30、60、85 分段；界面显示 0–100% 数值（最多一位小数）和等级，模型正文仍只报告等级，不显示剩余 token 倒计时。疲劳度四段依次为绿、蓝、橙、红；唤醒值依次为橙、蓝、青绿、绿。未校准使用灰色。容量取最近记录请求的真实路由模型；尚无容量时显示“未校准”。疲劳度以完整请求压力为基础，唤醒值以保留消息量为基础，因此工具定义和系统提示不会被当成丰富的历史经验。状态与自动维护读取 token-meter 的输入专用计价：保留 surface、工具定义和本轮待进入的输入共用 `InputPricingBasis`，输出计费量不参与下一次输入预算。meter 从符合条件且 header 匹配的成功 prompt 样本校准文本、schema 和 framing，已声明的图片视觉价格不重复乘倍率。插件不再按 2.5 倍截断有效校准；旧 `providerUsageRatio` 配置只保留迁移提示。缺少 `measureInput` / `priceMessages` 的宿主会在安装时报错，需先更新宿主。
+疲劳度采用 `min(100, 100 × (上下文估算量 / 策略预算)^1.5)`；唤醒值采用 `min(100, 100 × sqrt(保留历史估算量 / (模型容量 / 3)))`。默认按 30、60、85 分段；界面显示 0–100% 数值（最多一位小数）和等级，模型正文仍只报告等级，不显示剩余 token 倒计时。疲劳度四段依次为绿、蓝、橙、红；唤醒值依次为橙、蓝、青绿、绿。未校准使用灰色。容量取最近记录请求的真实路由模型；尚无容量时显示“未校准”。疲劳度以完整请求压力为基础，唤醒值以保留消息量为基础，因此工具定义和系统提示不会被当成丰富的历史经验。状态与自动维护使用插件自己的输入计价：公开 `tokenMeter.estimateMessage` 提供固定文本估算，保留 surface、工具定义和本轮待进入的输入共用冻结的计价依据，输出计费量不参与下一次输入预算。插件请求日志从符合条件且 header 匹配的成功 prompt 样本校准文本、schema 和 framing；没有样本时文本倍率为 1。图片视觉价格不重复乘倍率，有效大倍率不截断。旧 `providerUsageRatio` 配置只保留迁移提示。此版本使用官方 0.2.0-rc.2 已有接口，不要求新增 `measureInput` / `priceMessages` 方法或修改宿主。
 
 `context_status` 查询状态。`context_rest` 默认接收 1000–10000 个 UTF-16 字符的续接笔记，排入持久化收件箱；当前工具批次完成后，在下一次请求准备边界执行一次压缩。笔记、近期历史、工具调用与结果配对均保留。它读取预设 compaction provider 的公开摘要配置，在插件内执行摘要事务；自定义提供方未声明 LLM 摘要配置时仍调用其执行接口。摘要保留原记录并让任务继续。容量未知时，主动请求仍选择历史前缀，按显式 `retainTokens` 保留尾部；未设置时保留最近完整单元，再交给摘要路由或自定义 provider 处理实际输入。自动维护在可算出压力阈值时启动。摘要指令分别记录原始明确要求、执行者的实现选择、推测和完成状态，并依据最新纠正更新来源归属。
 
@@ -28,17 +28,17 @@
 
 输入框下的“预算与维护记录”折叠面板读取当前会话的请求日志，显示实际路由、物理与政策容量、完整输入估算、文本校准来源和样本、独立视觉价格、软硬阈值、释放目标、尾部与输出预留。维护详情展示选区规则、候选预测降幅、同价前后输入、路由与固定估价降幅、旧来源到新检查点的替换、递归覆盖及加工深度，以及提交、部分进展、失败和无收益结局。深度休息的 operation 与检查点事务显示为同一动作。
 
-面板每页 20 条，在当前会话内翻页；加载失败明确显示不可用。若会话已经提交检查点但提交审计不完整，只恢复可核对的替换事实并标明记录不完整，不推测缺失价格。客户端使用框架生成的响应式 hook，切换会话取消旧页请求，卸载停止轮询和未完成请求。Host 只读路径 `/context-care/actions?sessionId=...&limit=20&offset=0` 要求会话和显式页大小（1–200），继承已安装连接服务的鉴权并返回 `no-store`；响应不包含系统提示、工具 schema 或原始输出。
+面板每页 20 条，在当前会话内翻页；加载失败在面板和状态行显示具体 HTTP 或读取错误。改写记录失败会单独报告，按退避间隔重试，恢复后清除错误；修复、审计和事务闭合的二次失败保留原始错误码与消息，同时单独报告和记录。若会话已经提交检查点但提交审计不完整，只恢复可核对的替换事实并标明记录不完整，不推测缺失价格。客户端使用框架生成的响应式 hook，切换会话取消旧页请求，卸载停止轮询和未完成请求。Host 只读路径 `/context-care/actions?sessionId=...&limit=20&offset=0` 要求会话和显式页大小（1–200），继承已安装连接服务的鉴权并返回 `no-store`；响应不包含系统提示、工具 schema 或原始输出。
 
 ## 请求预算与溢出恢复
 
-Host 行 `dsh-context-care/requests` 统一观察 `llm/request-opened`、`llm/request-ready` 与 `llm/request-dispatched`，会话侧只登记当前可见工具所有者的政策。opened 在 middleware 前冻结日志 revision、surface 来源和派发前正文；ready 在最终投影后完整计价，不重复组装模型专用提示。使用预算 `C=min(已知实际容量,已知政策容量)`，输出预留取本次显式 `maxTokens`、adapter default 或 absent。硬输入 `H=C-R-safetyTokens`，可选计费输入上限再取 `min(H,billingInputCeilingTokens-safetyTokens)`；安全量各扣一次。软输入 `S=min(floor(budgetRatio*C),H-burstTokens)`，释放目标 `L=S-releaseMarginTokens`，尾部从 `C-R` 计算。非法已解析预算直接报错；两种容量均未知时保留 provider 调用。
+Host 行 `dsh-context-care/requests` 通过官方 `llm/stream` waterfall 拦截请求，在插件内创建编号并关联 `agent/assistant-stream` 的 attempt 与结算事件；会话侧登记当前可见工具所有者的政策。插件入口冻结日志 revision、surface 来源和正文，公开 `prepareCall` 绑定配置后组装一次性提示并完整计价。这里的 ready 和 dispatched 是插件日志阶段，不是新增 Harness 事件；dispatched 表示请求交给 prepared stream，不声称已观测 adapter 内部 HTTP 发包。使用预算 `C=min(已知实际容量,已知政策容量)`，输出预留取本次显式 `maxTokens`、adapter default 或 absent。硬输入 `H=C-R-safetyTokens`，可选计费输入上限再取 `min(H,billingInputCeilingTokens-safetyTokens)`；安全量各扣一次。软输入 `S=min(floor(budgetRatio*C),H-burstTokens)`，释放目标 `L=S-releaseMarginTokens`，尾部从 `C-R` 计算。非法已解析预算直接报错；两种容量均未知时保留 provider 调用。
 
 `contextBudgetTokens` 与 `billingInputCeilingTokens` 可全局设置，或在 `routeBudgets` 按 exact provider/model/purpose 指定，不猜模型家族或实际容量。`safetyTokens`、`burstTokens`、`releaseMarginTokens` 迁移默认 0，部署应明确填写；`summarySafetyTokens` 可覆盖摘要安全量，`retainTokens: 0` 合法，`maxOverflowRetries` 默认 1。旧 `softBudgetRatio`、`hardBudgetRatio`、`hysteresisRatio` 不再决定新预算阈值，使用 `budgetRatio` 与 token allowances。
 
 完整输入超过硬预算时，本地返回 `REQUEST_BUDGET_EXCEEDED`，不会派发到 adapter。provider 的 `CONTEXT_WINDOW_EXCEEDED` 即使低于估算软阈值也进入强制恢复。恢复先裁剪再尝试保留最近完整单元的前缀摘要；只有失败 revision 之后、覆盖失败请求已用来源且同一冻结 basis 下价格下降的持久 replacement 才允许有限重试。本地预算拒绝还要求重构输入已在 H 内；恢复失败且没有合格进展时保留原始请求失败，摘要错误不会替代它。idle 或正常输出清除重试计数，贡献卸载清除对应快照及检查。
 
-摘要构造与执行共用请求 builder，包含系统头、工具定义、完整选区与末尾指令。摘要路由按自己的容量和 compaction 政策选择能容纳的完整前缀；provider 或最终检查拒绝过大输入后，在配置次数内缩小完整选区重试。提交前核对输入仍相同，并以同一冻结 basis 比较完整主请求，包含检查点包裹文字；文本校准倍率不会被固定 shadow 价格代替。同一会话的摘要执行串行，失败闭合事务并保留历史。`summary` 可覆盖 `provider`、`model`、`maxTokens` 与 `maxRetries`；未覆盖的值取提供方对应会话路由的公开配置。Host 请求观察行还独占 `context_care_requests` 存储域。ready 先持久记录实际路由、完整输入指纹、计价依据与预算，再决定派发；dispatch 和真实输出结算按会话串行更新，保留是否确实派发、输出事件与 usage。摘要的 started、prepared、committed 或 failed 动作关联同一 compactionId。`contextCareRequests.list(sessionId?)` 按时间和 key 稳定排序，`flush(sessionId?)` 等待存储确认；卸载先移除监听再等待写入并关闭 handle。ready 另存完整实际输入的未校准文本价和视觉价；校准只选同输入配置的成功真实对话请求，以 usage 的输入与 cache tokens 减视觉价后除文本价，合法大倍率保留。一次性提示与工具已在分母中，图片视觉价仍独立。已有请求日志但没有合格样本时使用倍率 1；整个旧会话没有请求日志时保留 meter 的公开基准；裁剪和深度替换也记录 started 与 completed/failed、来源 seq 和同依据前后输入价；失败后已提交的缩减仍在记录中标为部分进展。本地错误的 origin/budgetKind 目前属于运行时检查详情，终止 stream 保存稳定错误码与原始消息。普通维护的状态消息计价属于预测，最终 ready 检查完整实际请求。高负载与非常高负载文案保留落盘和维护步骤，只描述请求负载、正文替换及可核对的原记录，不从统计推导失忆、能力下降或身份改变。
+摘要构造与执行共用请求 builder，包含系统头、工具定义、完整选区与末尾指令。摘要路由按自己的容量和 compaction 政策选择能容纳的完整前缀；provider 或最终检查拒绝过大输入后，在配置次数内缩小完整选区重试。提交前核对输入仍相同，并以同一冻结 basis 比较完整主请求，包含检查点包裹文字；文本校准倍率不会被固定 shadow 价格代替。同一会话的摘要执行串行，失败闭合事务并保留历史。`summary` 可覆盖 `provider`、`model`、`maxTokens` 与 `maxRetries`；未覆盖的值取提供方对应会话路由的公开配置。Host 请求观察行还独占 `context_care_requests` 存储域。ready 先持久记录实际路由、完整输入指纹、计价依据与预算，再决定派发；dispatch 和真实输出结算按会话串行更新，保留是否确实派发、输出事件与 usage。摘要的 started、prepared、committed 或 failed 动作关联同一 compactionId。`contextCareRequests.list(sessionId?)` 按时间和 key 稳定排序，`flush(sessionId?)` 等待存储确认；卸载先移除监听再等待写入并关闭 handle。ready 另存完整实际输入的未校准文本价和视觉价；校准只选同输入配置的成功真实对话请求，以 usage 的输入与 cache tokens 减视觉价后除文本价，合法大倍率保留。一次性提示与工具已在分母中，图片视觉价仍独立。没有匹配的合格请求样本时使用倍率 1；旧会话的请求与输出合计压力不会代替输入校准；裁剪和深度替换也记录 started 与 completed/failed、来源 seq 和同依据前后输入价；失败后已提交的缩减仍在记录中标为部分进展。本地错误的 origin/budgetKind 目前属于运行时检查详情，终止 stream 保存稳定错误码与原始消息。普通维护的状态消息计价属于预测，最终 ready 检查完整实际请求。高负载与非常高负载文案保留落盘和维护步骤，只描述请求负载、正文替换及可核对的原记录，不从统计推导失忆、能力下降或身份改变。
 
 ## 模型作用域提醒
 
@@ -143,15 +143,27 @@ UI 显示最近一次请求准备时的状态，与模型读取的同一条持�
 
 ## 安装
 
-### 从 GitHub 安装（推荐）
+### 安装本地修复包
+
+在插件管理界面的包来源填写 tgz 的完整路径，或使用官方 CLI（将路径替换为包的实际位置）：
 
 ```sh
-dsh plugin --profile web add "github:leolee9086/dsh-context-care#v0.7.0"
+dsh plugin --profile desktop add "/absolute/path/to/dsh-context-care-0.7.1.tgz"
+```
+
+Host 代码更新后需要重启 DSH，再刷新页面；重新启用条目不会清除旧 Node 模块缓存。安装和重启通过官方管理流程完成。
+
+### 从 GitHub 安装
+
+确认 `v0.7.1` 标签已发布后可使用：
+
+```sh
+dsh plugin --profile web add "github:leolee9086/dsh-context-care#v0.7.1"
 ```
 
 构建产物 `lib/` 已入库，装完即可用 —— 不需要额外构建，也不需要手工打包上传 tgz。带上标签安装，版本不会跟着分支漂。
 
-安装不拉取 DSH 本体或内部包，也不需要 DSH 源码目录。所有 DSH 能力都通过 Cordis 的 `inject`、`ctx` 服务及事件参数取得；运行环境需预先提供这些服务。当前安装示例使用已有 GitHub 标签；包清单不设置 `private` 发布拦截。**安装后挂载宿主补丁中的三行**（请求观察、完成观察和显示/维护入口），所有会话自动生效。
+安装不拉取 DSH 本体或内部包，也不需要 DSH 源码目录。所有 DSH 能力都通过 Cordis 的 `inject`、`ctx` 服务及事件参数取得；运行环境需预先提供这些服务。GitHub 安装按已发布标签固定版本，本地修复可直接使用 tgz；包清单不设置 `private` 发布拦截。**安装后挂载宿主补丁中的三行**（请求观察、完成观察和显示/维护入口），所有会话自动生效。
 
 1. 在 Web profile 的 `cordis.patch.yml` 中加入主入口。默认文件位于 `${DSH_HOME}/profiles/web/cordis.patch.yml`，未设置 `DSH_HOME` 时通常位于 `~/.dsh/profiles/web/cordis.patch.yml`。已有 `insert` 时，把行合并到相应列表：
 
@@ -284,7 +296,7 @@ S-forge 来源：`kernel/nerv/magi/sages/token_counter.go` 的 `CalculateFatigue
 
 ## 已知限制
 
-计量采用完整实际请求日志的近似文本校准和独立视觉价格，缺少可对应样本时退回估算，不声称 tokenizer 精确计价。公开图片计价能力没有持久 generation 标识；维护预估冻结当时可见投影，最终 ready 使用与真实派发绑定的投影并检查完整输入。未提供图片投影的路由使用固定估算。新路由及后续 middleware 的内容变化可能尚未反映在本轮状态预测中，最终硬预算检查仍是派发兜底。
+计量采用插件入口完整请求的近似文本校准和独立视觉价格，缺少匹配样本时退回估算，不声称 tokenizer 精确计价。公开图片计价能力没有持久 generation 标识；维护预估冻结当时可见投影，ready 检查 prepared 请求的完整输入。未提供图片投影的路由使用固定估算。官方 0.2.0-rc.2 没有最终 adapter 派发观察事件；插件检查后，第三方 middleware 若再改变路由、正文或工具，变化不会自动反映在本插件的日志和预算中。
 
 本插件关联自身构造的 prepared call；其他插件若另建独立调用，应保留其 Agent 请求生命周期，否则本插件不能推断未关联调用的输出来源。自动摘要使用提供方公开的 LLM 摘要配置；没有该配置的自定义提供方仍委托其 `compactRegion`，其内部计价和提交行为由提供方负责。本插件不改写 basic 的直接手动 API，也未为自定义 provider 的内部错误修复增加新接口。
 

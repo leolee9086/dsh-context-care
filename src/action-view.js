@@ -5,7 +5,9 @@ const row = (label, value) => React.createElement('div', { key: label }, `${labe
 
 /** Pure display of admission and immutable maintenance facts; no request contents. */
 export function ActionDetails({ value, t }) {
-  if (value?.status !== 'ready') return React.createElement('div', { role: 'status' }, t(value?.status === 'error' ? 'actionsUnavailable' : 'actionsLoading'))
+  if (value?.status !== 'ready') return React.createElement('div', { role: value?.status === 'error' ? 'alert' : 'status' },
+    t(value?.status === 'error' ? 'actionsUnavailable' : 'actionsLoading'),
+    value?.error ? React.createElement('div', null, `${t('actionsError')}: ${value.error}`) : null)
   const budget = value.admission?.budget
   return React.createElement('div', { style: { maxHeight: '50vh', overflow: 'auto', padding: '6px 0', overflowWrap: 'anywhere' } },
     budget ? React.createElement('div', null,
@@ -30,6 +32,7 @@ export function ActionDetails({ value, t }) {
       action.coverage ? row(t('actionsCoverage'), `${action.coverage.leafSeqs.join(', ')} · ${t('actionsDepth')}: ${action.coverage.depth}`) : null,
       action.comparisons ? row(t('actionsCandidates'), action.comparisons.map(candidate => `${candidate.start} … ${candidate.end}: ${t(`rule_${candidate.rule}`)}, ${number(candidate.expectedSaving)}`).join('; ')) : null,
       action.error || action.failure ? row(t('actionsError'), action.error ?? action.failure.message) : null,
+      ...(action.secondaryFailures ?? []).map((failure, index) => row(`${t('actionsError')} ${index + 1}`, `${failure.phase}: ${failure.message}`)),
       row(t('actionsJournal'), t(action.journalPersisted ? 'actionsPersisted' : 'actionsRecovered')),
     )),
     value.actions.length ? null : React.createElement('div', null, t('actionsEmpty')),

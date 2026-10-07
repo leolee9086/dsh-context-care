@@ -76,8 +76,6 @@ async function mounted(options = {}) {
   ctx.provide('systemPrompt', { context(section) { sections.set(section.name, section); return () => sections.delete(section.name) } })
   ctx.provide('tokenMeter', {
     measure: measurement, estimateMessage: message => message.tokens ?? (message.content.length ? 10 : 0),
-    measureInput(session, header = session.requestHeader()) { const measured = measurement(session); return { ...measured, inputTokens: measured.totalTokens, pricingBasis: { textScale: 1, header } } },
-    priceMessages: messages => messages.length * 10,
   })
   ctx.provide('llm', { resolveModelInfo: async () => options.modelInfo ?? ({ context: { contextWindow: 10000 } }), imageRequestPricing: () => undefined, fileRequestText: ref => ref.name })
   ctx.provide('compaction', { async compactRegion(start, end, owner, sig) {
@@ -164,13 +162,13 @@ test('one session arming maintenance cannot cause another session below the soft
 test('deep rest rejects a larger complete handoff before opening a transaction and preserves fixed shadow prices', () => {
   const session = history([user(0, 2000), user(1, 2000)])
   const range = selectClearRange(session)
-  const meter = {
-    measureInput: () => ({ nodes: [{ seq: 0, tokens: 10000, heuristicTokens: 2000 }, { seq: 1, tokens: 10000, heuristicTokens: 2000 }], pricingBasis: { textScale: 5 } }),
+  const pricing = {
+    measure: () => ({ nodes: [{ seq: 0, tokens: 10000, heuristicTokens: 2000 }, { seq: 1, tokens: 10000, heuristicTokens: 2000 }], pricingBasis: { textScale: 5 } }),
     priceMessages: () => 20000,
   }
-  assert.throws(() => clearRange(session, meter, range, 'oversized'), /handoff-larger-than-history/)
+  assert.throws(() => clearRange(session, {}, range, 'oversized', pricing), /handoff-larger-than-history/)
   assert.equal(session.snapshotEvents().length, 2)
-  const committed = clearRange(session, { ...meter, priceMessages: () => 10000 }, range, 'bounded handoff')
+  const committed = clearRange(session, {}, range, 'bounded handoff', { ...pricing, priceMessages: () => 10000 })
   assert.equal(committed.shadowedTokenCount, 4000)
   assert.equal(session.surface.nodes.length, 1)
 })

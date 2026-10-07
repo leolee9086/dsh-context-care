@@ -215,8 +215,8 @@ export function installContextCare(ctx, raw, compactionSource) {
     const pruner = resolvePruner(agent)
     return pruner === undefined ? undefined : { pruneSession: session => maintain(session, pricing, 'prune', reason, () => pruner.pruneSession(session)) }
   }
-  if (typeof ctx.tokenMeter.measureInput !== 'function' || typeof ctx.tokenMeter.priceMessages !== 'function') {
-    throw new Error('context-care requires input-only tokenMeter.measureInput and priceMessages; update the Host')
+  if (typeof ctx.tokenMeter.estimateMessage !== 'function') {
+    throw new Error('context-care requires the public tokenMeter.estimateMessage estimator')
   }
   if (raw?.providerUsageRatio !== undefined) ctx.logger.warn('context-care: providerUsageRatio is deprecated; tokenMeter owns input calibration')
   // This gate is the only automatic maintenance decision in context-care. The
@@ -618,10 +618,10 @@ export function installContextCare(ctx, raw, compactionSource) {
     const event = agent.session.eventAt(frame.outcome.seq)
     if (event?.type === 'assistant/message' && !event.data.interrupted) overflowRetries.delete(agent)
   })
-  ctx.on('agent/request-error', async ({ agent, callId, failure, signal }, next) => {
+  ctx.on('agent/request-error', async ({ agent, failure, signal }, next) => {
     const delegated = await next()
     const requests = ctx.contextCareRequests
-    const failed = callId === undefined ? undefined : requests.snapshot(callId)
+    const failed = requests.failed(agent)
     if (failed?.owner !== requestOwner) return delegated
     try {
       if (delegated?.kind === 'retry' || signal.aborted || !['REQUEST_BUDGET_EXCEEDED', 'CONTEXT_WINDOW_EXCEEDED'].includes(failure.code)) return delegated
@@ -656,7 +656,7 @@ export function installContextCare(ctx, raw, compactionSource) {
       return { kind: 'retry' }
       })
     } finally {
-      requests.release(callId)
+      requests.release(failed.callId)
     }
   }, { prepend: true })
 

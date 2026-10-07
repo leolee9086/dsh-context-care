@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { recordSecondaryFailure } from './secondary-failure.js'
 
 /**
  * A failed maintenance call may leave an earlier replacement committed. Measure
@@ -34,11 +35,11 @@ export async function runMaintenance({ requests, session, pricing, action, reaso
     try {
       const result = facts()
       await record({ phase: 'failed', ...result, outcome: result.progressed ? 'partial' : 'failed',
-        error: error instanceof Error ? error.message : String(error) })
+        error: error instanceof Error ? error.message : String(error), secondaryFailures: error.secondaryFailures })
     } catch (journalError) {
       // The journal already reports and retains this failure for flush(). The
       // originating maintenance exception remains the caller's primary result.
-      void journalError
+      recordSecondaryFailure(error, journalError, 'maintenance audit')
     }
     throw error
   }

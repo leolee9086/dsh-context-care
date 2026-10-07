@@ -39,7 +39,7 @@ export function apply(ctx, config = {}) {
   // connection 是**可选**依赖(手册里的写法就是 ctx.get('connection')?. ),不写进 inject ——
   // 猜错服务名会让插件一直停在 PENDING,那比少一层鉴权严重得多。
   const connection = ctx.get('connection')
-  ctx.effect(() => server.register({ kind: 'exact', path: '/context-care/actions', handler(req, res) {
+  ctx.effect(() => server.register({ kind: 'exact', path: '/context-care/actions', async handler(req, res) {
     const rejected = connection?.requestRejection(req)
     if (rejected !== undefined) { res.writeHead(rejected); res.end(); return }
     if (req.method !== 'GET') { res.writeHead(405, { allow: 'GET' }); res.end(); return }
@@ -52,6 +52,9 @@ export function apply(ctx, config = {}) {
       res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid-query' })); return
     }
     try {
+      // A readable old table is not evidence that the latest journal write
+      // succeeded. Surface retained storage failures to the status panel.
+      await ctx.contextCareRequests.flush(sessionId)
       const view = contextCareActions(ctx.contextCareRequests.list(sessionId), ctx.sessions.get(sessionId))
       const actions = view.actions.slice(offset, offset + limit)
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
@@ -59,7 +62,7 @@ export function apply(ctx, config = {}) {
         nextOffset: offset + actions.length < view.actions.length ? offset + actions.length : null }))
     } catch (error) {
       ctx.logger.warn(`context-care: action query failed: ${String(error)}`)
-      res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'journal-unavailable' }))
+      res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'journal-unavailable', message: error instanceof Error ? error.message : String(error) }))
     }
   } }))
 
@@ -86,7 +89,7 @@ export function apply(ctx, config = {}) {
         } catch (error) {
           ctx.logger.warn('context-care: 读改写记录失败: ' + (error instanceof Error ? error.message : String(error)))
           res.writeHead(500, { 'content-type': 'application/json' })
-          res.end(JSON.stringify({ error: 'journal-unavailable' }))
+          res.end(JSON.stringify({ error: 'journal-unavailable', message: error instanceof Error ? error.message : String(error) }))
         }
       },
     })

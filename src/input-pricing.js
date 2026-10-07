@@ -8,7 +8,11 @@
  */
 export function captureInputPricing(options) {
   const { meter, llm, session, header = session.requestHeader() } = options
-  const initial = meter.measureInput(session, header)
+  // Official rc.2 exposes only the fixed estimator. Input calibration belongs
+  // to this plugin's completed-request journal, never to output-token pressure.
+  const initial = { logRevision: session.seq, pricingBasis: Object.freeze({
+    kind: 'uncalibrated-estimate', textScale: 1, header, source: 'plugin-input-estimator',
+  }) }
   const basis = options.requests?.calibration(session, header, initial.pricingBasis) ?? initial.pricingBasis
   const scale = basis.textScale
   const imagePricing = Object.hasOwn(options, 'imageRequestPricing')

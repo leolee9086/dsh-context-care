@@ -16,6 +16,7 @@ const renderNotice = data => renderToStaticMarkup(React.createElement(NoticeNode
 
 const render = state => renderToStaticMarkup(React.createElement(ContextCareStatus, {
   useProjection(key) { assert.equal(key, 'contextCareNumeric'); return state },
+  useCareActions: selector => selector(new Map()), useRewriteHealth: () => ({ status: 'ready' }), watchActions: () => () => {},
   t: key => dictionaries.zh[key],
 }))
 
