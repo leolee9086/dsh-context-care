@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { installContextCare, inject as agentInject, previousState, requestContentTokens, requestLoadTokens, shouldNotify } from './index.js'
+import { installContextCare, inject as agentInject, previousState, shouldNotify } from './index.js'
 import { calculateState, renderState, resolveConfig } from './policy.js'
 import { createUserMessage } from './message.js'
 import { producedBy, producerKind } from './producer-source.js'
@@ -29,12 +29,11 @@ export async function apply(ctx, config) {
           const config = envelope?.config
           const info = config?.provider && config.model ? await scoped.llm.resolveModelInfo(config.provider, config.model, signal) : null
           signal.throwIfAborted()
-          const measurement = scoped.tokenMeter.measure(owner.session)
-          const incoming = decision.messages.filter(message => !isState(message)).reduce((sum, message) => sum + scoped.tokenMeter.estimateMessage(message), 0)
-          const retained = measurement.surfaceTokens + incoming
-          const selfMeasured = requestContentTokens(envelope, retained)
+          const measurement = scoped.tokenMeter.measureInput(owner.session, envelope)
+          const incoming = scoped.tokenMeter.priceMessages(decision.messages.filter(message => !isState(message)), measurement.pricingBasis)
+          const retained = measurement.surfaceTokens
           const spec = resolveConfig()
-          const load = requestLoadTokens(measurement, selfMeasured, spec.providerUsageRatio)
+          const load = Math.ceil(measurement.inputTokens + incoming)
           const state = calculateState(load, retained, info?.context?.contextWindow, spec)
           const prior = previousState(owner.session)
           const notificationText = existing ? existing.content.filter(block => block.type === 'text').map(block => block.text).join('\n') : renderState(state)

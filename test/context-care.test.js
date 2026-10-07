@@ -2,8 +2,10 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
 import * as plugin from '../src/index.js'
+import * as requests from '../src/request-host.js'
 import { calculateState, GUIDANCE, renderState, resolveConfig } from '../src/policy.js'
 import { selectClearRange, selectRestRange } from '../src/selection.js'
+import { clearRange } from '../src/deep-rest.js'
 import { detectLoop } from '../src/loop-guard.js'
 
 const signal = () => new AbortController().signal
@@ -25,6 +27,12 @@ function history(events) {
   return {
     surface,
     eventAt: seq => log.find(event => event.seq === seq),
+    get seq() { return log.length },
+    deriveEventMessage(event) {
+      if (event.type === 'user/message') return { role: 'user', ...event.data, tokens: event.tokens ?? 500 }
+      return event.data.message === undefined ? null : { ...event.data.message, tokens: event.tokens ?? 500 }
+    },
+    deriveMessages() { return surface.nodes.map(seq => this.deriveEventMessage(this.eventAt(seq))).filter(Boolean) },
     requestHeader: () => ({ config: { provider: 'test', model: 'test' } }),
     snapshotEvents: () => log,
     append(type, data, opts) {
@@ -43,7 +51,7 @@ function history(events) {
   }
 }
 function measurement(session) {
-  const nodes = session.surface.nodes.map(seq => ({ seq, tokens: session.eventAt(seq).tokens ?? 500 }))
+  const nodes = session.surface.nodes.map(seq => ({ seq, tokens: session.eventAt(seq).tokens ?? 500, heuristicTokens: session.eventAt(seq).tokens ?? 500 }))
   return { nodes, totalTokens: nodes.reduce((sum, node) => sum + node.tokens, 0), surfaceTokens: nodes.reduce((sum, node) => sum + node.tokens, 0) }
 }
 async function mounted(options = {}) {
@@ -55,7 +63,7 @@ async function mounted(options = {}) {
   const inbox = []
   const agent = { session, options: {}, inject: message => inbox.push(message) }
   const compacted = []
-  ctx.provide('agents', {})
+  ctx.provide('agents', { get: () => agent })
   ctx.provide('sessionProjections', { register: () => () => {} })
   ctx.provide('sessions', {
     messageProjections: [],
@@ -64,19 +72,26 @@ async function mounted(options = {}) {
       return () => { this.messageProjections.splice(this.messageProjections.indexOf(projection), 1) }
     },
   })
-  ctx.provide('tools', { register(tool) { registered.set(tool.name, tool); return () => registered.delete(tool.name) } })
+  ctx.provide('tools', { get(name) { return registered.get(name) }, register(tool) { registered.set(tool.name, tool); return () => registered.delete(tool.name) } })
   ctx.provide('systemPrompt', { context(section) { sections.set(section.name, section); return () => sections.delete(section.name) } })
-  ctx.provide('tokenMeter', { measure: measurement, estimateMessage: () => 10 })
-  ctx.provide('llm', { resolveModelInfo: async () => ({ context: { contextWindow: 10000 } }) })
+  ctx.provide('tokenMeter', {
+    measure: measurement, estimateMessage: message => message.tokens ?? (message.content.length ? 10 : 0),
+    measureInput(session, header = session.requestHeader()) { const measured = measurement(session); return { ...measured, inputTokens: measured.totalTokens, pricingBasis: { textScale: 1, header } } },
+    priceMessages: messages => messages.length * 10,
+  })
+  ctx.provide('llm', { resolveModelInfo: async () => options.modelInfo ?? ({ context: { contextWindow: 10000 } }), imageRequestPricing: () => undefined, fileRequestText: ref => ref.name })
   ctx.provide('compaction', { async compactRegion(start, end, owner, sig) {
     if (options.error) throw new Error('summary rejected')
     if (options.abort) { options.abort.abort(); sig.throwIfAborted() }
     compacted.push({ start, end, owner })
     session.surface.replaceGeneration++
   } })
-  const fiber = await ctx.plugin(plugin, { minFreshTokens: 1000 })
-  async function step(messages = [], nextExtra = {}, sig = signal()) {
-    return ctx.waterfall('agent/pre-step', { agent, signal: sig }, async () => {
+  const records = new Map()
+  ctx.provide('storageDomain', { async open() { return { table: () => ({ put: async (key, value) => records.set(key, value), entries: () => records.entries() }), close: async () => {} } } })
+  await ctx.plugin(requests)
+  const fiber = await ctx.plugin(plugin, { minFreshTokens: 1000, ...options.config })
+  async function step(messages = [], nextExtra = {}, sig = signal(), owner = agent) {
+    return ctx.waterfall('agent/pre-step', { agent: owner, signal: sig }, async () => {
       if (options.auto) session.surface.replaceGeneration++
       return { kind: 'enter', messages, startsRequestSeries: true, ...nextExtra }
     })
@@ -127,6 +142,49 @@ test('summary-only and plugin statuses are not fresh work', () => {
   assert.equal(selectRestRange(session, measurement(session), 1500, 1000, plugin.name), null)
 })
 
+test('system tokens never make a status-only prefix fresh', () => {
+  const session = history([
+    { seq: 0, type: 'system/message', data: { message: { role: 'system', content: [] } }, tokens: 20000 },
+    user(1, 6000, { kind: 'compact-checkpoint', compactionId: 'older' }),
+    user(2, 500, { kind: 'plugin', plugin: 'dsh-context-care:state' }),
+    user(3, 25000),
+  ])
+  assert.equal(selectRestRange(session, measurement(session), 20000, 1024, 'dsh-context-care'), null)
+})
+
+test('one session arming maintenance cannot cause another session below the soft budget to compact', async t => {
+  const h = await mounted(); t.after(() => h.ctx.fiber.dispose())
+  const first = { ...h.agent, session: history([user(0, 9000)]) }
+  const second = { ...h.agent, session: history([user(0, 3000), user(1, 2000), user(2, 2000)]) }
+  await h.step([], {}, signal(), first)
+  await h.step([], {}, signal(), second)
+  assert.equal(h.compacted.length, 0)
+})
+
+test('deep rest rejects a larger complete handoff before opening a transaction and preserves fixed shadow prices', () => {
+  const session = history([user(0, 2000), user(1, 2000)])
+  const range = selectClearRange(session)
+  const meter = {
+    measureInput: () => ({ nodes: [{ seq: 0, tokens: 10000, heuristicTokens: 2000 }, { seq: 1, tokens: 10000, heuristicTokens: 2000 }], pricingBasis: { textScale: 5 } }),
+    priceMessages: () => 20000,
+  }
+  assert.throws(() => clearRange(session, meter, range, 'oversized'), /handoff-larger-than-history/)
+  assert.equal(session.snapshotEvents().length, 2)
+  const committed = clearRange(session, { ...meter, priceMessages: () => 10000 }, range, 'bounded handoff')
+  assert.equal(committed.shadowedTokenCount, 4000)
+  assert.equal(session.surface.nodes.length, 1)
+})
+
+test('deep rest refuses a selected span changed while awaiting the maintenance ACK', () => {
+  const session = history([user(0, 2000), user(1, 2000)])
+  const range = selectClearRange(session)
+  session.append('user/message', { content: [{ type: 'text', text: 'Concurrent saved work.' }] }, { surfaceOp: 'append' })
+  session.surface.nodes.splice(1, 0, session.surface.nodes.pop())
+  assert.throws(() => clearRange(session, {}, range, 'handoff'), /handoff source changed/)
+  assert.equal(session.snapshotEvents().filter(event => event.type.startsWith('compaction/')).length, 0)
+  assert.deepEqual(session.surface.nodes, [0, 2, 1])
+})
+
 test('tool queues a bounded note; next boundary compacts once and preserves decision fields', async t => {
   const h = await mounted(); t.after(() => h.ctx.fiber.dispose())
   const tool = h.registered.get('context_rest')
@@ -153,6 +211,27 @@ test('tool queues a bounded note; next boundary compacts once and preserves deci
   assert.equal(decision.messages[0], h.inbox[0])
 })
 
+test('explicit rest reaches the provider with unknown capacity or no prior routed header', async t => {
+  for (const scenario of [
+    { name: 'unknown capacity', modelInfo: {}, expectedEnd: 1 },
+    { name: 'unknown capacity with an explicit retained tail', modelInfo: {}, config: { retainTokens: 3000 }, expectedEnd: 0 },
+    { name: 'no routed header', noHeader: true, expectedEnd: 1 },
+  ]) await t.test(scenario.name, async t => {
+    const h = await mounted(scenario); t.after(() => h.ctx.fiber.dispose())
+    if (scenario.noHeader) h.session.requestHeader = () => undefined
+    // An unknown pressure threshold does not itself schedule automatic work.
+    await h.step()
+    assert.equal(h.compacted.length, 0)
+    const note = longNote('Continue the verified task after this requested checkpoint.')
+    await h.registered.get('context_rest').execute({ note }, { agent: h.agent, signal: signal() })
+    const decision = await h.step(h.inbox)
+    assert.equal(h.compacted.length, 1)
+    assert.deepEqual({ start: h.compacted[0].start, end: h.compacted[0].end }, { start: 0, end: scenario.expectedEnd })
+    assert.ok(decision.messages.includes(h.inbox[0]))
+    assert.match(decision.messages.at(-1).content[0].text, /较早的历史已摘要/)
+  })
+})
+
 test('deep rest clears the history to the handoff and never calls the compaction provider', async t => {
   const h = await mounted(); t.after(() => h.ctx.fiber.dispose())
   const tool = h.registered.get('context_rest')
@@ -165,7 +244,8 @@ test('deep rest clears the history to the handoff and never calls the compaction
   }, { agent: h.agent, signal: signal() })
   assert.match(result, /深度休息已经排定/)
   const decision = await h.step(h.inbox)
-  assert.match(decision.messages.at(-1).content[0].text, /历史已清空/)
+  assert.match(decision.messages.at(-1).content[0].text, /历史已用交接和找回路径替换/)
+  assert.equal(decision.messages.includes(h.inbox[0]), false, 'The committed handoff must not be admitted a second time')
   // 清空不经过 compaction provider —— 这正是它不会撞上摘要下限的原因。
   assert.equal(h.compacted.length, 0)
   // 三条历史压成一条：替换物自己。
@@ -183,6 +263,18 @@ test('automatic reduction avoids a second compaction in the same boundary', asyn
   const decision = await h.step(h.inbox)
   assert.equal(h.compacted.length, 0)
   assert.match(decision.messages.at(-1).content[0].text, /自动维护减少过/)
+})
+
+test('delegated ordinary maintenance does not consume an explicit deep handoff', async t => {
+  const h = await mounted({ auto: true }); t.after(() => h.ctx.fiber.dispose())
+  await h.registered.get('context_rest').execute({ note: longNote('Goal: preserve verified results.'), deep: true,
+    recovery: longNote('Read the original session sources.') }, { agent: h.agent, signal: signal() })
+  const decision = await h.step(h.inbox)
+  assert.equal(h.compacted.length, 0)
+  const checkpoint = h.session.eventAt(h.session.surface.nodes.at(-1))
+  assert.equal(checkpoint.data.source.kind, 'compact-checkpoint')
+  assert.match(checkpoint.data.content[0].text, /Goal: preserve verified results/)
+  assert.match(decision.messages.at(-1).content[0].text, /交接和找回路径替换/)
 })
 
 test('failure is reported without pretending that history was compressed', async t => {
@@ -236,8 +328,8 @@ test('status snapshot contains no countdown or unsupported memory diagnosis', ()
     '<context-care>',
     '疲劳：高；唤醒值：低。',
     '这是基于最近一次请求与当前留存历史的估计，不是任务的截止时间。',
-    '这次会话靠前的部分正在变得不好回忆。继续之前：先把要紧的写下来，再压缩。',
-    '摘要能留住线索；context_rest 更省。',
+    '本次请求触发了高负载维护建议。继续之前：先把目标、已验证结果和未完成工作落盘，再按当前策略整理上下文。',
+    '摘要能留住线索；用 context_rest 写细交接并排定维护。',
     '</context-care>',
   ].join('\n'))
 })
@@ -250,13 +342,12 @@ test('建议强度跟着疲劳等级走，very-high 明确指向深度休息', (
   assert.equal(new Set([normal, elevated, high, veryHigh]).size, 4)
   assert.match(normal, /照常推进任务/)
   assert.match(elevated, /负载在上升/)
-  assert.match(high, /先把要紧的写下来/)
-  // very-high 要同时给出动作（落盘 + 深度休息）和退路（session_blocks_* 能找回）。
+  assert.match(high, /已验证结果和未完成工作落盘/)
   assert.match(veryHigh, /深度休息/)
-  assert.match(veryHigh, /清空历史/)
-  assert.match(veryHigh, /session_blocks_\*/)
-  // 重构那句的方向：不可恢复的损失在「带着疲劳继续做」这一侧，不在「清空」那一侧。
-  assert.match(veryHigh, /找不回来/)
+  assert.match(veryHigh, /可清空历史/)
+  assert.match(veryHigh, /原始细节仍可从会话日志或检查点核对/)
+  assert.match(veryHigh, /不改变你的身份、目标与判断归属/)
+  for (const text of [normal, elevated, high, veryHigh]) assert.doesNotMatch(text, /回忆不可靠|不好回忆|错误会叠加|活儿找不回来/)
   // 未知容量退回最低一级的建议，而不是空白或者英文枚举值。
   const unknown = renderState({ fatigue: 'unknown', wakefulness: 'unknown' })
   assert.match(unknown, /疲劳：未知；唤醒值：未知/)
@@ -274,21 +365,19 @@ test('常驻指引不再无条件踩刹车', () => {
 
 // ------------------------------------------------------- 焦虑提醒的文案
 
-test('焦虑文案署名 Seraph，并拆前提而不是讲后果', () => {
+test('规划提醒保留真实期限与当前计量，并注明本插件的提醒来源', () => {
   const timeText = plugin.WATCH_NOTICES['time-anxiety'].text()
-  assert.match(timeText, /\[Seraph · 系统的心理医生模块\]/)
-  assert.match(timeText, /时间不是可观测的量/)
-  assert.match(timeText, /时间不进入判断/)
-  // 旧文案的成本收益论证不该残留：它对"以为自己快没资源"的人答非所问。
-  assert.doesNotMatch(timeText, /只会浪费更多时间/)
-  assert.doesNotMatch(timeText, /绕过正确策略/)
+  assert.match(timeText, /\[Seraph · 上下文照料提醒\]/)
+  assert.match(timeText, /明确给出的期限、当前时间和已知运行限制可以用于规划/)
+  assert.match(timeText, /未提供的剩余运行额度按未知处理/)
+  assert.doesNotMatch(timeText, /时间不是可观测的量|时间不进入判断|心理医生模块/)
 
   const ctxText = plugin.WATCH_NOTICES['context-anxiety'].text(undefined, { fatigueValue: 18.5, wakefulnessValue: 67.3 })
-  assert.match(ctxText, /\[Seraph · 系统的心理医生模块\]/)
+  assert.match(ctxText, /\[Seraph · 上下文照料提醒\]/)
   assert.match(ctxText, /fatigue 18\.5%、wakefulness 67\.3%/)
-  // "压缩是威胁"才是歪曲，所以文案要拆的就是这个前提。
-  assert.match(ctxText, /压缩不是损失/)
-  assert.match(ctxText, /只看这件事做完没有/)
+  assert.match(ctxText, /结合实际工作步骤、当前计量、交接和找回路径/)
+  assert.match(ctxText, /压缩前把当前目标、已验证结果、未完成工作和关键路径记清/)
+  assert.doesNotMatch(ctxText, /不需要提前做任何准备|不看已经用了多少/)
 })
 
 test('拿不到数值时退回不带数字的说法，不编造百分比', () => {
@@ -303,6 +392,9 @@ test('循环文案仍然说明本轮是被中止的', () => {
   const text = plugin.WATCH_NOTICES['line-repeat'].text({ line: 'same line', count: 40, total: 80, ratio: 0.5 })
   assert.match(text, /被中止/)
   assert.match(text, /不是你自己停下来的/)
+  assert.match(text, /原始细节仍可从会话日志或检查点核对/)
+  assert.match(text, /其余内容整理成准确交接/)
+  assert.doesNotMatch(text, /唯一的依据|原文一律抄进去|别转述成摘要|模型侧的退化/)
 })
 
 /** 把一段助手文本包成 detectLoop 认得的 session。 */

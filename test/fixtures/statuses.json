@@ -1,5 +1,5 @@
 [
-  "<context-care>\nFatigue: unknown; wakefulness: unknown.\nEstimate based on the latest recorded request and currently retained history, not a task deadline.\nCapacity is not calibrated for this request. Do not guess it.\nContinue the task; use context_rest when a checkpoint would help.\n</context-care>",
-  "<context-care>\nFatigue: normal; wakefulness: normal.\nEstimate based on the latest recorded request and currently retained history, not a task deadline.\nContinue the task; use context_rest when a checkpoint would help.\n</context-care>",
-  "<context-care>\nFatigue: normal; wakefulness: low.\nEstimate based on the latest recorded request and currently retained history, not a task deadline.\nRest outcome: completed: older history summarized; recent history and the continuation note retained.\nContinue the task; use context_rest when a checkpoint would help.\n</context-care>"
+  "<context-care>\n疲劳：未知；唤醒值：未知。\n这是基于最近一次请求与当前留存历史的估计，不是任务的截止时间。\n这次请求没有校准容量，不要猜。\n照常推进任务。\n</context-care>",
+  "<context-care>\n疲劳：正常；唤醒值：正常。\n这是基于最近一次请求与当前留存历史的估计，不是任务的截止时间。\n照常推进任务。\n</context-care>",
+  "<context-care>\n疲劳：正常；唤醒值：低。\n这是基于最近一次请求与当前留存历史的估计，不是任务的截止时间。\n休息结果：较早的历史已摘要，近况与交接笔记保留。\n照常推进任务。\n</context-care>"
 ]

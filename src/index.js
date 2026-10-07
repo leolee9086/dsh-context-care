@@ -2,8 +2,19 @@ import { z } from 'zod'
 import { createUserMessage } from './message.js'
 import { producedBy, producerKind } from './producer-source.js'
 import { calculateState, GUIDANCE, renderState, resolveConfig } from './policy.js'
+import { createMaintenanceController, pruneThenMeasure } from './maintenance-policy.js'
+import { contextBudget, budgetPolicy } from './context-budget.js'
+import { recoveryProof } from './recovery-proof.js'
+import { captureInputPricing } from './input-pricing.js'
+import { createSummaryExecutor } from './summary-executor.js'
+import { repairSummaryImages } from './image-repair.js'
+import { runMaintenance } from './maintenance-journal.js'
+import { createMaintenanceOperations } from './maintenance-operations.js'
+import { ScopedPromptConfig, selectScopedPrompts } from './scoped-prompts.js'
 import { contextCareProjection } from './projection.js'
-import { selectClearRange, selectRestRange } from './selection.js'
+import { selectClearRange, selectRestRange, selectMaintenanceRange } from './selection.js'
+import { createProposalExecutor } from './summary-proposals.js'
+import { maintenancePassLimit } from './summary-request.js'
 import { clearRange } from './deep-rest.js'
 import { alreadyWarned, detectLoop, loopNeedsReminder, loopNoticeText } from './loop-guard.js'
 import { createStreamWatch } from './stream-watch.js'
@@ -15,14 +26,28 @@ import { createTransformLog } from './transform-log.js'
 import { createRewriteJournal } from './rewrite-journal.js'
 
 export const name = 'dsh-context-care'
-export const inject = ['agents', 'sessions', 'tools', 'systemPrompt', 'tokenMeter', 'llm', 'compaction', 'sessionProjections']
+export const inject = ['agents', 'sessions', 'tools', 'systemPrompt', 'tokenMeter', 'llm', 'compaction', 'sessionProjections', 'contextCareRequests']
 // Standard Schema is consumed by Cordis before activation; no DSH schema helper.
 export const Config = z.object({
   budgetRatio: z.number().optional(), wakefulnessRatio: z.number().optional(),
   fatigueExponent: z.number().optional(), retainRatio: z.number().optional(),
+  rangeStrategy: z.enum(['basic-prefix', 'target-prefix']).optional(), expectedCheckpointTokens: z.number().int().nonnegative().optional(),
   minFreshTokens: z.number().int().optional(), minNoteChars: z.number().int().optional(), maxNoteChars: z.number().int().optional(),
   providerUsageRatio: z.number().optional(),
-}).strict()
+  softBudgetRatio: z.number().optional(), hardBudgetRatio: z.number().optional(),
+  hysteresisRatio: z.number().optional(), maxPasses: z.number().int().optional(),
+  auxiliaryBudgetRatio: z.number().optional(),
+  modelScopedPrompts: z.array(ScopedPromptConfig).optional(),
+  maxSummaryRepairRetries: z.number().int().nonnegative().optional(), maxSummaryCallsPerAction: z.number().int().positive().optional(),
+  summary: z.object({ provider: z.string().min(1).optional(), model: z.string().min(1).optional(),
+    maxTokens: z.number().int().positive().optional(), maxRetries: z.number().int().nonnegative().optional() }).strict().optional(),
+  safetyTokens: z.number().int().nonnegative().optional(), burstTokens: z.number().int().nonnegative().optional(),
+  releaseMarginTokens: z.number().int().nonnegative().optional(), summarySafetyTokens: z.number().int().nonnegative().optional(),
+  maxOverflowRetries: z.number().int().nonnegative().optional(), retainTokens: z.number().int().nonnegative().optional(),
+  contextBudgetTokens: z.number().int().positive().optional(), billingInputCeilingTokens: z.number().int().positive().optional(),
+  routeBudgets: z.array(z.object({ provider: z.string().min(1), model: z.string().min(1), purpose: z.enum(['conversation', 'compaction', 'session-title']),
+    contextBudgetTokens: z.number().int().positive().optional(), billingInputCeilingTokens: z.number().int().positive().optional() }).strict()).optional(),
+}).strict().prefault({})
 
 const requestPlugin = `${name}:request`
 const statePlugin = `${name}:state`
@@ -41,62 +66,39 @@ function notice(plugin, text, summary, state, extra) {
 }
 
 /**
- * 时间焦虑幻觉的提醒文案。
- *
- * 这是 DeepSeek 系列模型的一个稳定倾向：一旦开始盘算「还剩多少活、要多少次调用」，
- * 就会得出「得赶」，接着走捷径 —— 批量粗处理、跳过验证、省掉本该查的东西。
- *
- * 走认知行为疗法的路子：不去反驳结论，而是拆掉它的前提。
- * 旧文案讲的是后果（"省时间反而更费时间"），但焦虑的起点不是不知道后果，
- * 是错误估计了余量 —— 对一个以为自己快没资源的人讲成本收益，等于没答他的问题。
- * 时间根本不是可观测的量，所以"够不够"这个问题本身没有答案，结论也就不成立。
- *
- * 刻意**不**说「你刚才想到了什么」：点出思考内容没有作用，那是训练数据形成的模式；
- * 直接给可核对的事实和行为指令才有用。需要提示思考模式时，由用户明确要求再加。
- *
- * 署名 Seraph：这个判断来自系统的心理医生模块（s-forge 的 seraph 在 DSH 的落地），
- * 不是匿名的系统提示 —— 权威性来自来源。
+ * 时间规划提醒：词表命中只说明出现了相关措辞，不能判断任务有没有期限。
+ * 真人给出的期限和已提供的时间可用于规划；未提供的运行额度仍应按未知处理。
+ * Seraph 是所参考的 S-forge 提醒名称，不表示接入了心理医生服务。
  */
 function timeAnxietyText() {
   return [
     '<context-care>',
-    '[Seraph · 系统的心理医生模块]',
+    '[Seraph · 上下文照料提醒]',
     '',
-    '如果你正在盘算这次任务还需要多少时间，先看这个盘算的依据：',
-    '时间不是可观测的量——系统不提供它，任务也不依赖它。',
-    '既然你无法知道自己还剩多少，"够不够"就没有答案，',
-    '由它推出来的任何结论（赶工、跳过步骤、降低标准）也都不成立。',
-    '',
-    '判断下一步做什么，只看这一步本身做对没有。时间不进入判断。',
+    '如果正在规划时间与调用次数，请核对依据：',
+    '真人明确给出的期限、当前时间和已知运行限制可以用于规划；未提供的剩余运行额度按未知处理。',
+    '依据实际目标、工作进度和验证需求安排下一步；需要整理上下文时，保存交接并在合适的工作边界处理。',
     '</context-care>',
   ].join('\n')
 }
 
 /**
- * 上下文长度焦虑的提醒文案。
- *
- * 与时间焦虑同源：都是先盘算一个资源余量，再从"可能不够"推出"得省着用"。
- * 区别在于上下文占用是**有客观测量**的（policy.js 的 fatigue / wakefulness），
- * 所以这条能给出可核对的数据，而不只是讲道理 —— 这正是 CBT 的证据检验那一步：
- * 不替来访者下结论，把事实摆出来让他自己看。
- *
- * 数值取自最近一次状态报告：流式路径是同步的、不能 await sample()，
- * 而 previousState 只扫 surface 尾部，够用。拿不到数值时退回不带数字的说法。
+ * 上下文规划提醒，使用最近一次状态报告的估计，不据词表命中推断心理状态。
+ * 流式广播同步读取 previousState；缺少数值时提示查询当前计量。
  */
 function contextAnxietyText(state) {
   const measured = Number.isFinite(state?.fatigueValue) && Number.isFinite(state?.wakefulnessValue)
   return [
     '<context-care>',
-    '[Seraph · 系统的心理医生模块]',
+    '[Seraph · 上下文照料提醒]',
     '',
     '如果你正在盘算上下文还剩多少，先看这个盘算的依据：',
     measured
       ? `上下文占用是有测量的——最近一次报告为 fatigue ${state.fatigueValue}%、wakefulness ${state.wakefulnessValue}%。`
       : '上下文占用是有测量的，随时可以调用 context_status 查看。',
-    '压缩不是损失，它是这个系统的正常工作方式，你随时可以主动调用它；',
-    '自动压缩也会保留最近的历史和续接笔记。你不需要提前做任何准备动作。',
-    '',
-    '判断一个检查点有没有必要，只看这件事做完没有，不看已经用了多少。',
+    '这些指标是请求负载与留存信息量的估计。结合实际工作步骤、当前计量、交接和找回路径安排整理时机。',
+    '压缩前把当前目标、已验证结果、未完成工作和关键路径记清；原始细节可从会话日志或检查点核对。',
+    '维护完成后核对报告，再继续任务。',
     '</context-care>',
   ].join('\n')
 }
@@ -107,9 +109,9 @@ function contextAnxietyText(state) {
  */
 export const WATCH_NOTICES = {
   'line-repeat': { summary: 'Output loop aborted', text: hit => loopNoticeText(hit, true) },
-  'time-anxiety': { summary: 'Time-anxiety hallucination', text: () => timeAnxietyText() },
+  'time-anxiety': { summary: 'Time planning reminder', text: () => timeAnxietyText() },
   // 上下文长度焦虑：文案要用最近一次状态报告里的数值给证据，所以接第二个参数。
-  'context-anxiety': { summary: 'Context-length anxiety', text: (_hit, state) => contextAnxietyText(state) },
+  'context-anxiety': { summary: 'Context planning reminder', text: (_hit, state) => contextAnxietyText(state) },
 }
 
 /** Read only the latest retained state; no process-local state can leak across sessions. */
@@ -137,43 +139,6 @@ export function previousState(session) {
  */
 export function shouldNotify(previous, text, _state) {
   return previous?.text !== text
-}
-
-/**
- * 自数的请求内容量：留存的内容加上工具定义。工具部分与 DSH token-meter 的
- * estimateToolsTokens 同算法（4 字符/token + 4 结构开销）。
- *
- * 它有两个用途：provider 上报不可信时作为疲劳度的分子，以及作校准的参照。
- *
- * @param header - 折叠后的请求信封，取它的 tools。
- * @param retained - 留存内容（surface 定价 + 本轮新增）的 token 数。
- * @returns 自数的请求内容量。
- */
-export function requestContentTokens(header, retained) {
-  const tools = header?.tools
-  if (tools === undefined || tools.length === 0) return retained
-  return retained + Math.ceil(JSON.stringify(tools).length / 4) + 4
-}
-
-/**
- * 这一轮疲劳度用的请求量：默认采信 provider 上报的计费量，比例不合理时退回自数的量。
- *
- * provider 报的是它实际计费的量，比 DSH 的字符数估计准，所以正常时用它。
- * 但它偶尔报出物理上不可能的值：2026-09-29 那一轮报 209879 token，而同一份 surface
- * 只有 148813 个字符（85% 是 ASCII）—— token 数不可能超过字符总数。
- * 能用的判据只有比例，因为我们数不到 provider 那侧的东西；超过 `ratio` 倍就说明
- * 这一轮的上报与请求内容对不上，这一轮不采信。退回的是自数的量，
- * 不是把上报值改小，也不是给它设一个上限。
- *
- * @param measurement - tokenMeter.measure() 的返回值，取它的 totalTokens。
- * @param selfMeasured - 自数的请求内容量。
- * @param ratio - 采信上限倍数。
- * @returns 这一轮用于疲劳度的请求量。
- */
-export function requestLoadTokens(measurement, selfMeasured, ratio) {
-  const reported = measurement.totalTokens
-  if (Number.isFinite(reported) && reported <= selfMeasured * ratio) return reported
-  return selfMeasured
 }
 
 /** Attach tools and durable boundary-time status, leaving the compaction provider unchanged. */
@@ -231,6 +196,48 @@ function careFacts(current, session) {
 export function installContextCare(ctx, raw, compactionSource) {
   const resolveCompaction = typeof compactionSource === 'function' ? compactionSource : () => compactionSource
   const spec = resolveConfig(raw)
+  const operations = createMaintenanceOperations()
+  ctx.effect(() => () => operations.dispose())
+  const compactSummary = createSummaryExecutor({ meter: ctx.tokenMeter, llm: ctx.llm, requests: ctx.contextCareRequests, spec,
+    recover: payload => ctx.waterfall('compaction/summary-error', payload, () => false)
+      || repairSummaryImages(ctx.sessions, payload) })
+  const executeProposal = createProposalExecutor(ctx.contextCareRequests, compactSummary)
+  const propose = (agent, current, allowFallback) => selectMaintenanceRange(agent.session, current.measurement, {
+    // 容量未知只让压力预估不可用。主动请求仍可按显式尾部设置选区，
+    // 缺省保留最近完整单元，再由摘要路由或自定义 provider 处理实际输入。
+    retainTokens: current.budget?.retainTail ?? spec.retainTokens ?? 0, minFreshTokens: spec.minFreshTokens, pluginName: name,
+    deficitTokens: current.loadTokens === undefined || current.budget?.releaseTarget === undefined
+      ? 0 : Math.max(0, current.loadTokens - current.budget.releaseTarget), rangeStrategy: spec.rangeStrategy,
+    expectedCheckpointTokens: spec.expectedCheckpointTokens, allowFallback,
+  })
+  const maintain = (session, pricing, action, reason, run) => runMaintenance({ requests: ctx.contextCareRequests, session, pricing, action, reason, run })
+  const prune = (agent, pricing, reason) => {
+    const pruner = resolvePruner(agent)
+    return pruner === undefined ? undefined : { pruneSession: session => maintain(session, pricing, 'prune', reason, () => pruner.pruneSession(session)) }
+  }
+  if (typeof ctx.tokenMeter.measureInput !== 'function' || typeof ctx.tokenMeter.priceMessages !== 'function') {
+    throw new Error('context-care requires input-only tokenMeter.measureInput and priceMessages; update the Host')
+  }
+  if (raw?.providerUsageRatio !== undefined) ctx.logger.warn('context-care: providerUsageRatio is deprecated; tokenMeter owns input calibration')
+  // This gate is the only automatic maintenance decision in context-care. The
+  // Basic backend is configured with auto:false in the authored composition so
+  // it remains an executor for explicit requests, never a second controller.
+  const maintenanceBySession = new WeakMap()
+  function maintenanceFor(session) {
+    let controller = maintenanceBySession.get(session)
+    if (controller === undefined) {
+      controller = createMaintenanceController({
+        softBudgetRatio: spec.softBudgetRatio,
+        hardBudgetRatio: spec.hardBudgetRatio,
+        hysteresisRatio: spec.hysteresisRatio,
+        maxPasses: spec.maxPasses,
+        auxiliaryBudgetRatio: spec.auxiliaryBudgetRatio,
+      })
+      maintenanceBySession.set(session, controller)
+    }
+    return controller
+  }
+  const resolvePruner = agent => ctx.get('agentPresets')?.serviceFor(agent, 'toolResultPruner') ?? ctx.get('toolResultPruner')
   ctx.effect(() => ctx.sessionProjections.register(contextCareProjection))
   ctx.effect(() => ctx.systemPrompt.context({ name, order: 90, text: GUIDANCE }))
 
@@ -475,25 +482,42 @@ export function installContextCare(ctx, raw, compactionSource) {
   //   return { ...config, reasoningEffort: pending.to }
   // }))
 
-  async function sample(agent, signal, proposed = []) {
+  async function sample(agent, signal, proposed = [], includeState = false, operation) {
     signal.throwIfAborted()
-    const header = agent.session.requestHeader()
-    const measurement = ctx.tokenMeter.measure(agent.session)
-    const config = header?.config
-    // The first envelope and a newly routed model have not yet been priced.
+    const pricing = operation ?? captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session, requests: ctx.contextCareRequests })
+    const measurement = pricing.measure()
+    const config = pricing.pricingBasis.header?.config
+    // The first envelope has no routed capacity; final dispatch owns its check.
     if (!config?.provider || !config.model) return { state: { fatigue: 'unknown', fatigueValue: null, wakefulness: 'unknown', wakefulnessValue: null }, measurement }
     const info = await ctx.llm.resolveModelInfo(config.provider, config.model, signal)
     signal.throwIfAborted()
-    const capacity = info.context?.contextWindow
-    const incoming = proposed.reduce((sum, message) => sum + ctx.tokenMeter.estimateMessage(message), 0)
-    // 留存信息量是唤醒值的分子；请求内容量是疲劳度的分子，采信前先过一道校准。
-    const retained = measurement.surfaceTokens + incoming
-    const selfMeasured = requestContentTokens(header, retained)
-    const load = requestLoadTokens(measurement, selfMeasured, spec.providerUsageRatio)
+    const physicalCapacity = info.context?.contextWindow
+    const policy = budgetPolicy(spec, config)
+    const incoming = pricing.priceMessages(proposed)
+    // Output accounting is diagnostic only. The meter owns text calibration,
+    // including large valid ratios; pending inputs use that same frozen basis.
+    const retained = measurement.surfaceTokens
+    const baseRequest = { ...config, purpose: 'conversation', messages: [...agent.session.deriveMessages(), ...proposed],
+      tools: pricing.pricingBasis.header?.tools }
+    const preview = ctx.contextCareRequests.preview?.(agent.session, baseRequest).request ?? baseRequest
+    const promptCost = pricing.priceRequest(preview) - pricing.priceRequest(baseRequest)
+    let load = Math.ceil(measurement.inputTokens + incoming + promptCost)
+    if (includeState) {
+      const capacity = Math.min(...[physicalCapacity, policy.contextBudgetTokens].filter(value => value !== undefined))
+      const state = calculateState(load, retained, Number.isFinite(capacity) ? capacity : undefined, spec)
+      const text = renderState(state)
+      if (shouldNotify(previousState(agent.session), text, state)) load = Math.ceil(load + pricing.priceMessages([notice(statePlugin, text, 'Context state', state)]))
+    }
+    const budget = contextBudget({ inputTokens: load, physicalCapacity, policyCapacity: policy.contextBudgetTokens,
+      billingInputCeilingTokens: policy.billingInputCeilingTokens, maxTokens: config.maxTokens, defaultMaxTokens: info.defaultMaxTokens,
+      safetyTokens: spec.safetyTokens, burstTokens: spec.burstTokens, releaseMarginTokens: spec.releaseMarginTokens,
+      softRatio: spec.budgetRatio, retainRatio: spec.retainRatio, retainTokens: spec.retainTokens })
     return {
-      state: calculateState(load, retained, capacity, spec),
+      state: calculateState(load, retained, budget.capacity, spec),
       measurement,
-      capacity,
+      budget,
+      capacity: budget.capacity,
+      loadTokens: load,
     }
   }
 
@@ -519,7 +543,7 @@ export function installContextCare(ctx, raw, compactionSource) {
       properties: {
         // 下限不是防呆，是**要求写细**：几百字的笔记下一个自己还得回去翻日志。
         note: { type: 'string', minLength: spec.minNoteChars, maxLength: spec.maxNoteChars, description: `交接笔记：当前目标、已验证的进度、没做完的工作、重要路径。${spec.minNoteChars}~${spec.maxNoteChars} 字，宜细不宜粗；不可复原的细节先落盘到文件。` },
-        deep: { type: 'boolean', description: '清空历史而不是摘要。疲劳度会重置，但唤醒值会掉下来：之后在你重新查回来之前，你只有这条笔记和找回路径。摘要能留住线索；深度休息用在「这条线索已经不值得它的代价」的时候。' },
+        deep: { type: 'boolean', description: '用完整交接与找回路径替换历史而不调用摘要模型。替换必须比所选历史更小；保留的正文量和负载会重新计量。身份、目标与判断归属保持原有设定，缺失细节从原始日志或检查点核对。' },
         recovery: { type: 'string', minLength: spec.minNoteChars, maxLength: spec.maxNoteChars, description: `deep 为真时必填。下一个你怎样把细节找回来：用哪些关键词搜会话日志、读哪些文件、任务材料放在哪里。要写搜索真能命中的词、真存在的路径。${spec.minNoteChars}~${spec.maxNoteChars} 字。` },
       },
     },
@@ -561,6 +585,103 @@ export function installContextCare(ctx, raw, compactionSource) {
   ctx.effect(() => ctx.tools.register(contextStatusTool))
   ctx.effect(() => ctx.tools.register(contextRestTool))
 
+  const requestOwner = {
+    owns: agent => ctx.tools.get('context_rest', agent) === contextRestTool,
+    promptRules: spec.modelScopedPrompts,
+    prompts: spec.modelScopedPrompts.length === 0 ? undefined : (request, previousRoute) => selectScopedPrompts(spec.modelScopedPrompts, request, previousRoute),
+    check(call, ready) {
+      const request = ready.request
+      const { provider, model, reasoningEffort, temperature, maxTokens } = request
+      const header = { config: { provider, model, reasoningEffort, temperature, maxTokens }, tools: request.tools,
+        adapterDefaults: call.session.requestHeader()?.adapterDefaults }
+      // Bind the final route's attachment prices, including an explicitly absent
+      // projection. Middleware route changes cannot reuse the previous route.
+      const pricing = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: call.session, header,
+        imageRequestPricing: ready.imageRequestPricing, requests: ctx.contextCareRequests })
+      const inputTokens = pricing.priceRequest(request)
+      call.dispatchPricing = pricing
+      const policy = budgetPolicy(spec, request, request.purpose ?? 'conversation')
+      return contextBudget({ inputTokens, physicalCapacity: ready.model.context?.contextWindow, policyCapacity: policy.contextBudgetTokens,
+        billingInputCeilingTokens: policy.billingInputCeilingTokens, maxTokens: request.maxTokens, defaultMaxTokens: ready.model.defaultMaxTokens,
+        safetyTokens: request.purpose === 'compaction' ? (spec.summarySafetyTokens ?? spec.safetyTokens) : spec.safetyTokens,
+        burstTokens: request.purpose === 'compaction' ? 0 : spec.burstTokens, releaseMarginTokens: 0,
+        softRatio: spec.budgetRatio, retainRatio: request.purpose === 'compaction' ? 0 : spec.retainRatio,
+        retainTokens: request.purpose === 'compaction' ? 0 : spec.retainTokens })
+    },
+  }
+  ctx.effect(() => ctx.contextCareRequests.register(requestOwner))
+
+  const overflowRetries = new WeakMap()
+  ctx.on('agent/idle', ({ agent }) => overflowRetries.delete(agent))
+  ctx.on('agent/assistant-stream', ({ agent, frame }) => {
+    if (frame.type !== 'end' || frame.outcome.kind !== 'committed') return
+    const event = agent.session.eventAt(frame.outcome.seq)
+    if (event?.type === 'assistant/message' && !event.data.interrupted) overflowRetries.delete(agent)
+  })
+  ctx.on('agent/request-error', async ({ agent, callId, failure, signal }, next) => {
+    const delegated = await next()
+    const requests = ctx.contextCareRequests
+    const failed = callId === undefined ? undefined : requests.snapshot(callId)
+    if (failed?.owner !== requestOwner) return delegated
+    try {
+      if (delegated?.kind === 'retry' || signal.aborted || !['REQUEST_BUDGET_EXCEEDED', 'CONTEXT_WINDOW_EXCEEDED'].includes(failure.code)) return delegated
+      const retries = overflowRetries.get(agent) ?? 0
+      if (retries >= spec.maxOverflowRetries || failed.dispatchPricing === undefined) return delegated
+      overflowRetries.set(agent, retries + 1)
+      const session = agent.session
+      return await operations.run(session, signal, async signal => {
+      try {
+        const pruner = prune(agent, failed.dispatchPricing, 'overflow')
+        if (pruner !== undefined) await pruner.pruneSession(session)
+        signal.throwIfAborted()
+        const compaction = resolveCompaction(agent)
+        if (compaction !== undefined) {
+          const measured = failed.dispatchPricing.measure()
+          const range = selectRestRange(session, measured, 0, 0, name)
+          if (range !== null) await compactSummary(compaction, { ...range, minFreshTokens: 0 }, agent, signal, failed.dispatchPricing,
+            { ...failed.ready.request, messages: session.deriveMessages() })
+        }
+      } catch (error) {
+        if (signal.aborted) throw error
+        // A committed prune can still qualify even when summary generation failed.
+        ctx.logger.warn(`context-care: overflow maintenance failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+      signal.throwIfAborted()
+      const proof = recoveryProof(session, failed, failed.dispatchPricing.priceMessages)
+      if (!proof.progressed) return delegated
+      // Keep the exact dispatched one-shot system/tools and replace the
+      // logged history, including its system head, just as the Agent does.
+      const after = failed.dispatchPricing.priceRequest({ ...failed.ready.request, messages: session.deriveMessages() })
+      if (failure.code === 'REQUEST_BUDGET_EXCEEDED' && after > failed.dispatchBudget.hardInput) return delegated
+      return { kind: 'retry' }
+      })
+    } finally {
+      requests.release(callId)
+    }
+  }, { prepend: true })
+
+  async function collectInputs(agent, signal, accepted, current) {
+    const messages = [...accepted]
+    try {
+      messages.push(...noticeRules.collect({ agent, messages: accepted, facts: careFacts(current, agent.session) }))
+    } catch (error) {
+      ctx.logger.warn(`context-care: 提示规则没有跑起来: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    try {
+      const user = lastUserMessage(accepted)
+      const assistant = lastAssistantMessage(accepted)
+      const notices = await noticeChannel.collect({ agentId: agent.id,
+        userText: user === undefined ? '' : textOf(user), assistantText: assistant === undefined ? lastAssistantText(agent.session) : textOf(assistant), signal })
+      for (const incoming of notices) messages.push(notice(`${name}:notice:${incoming.source}`, incoming.text, incoming.summary ?? `Notice from ${incoming.source}`))
+    } catch (error) {
+      if (signal.aborted) throw error
+      ctx.logger.warn(`context-care: 通知通道没有跑起来: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    const loop = detectLoop(agent.session)
+    if (loopNeedsReminder(loop, cleanupActive) && !alreadyWarned(agent.session, loopPlugin)) messages.push(notice(loopPlugin, loopNoticeText(loop), 'Output loop detected'))
+    return messages
+  }
+
   ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
     const generation = agent.session.surface.replaceGeneration
     // Let normal admission and existing automatic safety compaction settle first.
@@ -582,15 +703,57 @@ export function installContextCare(ctx, raw, compactionSource) {
       const visible = ctx.tools.get('context_rest', agent)
       if (visible !== undefined && visible !== contextRestTool) return decision
     }
+    return operations.run(agent.session, signal, async signal => {
     const restRequest = decision.messages.find(message => producedBy(message.source, requestPlugin))
     const requested = restRequest !== undefined
     let outcome
+    let deepCompleted = false
     let current
+    let messages = [...decision.messages]
     try {
-      current = await sample(agent, signal, decision.messages)
+      // Completion settlement is emitted asynchronously. Await its journal ACK
+      // before freezing maintenance prices; ready-time checks would be too late
+      // to plan this boundary with the previous completed request's scale.
+      await ctx.contextCareRequests.flush?.(agent.session.id)
+      const operation = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session, requests: ctx.contextCareRequests })
+      current = await sample(agent, signal, messages, false, operation)
+      messages = await collectInputs(agent, signal, decision.messages, current)
+      current = await sample(agent, signal, messages, true, operation)
+      if (!requested && current.capacity !== undefined && current.loadTokens !== undefined) {
+        const maintenanceResult = await pruneThenMeasure({
+          session: agent.session,
+          measure: async () => {
+            const measured = await sample(agent, signal, messages, true, operation)
+            return { ...measured, totalTokens: measured.loadTokens ?? measured.measurement.totalTokens }
+          },
+          pruner: prune(agent, operation, 'automatic'),
+          controller: maintenanceFor(agent.session),
+        })
+        current = maintenanceResult.after
+        let pressure = maintenanceResult.pressure
+        const compaction = resolveCompaction(agent)
+        const passLimit = maintenancePassLimit(compaction, agent, raw?.maxPasses, spec.maxPasses)
+        let passes = 0
+        while (pressure.shouldMaintain && compaction !== undefined && passes < passLimit) {
+          const proposal = propose(agent, current, true)
+          if (proposal === null) break
+          const result = await executeProposal(compaction, proposal, agent, signal, operation, spec)
+          if (result === null) break
+          passes += 1
+          current = await sample(agent, signal, messages, true, operation)
+          pressure = maintenanceFor(agent.session).observeBudget(current.budget)
+        }
+        if (passes > 0) {
+          outcome = pressure.shouldMaintain
+            ? `自动维护已执行 ${passes} 次，容量仍在硬预算以上`
+            : `自动维护已执行 ${passes} 次，已回到安全预算`
+        }
+      }
       if (restRequest !== undefined) {
         const deep = restRequest.source.contextRest?.deep === true
-        if (agent.session.surface.replaceGeneration !== generation) {
+        // A delegated summary can satisfy normal rest. Explicit deep rest still
+        // owns its handoff and recovery path, even after another replacement.
+        if (!deep && agent.session.surface.replaceGeneration !== generation) {
           outcome = '历史已经被本边界的自动维护减少过，不再额外压缩'
         } else if (deep) {
           // 清空不经过 compaction provider：替换物是模型自己写的那条消息，
@@ -600,81 +763,37 @@ export function installContextCare(ctx, raw, compactionSource) {
             outcome = '没有执行——系统提示词之外没有可清空的内容'
           } else {
             const text = restRequest.content.filter(block => block.type === 'text').map(block => block.text).join('\n')
-            const cleared = clearRange(agent.session, ctx.tokenMeter, range, text)
-            outcome = `历史已清空（${cleared.shadowedTokenCount} tokens），只剩交接和找回路径`
-            current = await sample(agent, signal, decision.messages)
+            await maintain(agent.session, operation, 'deep-rest', 'requested', () => clearRange(agent.session, ctx.tokenMeter, range, text, operation))
+            deepCompleted = true
+            outcome = '历史已用交接和找回路径替换'
+            current = await sample(agent, signal, messages.filter(message => message !== restRequest), true, operation)
           }
         } else {
           const compaction = resolveCompaction(agent)
           if (!compaction) {
             outcome = '没有执行——这个会话没有可用的压缩提供方，历史保留'
-          } else if (!current.capacity) {
-            outcome = '没有执行——容量不可知，历史保留'
           } else {
-            const range = selectRestRange(agent.session, current.measurement,
-              Math.floor(current.capacity * spec.retainRatio), spec.minFreshTokens, name)
-            if (range === null) {
-              outcome = '没有执行——留存近况之外没有足够大的新鲜前缀'
+            const proposal = propose(agent, current, false)
+            if (proposal === null) {
+              outcome = '没有执行——留存近况之外没有足够大的新鲜前缀或可合并检查点'
             } else {
-              await compaction.compactRegion(range.start, range.end, agent, signal)
-              outcome = '较早的历史已摘要，近况与交接笔记保留'
-              current = await sample(agent, signal, decision.messages)
+              const result = await executeProposal(compaction, proposal, agent, signal, operation, spec)
+              outcome = result === null ? '没有执行——同一选区已验证无法缩小，历史保留' : '较早的历史已摘要，近况与交接笔记保留'
+              current = await sample(agent, signal, messages, true, operation)
             }
           }
         }
       }
     } catch (error) {
       if (signal.aborted) throw error
+      if (!requested) throw error
       ctx.logger.warn(`context-care: ${error instanceof Error ? error.message : String(error)}`)
       outcome = requested ? '请求没有正常结束；不要假定压缩已经完成；再发下一个请求之前先检查检查点' : undefined
       current = { state: { fatigue: 'unknown', fatigueValue: null, wakefulness: 'unknown', wakefulnessValue: null } }
     }
-    const messages = [...decision.messages]
+    if (deepCompleted) messages = messages.filter(message => message !== restRequest)
 
-    // 提示规则:别的插件声明「什么情况下该提醒模型做什么」(memoryNoticeRules),
-    // 判定与发起都在这里。规则没跑起来不该毁掉整个请求,但也不能静默 —— 记 warn。
-    // 读 decision.messages 而不是 messages:底下要拿的是"本轮领取的输入",
-    // 不该把上面刚注进去的东西再扫一遍。
-    try {
-      for (const ruleMessage of noticeRules.collect({
-        agent,
-        messages: decision.messages,
-        // 事实值只有这一侧算得出来(它持有 tokenMeter 与状态计算),规则引擎不认识这些名字。
-        facts: careFacts(current, agent.session),
-      })) messages.push(ruleMessage)
-    } catch (error) {
-      ctx.logger.warn(`context-care: 提示规则没有跑起来: ${error instanceof Error ? error.message : String(error)}`)
-    }
-
-    // 通知通道:别的插件有话要告诉模型(索引插件的被动召回就走这里),在这一边界问一遍、注入。
-    try {
-      const userMessage = lastUserMessage(decision.messages)
-      const assistantMessage = lastAssistantMessage(decision.messages)
-      const notices = await noticeChannel.collect({
-        agentId: agent.id,
-        userText: userMessage === undefined ? '' : textOf(userMessage),
-        assistantText: assistantMessage === undefined ? lastAssistantText(agent.session) : textOf(assistantMessage),
-        signal,
-      })
-      for (const incoming of notices) {
-        messages.push(notice(`${name}:notice:${incoming.source}`, incoming.text,
-          incoming.summary ?? `Notice from ${incoming.source}`))
-      }
-    } catch (error) {
-      ctx.logger.warn(`context-care: 通知通道没有跑起来: ${error instanceof Error ? error.message : String(error)}`)
-    }
-
-    // 输出循环的清理改在**请求层**(requestRewrite 改写器)执行:pre-step 拿到的
-    // messages 只是本轮新领取的输入,上一轮助手输出不在这里 —— 请求体里才有。
-    // 所以这里不清理;见 request-rewrite.js 的 cleanLoopInBody。
-
-    // 轻微档一律提醒；严重档交给请求层硬清理，只有清理执行者不在时才在这里兜底提醒。
-    const loop = detectLoop(agent.session)
-    if (loopNeedsReminder(loop, cleanupActive) && !alreadyWarned(agent.session, loopPlugin)) {
-      messages.push(notice(loopPlugin, loopNoticeText(loop), 'Output loop detected'))
-    }
-
-const text = renderState(current.state, outcome)
+    const text = renderState(current.state, outcome)
     const previous = previousState(agent.session)
     if (!requested && !shouldNotify(previous, text, current.state)) {
       // 即便状态没变，只要循环提醒挂上了就得把消息带回去。
@@ -682,6 +801,7 @@ const text = renderState(current.state, outcome)
     }
     messages.push(notice(statePlugin, text, 'Context state', current.state))
     return { ...decision, messages }
+    })
   }, { prepend: true })
 
   // 交给 host 入口去注册路由 —— 客户端卡片靠它拿到「哪些内容被改写过」。

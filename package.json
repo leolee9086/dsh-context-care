@@ -1,7 +1,6 @@
 {
   "name": "dsh-context-care",
-  "version": "0.6.3",
-  "private": true,
+  "version": "0.7.0",
   "type": "module",
   "description": "为 DeepSeek Harness 提供疲劳度、唤醒值、分段彩色数值显示与自主上下文压缩的独立 Cordis 插件",
   "repository": {
@@ -23,6 +22,8 @@
   "exports": {
     ".": "./src/host.js",
     "./agent": "./src/index.js",
+    "./completion": "./src/completion-host.js",
+    "./requests": "./src/request-host.js",
     "./activate": "./src/activate.js",
     "./client": "./lib/client.js",
     "./package.json": "./package.json"
@@ -50,12 +51,15 @@
   ],
   "scripts": {
     "build": "tsdown",
-    "test": "node --test test/activate.test.js test/client.test.js test/context-care.test.js test/dependencies.test.js test/loop-clean.test.js test/loop-patterns.test.js test/notice-rules.test.js test/producer-source.test.js test/rewrite-view.test.js test/stream-watch.test.js",
+    "test": "node --test test/activate.test.js test/client.test.js test/actions.test.js test/context-care.test.js test/completion-observer.test.js test/completion-notices.test.js test/dependencies.test.js test/loop-clean.test.js test/loop-patterns.test.js test/maintenance-policy.test.js test/maintenance-journal.test.js test/maintenance-operations.test.js test/input-calibration.test.js test/output-patterns.test.js test/output-feedback.test.js test/context-budget.test.js test/summary-request.test.js test/selection.test.js test/request-journal.test.js test/notice-rules.test.js test/producer-source.test.js test/rewrite-view.test.js test/stream-watch.test.js",
     "test:integration": "node --test test/integration.test.js",
-    "check": "node --check src/index.js && node --check src/host.js"
+    "test:integration:source": "node test/run-source-integration.js",
+    "test:client:source": "node test/run-client-source.js",
+    "check": "node --check src/index.js && node --check src/deep-rest.js && node --check src/input-pricing.js && node --check src/input-calibration.js && node --check src/maintenance-journal.js && node --check src/maintenance-operations.js && node --check src/scoped-prompts.js && node --check src/output-patterns.js && node --check src/output-feedback.js && node --check src/completion-notices.js && node --check src/summary-request.js && node --check src/summary-executor.js && node --check src/summary-repair.js && node --check src/summary-proposals.js && node --check src/checkpoint-coverage.js && node --check src/selection.js && node --check src/host.js && node --check src/image-repair.js && node --check src/action-view-data.js && node --check src/action-records.js && node --check src/action-view.js && node --check src/client.js && node --check src/request-host.js && node --check src/request-journal.js && node --check src/context-budget.js && node --check src/recovery-proof.js && node --check src/completion-host.js && node --check src/completion-observer.js"
   },
   "dependencies": {
     "@leolee9086/dsh-rule-engine": "^0.2.0",
+    "mdast-util-from-markdown": "^2.1.0",
     "react": "^18.3.1",
     "zod": "^4.4.3"
   },

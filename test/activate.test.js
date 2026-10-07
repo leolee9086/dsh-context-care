@@ -2,18 +2,14 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { apply } from '../src/activate.js'
 
-/**
- * provider 上报的用量与 DSH 自己数出来的留存内容分开控制。
- *
- * 这两个数在真实会话里并不相等：provider 报的是它计费的量，而 surface 的定价
- * 是 DSH 对留存内容的估计。2026-09-29 实测到前者会报出物理上不可能的值。
- */
+/** Input-only meter prices and legacy request/response pressure vary independently. */
 async function activate() {
   let listener
   let disposed = false
   let cleanup
   let providerTokens = 4000
   let surfaceTokens = 1000
+  let textScale = 1
   let capacity = 10000
   const tools = []
   const events = []
@@ -22,7 +18,13 @@ async function activate() {
       definition.apply({
         on(_event, callback) { listener = callback },
         llm: { async resolveModelInfo() { return { context: { contextWindow: capacity } } } },
-        tokenMeter: { measure: () => ({ totalTokens: providerTokens, surfaceTokens }), estimateMessage: () => 0 },
+        tokenMeter: {
+          measure: () => ({ totalTokens: providerTokens, surfaceTokens }), estimateMessage: () => 0,
+          measureInput: () => ({ surfaceTokens: surfaceTokens * textScale,
+            inputTokens: (surfaceTokens + (tools.length ? Math.ceil(JSON.stringify(tools).length / 4) + 4 : 0)) * textScale,
+            pricingBasis: { textScale } }),
+          priceMessages: () => 0,
+        },
       })
       return { dispose() { disposed = true } }
     } },
@@ -37,6 +39,7 @@ async function activate() {
     run: decision => listener({ agent, signal: new AbortController().signal }, async () => decision),
     retain(message) { agent.session.surface.nodes.push(events.length); events.push({ type: 'user/message', data: message }) },
     setProviderTokens(value) { providerTokens = value },
+    setTextScale(value) { textScale = value },
     setSurface(value) { surfaceTokens = value },
     setCapacity(value) { capacity = value },
     setTools(value) { tools.length = 0; tools.push(...value) },
@@ -46,9 +49,7 @@ async function activate() {
 
 const careOf = result => result.messages[0].source.contextCare
 
-// 复现样本：那一轮 surface 定价 41330，provider 报 209879。
-// 同一份 surface 当时只有 148813 个字符（其中 85% 是 ASCII），
-// token 数不可能超过字符总数 —— 那个上报值在物理上不成立。
+// Legacy pressure alone cannot calibrate the next input; the meter decides sample eligibility.
 const REPRO = { surface: 41330, providerTokens: 209879, capacity: 262144 }
 
 test('existing-session numeric upgrade preserves outcomes, admission fields and cleanup', async () => {
@@ -64,7 +65,7 @@ test('existing-session numeric upgrade preserves outcomes, admission fields and 
   assert.equal(active.dispose(), true)
 })
 
-test('provider 上报的畸高用量不进疲劳度（2026-09-29 复现）', async () => {
+test('legacy output pressure does not change an uncalibrated input observation', async () => {
   const active = await activate()
   active.setSurface(REPRO.surface)
   active.setProviderTokens(REPRO.providerTokens)
@@ -79,12 +80,12 @@ test('provider 上报的畸高用量不进疲劳度（2026-09-29 复现）', asy
   active.dispose()
 })
 
-test('provider 上报在比例内时被采信', async () => {
+test('eligible fivefold text calibration supplied by the meter is never clipped by the consumer', async () => {
   const active = await activate()
-  // 1000 × 2.5 = 2500 以内，属于正常偏差，用它的值。
-  active.setProviderTokens(1200)
+  active.setTextScale(5)
   const result = await active.run({ kind: 'enter', messages: [] })
-  assert.equal(careOf(result).fatigueValue, 5.8)
+  assert.equal(careOf(result).fatigueValue, 49.4)
+  assert.equal(careOf(result).wakefulnessValue, 100)
   active.dispose()
 })
 

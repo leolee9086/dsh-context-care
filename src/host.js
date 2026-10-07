@@ -1,4 +1,5 @@
-import { installContextCare } from './index.js'
+import { installContextCare, Config } from './index.js'
+import { contextCareActions } from './action-view-data.js'
 
 // 通用入口:挂在 profile 层一次,对所有会话生效。
 //
@@ -8,10 +9,11 @@ import { installContextCare } from './index.js'
 // 唯一按 agent 的东西是 compaction provider,在这里用 agentPresets 现取
 // (`serviceFor` 在未提供时返回 undefined,由安装方在边界上报"无 provider")。
 export const name = 'dsh-context-care'
+export { Config }
 // webServer / connection 在这里是**真依赖**:没有它们就没有客户端卡片那条路由。
 // 写进 inject(而不是用 ctx.get 碰运气)才会让 Cordis 等到它们就绪再 apply ——
 // 用 ctx.get 的话,本行先于 webServer 加载时拿到 undefined,路由就静默地没了。
-export const inject = ['sessions', 'sessionProjections', 'tools', 'systemPrompt', 'tokenMeter', 'llm', 'webServer']
+export const inject = ['sessions', 'sessionProjections', 'tools', 'systemPrompt', 'tokenMeter', 'llm', 'webServer', 'contextCareRequests']
 
 /**
  * 客户端卡片从这里拿「哪些内容被改写过」。
@@ -23,12 +25,10 @@ export const inject = ['sessions', 'sessionProjections', 'tools', 'systemPrompt'
 const JOURNAL_ROUTE = '/context-care/rewrite-journal'
 
 export function apply(ctx, config = {}) {
-  const presets = ctx.get('agentPresets')
-  const local = ctx.get('compaction')
   const care = installContextCare(
     ctx,
     config,
-    agent => presets?.serviceFor(agent, 'compaction') ?? local,
+    agent => ctx.get('agentPresets')?.serviceFor(agent, 'compaction') ?? ctx.get('compaction'),
   )
   const journal = care?.rewriteJournal
   if (journal === undefined) return
@@ -39,6 +39,29 @@ export function apply(ctx, config = {}) {
   // connection 是**可选**依赖(手册里的写法就是 ctx.get('connection')?. ),不写进 inject ——
   // 猜错服务名会让插件一直停在 PENDING,那比少一层鉴权严重得多。
   const connection = ctx.get('connection')
+  ctx.effect(() => server.register({ kind: 'exact', path: '/context-care/actions', handler(req, res) {
+    const rejected = connection?.requestRejection(req)
+    if (rejected !== undefined) { res.writeHead(rejected); res.end(); return }
+    if (req.method !== 'GET') { res.writeHead(405, { allow: 'GET' }); res.end(); return }
+    const query = new URL(req.url, 'http://localhost').searchParams
+    const sessionId = query.get('sessionId')
+    const limit = Number(query.get('limit'))
+    const offset = Number(query.get('offset') ?? 0)
+    // The panel requests one session page; cap each response at 200 actions.
+    if (!sessionId || !Number.isSafeInteger(limit) || limit < 1 || limit > 200 || !Number.isSafeInteger(offset) || offset < 0) {
+      res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid-query' })); return
+    }
+    try {
+      const view = contextCareActions(ctx.contextCareRequests.list(sessionId), ctx.sessions.get(sessionId))
+      const actions = view.actions.slice(offset, offset + limit)
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+      res.end(JSON.stringify({ admission: view.admission, actions, total: view.actions.length,
+        nextOffset: offset + actions.length < view.actions.length ? offset + actions.length : null }))
+    } catch (error) {
+      ctx.logger.warn(`context-care: action query failed: ${String(error)}`)
+      res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'journal-unavailable' }))
+    }
+  } }))
 
   ctx.effect(() => {
     const dispose = server.register({

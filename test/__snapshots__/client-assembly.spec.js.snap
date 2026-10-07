@@ -1,0 +1,84 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`the distributed client mounts real framework hooks, pages within the selected session and removes entries on unload > selected-session budget and maintenance 1`] = `
+<div>
+  <div
+    data-slot="root"
+    style="display: contents;"
+  >
+    <div
+      data-slot="conversation.composer.dock"
+      style="display: contents;"
+    >
+      <div
+        data-context-care=""
+        role="status"
+        style="display: flex; flex-wrap: wrap; gap: 12px; align-items: center; font-size: 12px; color: var(--dsw-alias-label-secondary); padding: 2px 4px;"
+        title="最近一次请求准备时的负荷与保留信息量估算；不是记忆可靠性判断，也不是任务时限。"
+      >
+        <span
+          style="color: rgb(59, 130, 246); font-weight: 600;"
+        >
+          疲劳度: 40% (正常)
+        </span>
+        <span
+          style="color: rgb(20, 184, 166); font-weight: 600;"
+        >
+          唤醒值: 60% (较高)
+        </span>
+      </div>
+      <details
+        style="font-size: 12px; color: var(--dsw-alias-label-secondary);"
+      >
+        <summary>
+          预算与维护记录
+        </summary>
+        <div
+          style="max-height: 50vh; overflow: auto; padding: 6px 0px; overflow-wrap: anywhere;"
+        >
+          <div>
+            尚无请求预算记录
+          </div>
+          <details
+            style="border-top: 1px solid var(--dsw-alias-border-primary); padding: 5px 0px;"
+          >
+            <summary>
+              摘要 · 已提交
+            </summary>
+            <div>
+              动作编号: session-one-0
+            </div>
+            <div>
+              选区来源序号: —
+            </div>
+            <div>
+              维护前后输入估算: 30,000 → 2,000
+            </div>
+            <div>
+              路由计价降幅 / 固定估算降幅: 28,000 / —
+            </div>
+            <div>
+              记录状态: 动作记录已持久化
+            </div>
+          </details>
+        </div>
+        <div
+          style="display: flex; gap: 8px; padding: 4px 0px;"
+        >
+          <button
+            disabled=""
+            type="button"
+          >
+            较新记录
+          </button>
+          <button
+            type="button"
+          >
+            更早记录
+          </button>
+        </div>
+      </details>
+    </div>
+  </div>
+</div>
+`;

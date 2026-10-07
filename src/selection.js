@@ -1,4 +1,46 @@
 import { isCheckpointSource, producedUnder } from './producer-source.js'
+import { summaryCandidates } from './summary-request.js'
+
+/**
+ * Rank balanced prefixes by fresh work, adjacent checkpoint merge, then the
+ * pressure fallback. target-prefix selects the smallest predicted covering span.
+ * @param session current Session
+ * @param measurement operation-frozen node prices
+ * @param policy retention, freshness, deficit and checkpoint prediction
+ * @returns selected proposal with comparison records, or null without a prefix
+ */
+export function selectMaintenanceRange(session, measurement, policy) {
+  const range = selectRestRange(session, measurement, policy.retainTokens, 0, policy.pluginName)
+  if (range === null) return null
+  const tokens = new Map(measurement.nodes.map(node => [node.seq, node.tokens]))
+  const proposals = summaryCandidates(session, range, measurement, 0, policy.pluginName).map(seqs => {
+    let freshTokens = 0
+    let checkpoints = 0
+    let onlyCheckpoints = true
+    for (const seq of seqs) {
+      const event = session.eventAt(seq)
+      if (event.type === 'user/message' && isCheckpointSource(event.data.source)) { checkpoints++; continue }
+      if (event.type === 'system/message' || (event.type === 'user/message' && producedUnder(event.data.source, `${policy.pluginName}:`))) continue
+      onlyCheckpoints = false
+      freshTokens += tokens.get(seq)
+    }
+    const rule = freshTokens >= policy.minFreshTokens ? 'fresh-summary' : onlyCheckpoints && checkpoints >= 2 ? 'checkpoint-merge' : 'basic-prefix'
+    const rangeCost = seqs.reduce((sum, seq) => sum + tokens.get(seq), 0)
+    const expectedSaving = rangeCost - (policy.expectedCheckpointTokens ?? 0)
+    return { start: seqs[0], end: seqs.at(-1), sourceSeqs: seqs, rule, freshTokens, checkpoints, rangeCost,
+      expectedSaving, coversDeficit: expectedSaving >= (policy.deficitTokens ?? 0), summaryCallCount: 1,
+      stableKey: `${rule}:${seqs[0]}:${seqs.at(-1)}`, minFreshTokens: rule === 'fresh-summary' ? policy.minFreshTokens : 0 }
+  })
+  const loss = { 'fresh-summary': 1, 'checkpoint-merge': 2, 'basic-prefix': 3 }
+  proposals.sort((a, b) => loss[a.rule] - loss[b.rule] || (policy.rangeStrategy === 'target-prefix'
+    ? Number(b.coversDeficit) - Number(a.coversDeficit) || (a.coversDeficit ? a.rangeCost - b.rangeCost : b.expectedSaving - a.expectedSaving)
+    : b.rangeCost - a.rangeCost) || a.summaryCallCount - b.summaryCallCount || a.stableKey.localeCompare(b.stableKey))
+  // Pure status prefixes have no task material or mergeable checkpoints.
+  const useful = proposals.filter(proposal => (proposal.freshTokens > 0 || proposal.checkpoints > 0)
+    && (policy.allowFallback !== false || proposal.rule !== 'basic-prefix'))
+  if (useful.length === 0) return null
+  return { ...useful[0], comparisons: useful }
+}
 
 /** Select a balanced prefix, retaining a recent tail and refusing summary-only recompression. */
 export function selectRestRange(session, measurement, retainTokens, minFreshTokens, pluginName) {
@@ -29,38 +71,31 @@ export function selectRestRange(session, measurement, retainTokens, minFreshToke
   keep = balancedKeep
   if (keep === 0) return null
 
-  // A checkpoint plus status messages is not fresh work worth summarizing again.
+  // The protected system head is not part of the candidate. Later system
+  // occurrences still cost input tokens, but none count as fresh task work.
+  const head = session.eventAt(surface[0])
+  const from = head?.type === 'system/message' ? 1 : 0
+  if (from >= keep) return null
   let fresh = 0
-  for (let index = 0; index < keep; index++) {
+  for (let index = from; index < keep; index++) {
     const event = session.eventAt(nodes[index].seq)
     if (!event) throw new Error('context-care: missing history event')
+    if (event.type === 'system/message') continue
     if (event.type === 'user/message' && (isCheckpointSource(event.data.source)
       || producedUnder(event.data.source, `${pluginName}:`))) continue
     fresh += nodes[index].tokens
   }
   if (fresh < minFreshTokens) return null
 
-  // node 0 may hold the system prompt, and the session surface protects that node: only a
-  // `system/message` over exactly that node may rewrite it, so a compaction range starting
-  // there is always rejected (see assertSystemHeadRewrite in core/session/src/surface.ts).
-  // Start after it instead; later system nodes carry no such protection.
-  const head = session.eventAt(surface[0])
-  const from = head?.type === 'system/message' ? 1 : 0
-  if (from >= keep) return null
   return { start: surface[from], end: surface[keep - 1] }
 }
 
 /**
  * Select a whole span to clear, keeping only the system head.
  *
- * This is the deep-rest counterpart of {@link selectRestRange}, and it drops
- * that function's two judgments on purpose. There is no retained tail: clearing
- * does not need recent context to survive, because the replacement is the
- * model's own handoff rather than a summary that has to stay under the span's
- * price. There is likewise no `minFreshTokens` gate — a span is worth clearing
- * whenever it exists, since the replacement is always smaller than what it
- * replaces. What both share is the tool-batch edge rule: the cut has to land
- * where every tool call is answered.
+ * Deep rest retains no tail and applies no fresh-content threshold. Its executor
+ * prices the complete handoff and rejects replacements no smaller than the selected
+ * span before opening the transaction. The cut includes only complete tool batches.
  *
  * @param session - session whose current surface is being cleared.
  * @returns inclusive surface seq span and its complete node list, or `null`.

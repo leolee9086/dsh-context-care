@@ -1,4 +1,9 @@
-# Host owns shared display/projection; agent presets opt into the tools and policy.
+# Host owns durable completion state; scoped consumers never open its domain.
+# Agent presets opt into tools and maintenance policy.
 - insert:
+    - id: context-care-requests
+      name: dsh-context-care/requests
+    - id: context-care-completion
+      name: dsh-context-care/completion
     - id: context-care-display
       name: dsh-context-care

@@ -7,6 +7,10 @@
   config:
     - id: compaction-basic
       name: '@deepseek-ai/dsh-compaction-basic'
+      config:
+        # context-care is the sole maintenance controller in this group; it samples,
+        # selects ranges, and requests the backend explicitly at the safe boundary.
+        auto: false
     - id: context-care
       name: dsh-context-care/agent
       config:

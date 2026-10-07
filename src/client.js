@@ -1,6 +1,8 @@
 import { ContextCareStatus, dictionaries } from './client-view.js'
 import { REWRITE_NODE, RewriteNodeView, createRewriteDefinition } from './rewrite-view.js'
 import { NOTICE_NODE, NoticeNodeView, createNoticeDefinition } from './notice-view.js'
+import { ContextCareActions } from './action-view.js'
+import { createActionRecords } from './action-records.js'
 
 export const inject = ['slots', 'locale', 'uiConversation']
 
@@ -18,6 +20,12 @@ export function apply(ctx) {
   ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
     name: 'conversation.composer.dock', id: 'context-care', order: 4, locale: 'dsh-context-care',
   }, ContextCareStatus))
+  const actions = createActionRecords()
+  ctx.effect(() => () => actions.dispose())
+  ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
+    name: 'conversation.composer.dock', id: 'context-care-actions', order: 5, locale: 'dsh-context-care',
+    inject: () => ({ hooks: { careActions: actions.source }, watchActions: actions.watch }),
+  }, ContextCareActions))
 
   // 改写卡片:让界面看得到「这条输出在发送前被改写过」。
   // 数据来自 host 的裸路由(同源 fetch 自动带 Cookie),客户端**只读结论、不跑规则** ——

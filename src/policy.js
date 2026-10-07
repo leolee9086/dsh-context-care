@@ -1,23 +1,28 @@
 /** S-forge curves, separated from host lifecycle and model-facing text. */
+import { DEFAULT_MAINTENANCE, resolveMaintenanceConfig } from './maintenance-policy.js'
+import { BUDGET_DEFAULTS, resolveBudgetConfig } from './context-budget.js'
+import { resolveScopedPrompts } from './scoped-prompts.js'
+
 export function resolveConfig(raw = {}) {
   const spec = {
+    ...DEFAULT_MAINTENANCE,
+    ...BUDGET_DEFAULTS,
     budgetRatio: 0.8,
     wakefulnessRatio: 1 / 3,
     fatigueExponent: 1.5,
     retainRatio: 0.16,
     minFreshTokens: 1024,
+    rangeStrategy: 'basic-prefix',
     // 交接笔记的字数区间。**宜细不宜粗**：下限存在的意义是把"随便写两句"堵掉——
     // 一份写到几百字的笔记，下一个自己不用再去翻日志就能接着干。
     minNoteChars: 1000,
     maxNoteChars: 10000,
-    // provider 上报的计费量容许高出请求内容量的倍数。
-    // 超过就说明这一轮的上报与请求内容对不上（2026-09-29 实测到 5 倍，
-    // 而且报出的 token 数超过当时 surface 的全部字符数），那一轮退回自己数的量。
+    // Legacy setting accepted during migration; token-meter alone owns input calibration.
     providerUsageRatio: 2.5,
     ...raw,
   }
   for (const key of Object.keys(raw)) {
-    if (!['budgetRatio', 'wakefulnessRatio', 'fatigueExponent', 'retainRatio', 'minFreshTokens', 'minNoteChars', 'maxNoteChars', 'providerUsageRatio'].includes(key)) {
+    if (!['budgetRatio', 'wakefulnessRatio', 'fatigueExponent', 'retainRatio', 'minFreshTokens', 'minNoteChars', 'maxNoteChars', 'providerUsageRatio', 'softBudgetRatio', 'hardBudgetRatio', 'hysteresisRatio', 'maxPasses', 'auxiliaryBudgetRatio', 'safetyTokens', 'burstTokens', 'releaseMarginTokens', 'summarySafetyTokens', 'maxOverflowRetries', 'retainTokens', 'contextBudgetTokens', 'billingInputCeilingTokens', 'routeBudgets', 'summary', 'modelScopedPrompts', 'maxSummaryRepairRetries', 'maxSummaryCallsPerAction', 'rangeStrategy', 'expectedCheckpointTokens'].includes(key)) {
       throw new Error(`context-care: unknown config ${key}`)
     }
   }
@@ -33,7 +38,27 @@ export function resolveConfig(raw = {}) {
     if (!Number.isSafeInteger(spec[key]) || spec[key] <= 0) throw new Error(`context-care: ${key} must be a positive integer`)
   }
   if (spec.minNoteChars >= spec.maxNoteChars) throw new Error('context-care: minNoteChars must be below maxNoteChars')
-  return Object.freeze(spec)
+  const maintenance = resolveMaintenanceConfig({
+    softBudgetRatio: spec.softBudgetRatio,
+    hardBudgetRatio: spec.hardBudgetRatio,
+    hysteresisRatio: spec.hysteresisRatio,
+    maxPasses: spec.maxPasses,
+    auxiliaryBudgetRatio: spec.auxiliaryBudgetRatio,
+  })
+  resolveBudgetConfig(spec)
+  if (spec.summary !== undefined) {
+    if (spec.summary === null || typeof spec.summary !== 'object' || Array.isArray(spec.summary)) throw new Error('context-care: summary must be an object')
+    for (const field of Object.keys(spec.summary)) if (!['provider', 'model', 'maxTokens', 'maxRetries'].includes(field)) throw new Error(`context-care: unknown summary field ${field}`)
+    for (const field of ['provider', 'model']) if (spec.summary[field] !== undefined && (typeof spec.summary[field] !== 'string' || !spec.summary[field].trim())) throw new Error(`context-care: summary.${field} must be nonempty`)
+    for (const field of ['maxTokens', 'maxRetries']) if (spec.summary[field] !== undefined && (!Number.isSafeInteger(spec.summary[field]) || spec.summary[field] < (field === 'maxTokens' ? 1 : 0))) throw new Error(`context-care: invalid summary.${field}`)
+  }
+  if (!['basic-prefix', 'target-prefix'].includes(spec.rangeStrategy)) throw new Error('context-care: invalid rangeStrategy')
+  if (spec.expectedCheckpointTokens !== undefined && (!Number.isSafeInteger(spec.expectedCheckpointTokens) || spec.expectedCheckpointTokens < 0)) throw new Error('context-care: invalid expectedCheckpointTokens')
+  if (spec.rangeStrategy === 'target-prefix' && spec.expectedCheckpointTokens === undefined) throw new Error('context-care: target-prefix requires expectedCheckpointTokens')
+  for (const key of ['maxSummaryRepairRetries', 'maxSummaryCallsPerAction']) {
+    if (spec[key] !== undefined && (!Number.isSafeInteger(spec[key]) || spec[key] < (key === 'maxSummaryCallsPerAction' ? 1 : 0))) throw new Error(`context-care: invalid ${key}`)
+  }
+  return Object.freeze({ ...spec, ...maintenance, modelScopedPrompts: resolveScopedPrompts(spec.modelScopedPrompts) })
 }
 
 /** Values describe measured load and retained information volume, not cognitive quality. */
@@ -70,20 +95,19 @@ const WAKEFULNESS_LABEL = { low: '低', normal: '正常', elevated: '升高', hi
  * 「该落盘了」「要不要压缩」，然后继续往下查，始终没动手。
  * 强度必须跟着等级走，very-high 时明确指向深度休息（清空历史、只留交接）。
  *
- * very-high 最后那句是**重构**，不是加重语气：把「休息会丢信息」的恐惧，
- * 换成「带着疲劳继续做才是不可恢复的损失」。恐惧不拆掉，就没有人肯撒手。
+ * very-high 保留明确的落盘与深度休息动作；负载统计不预测能力或身份变化。
  */
 const ADVICE = {
   normal: ['照常推进任务。'],
   elevated: ['上下文负载在上升。到自然的工作边界时，把要紧的东西落盘，然后可以考虑 context_rest。'],
   high: [
-    '这次会话靠前的部分正在变得不好回忆。继续之前：先把要紧的写下来，再压缩。',
-    '摘要能留住线索；context_rest 更省。',
+    '本次请求触发了高负载维护建议。继续之前：先把目标、已验证结果和未完成工作落盘，再按当前策略整理上下文。',
+    '摘要能留住线索；用 context_rest 写细交接并排定维护。',
   ],
   'very-high': [
-    '已经过了「继续做下去还划算」的那个点 —— 回忆不可靠，错误会叠加。',
-    '不要再往上加工作了：现在就把要紧的东西落盘，然后做一次深度休息（清空历史，只留交接）。',
-    '清空的是表层，不是记忆：细节还能从会话日志里用 session_blocks_* 找回来；但在这个状态下做出来的活儿找不回来。',
+    '本次请求的预算压力很高。现在先把目标、已验证结果、未完成工作和关键路径落盘。',
+    '按已配置的维护步骤做一次深度休息：用交接与找回路径替换可清空历史，确认结果后继续。',
+    '替换只改变本次请求保留的正文；原始细节仍可从会话日志或检查点核对，不改变你的身份、目标与判断归属。',
   ],
 }
 
