@@ -8,7 +8,7 @@ import { contextCareActions } from './action-view-data.js'
 // 状态采样与压缩在 `agent/pre-step` 边界执行,事件参数自带 agent。
 // 唯一按 agent 的东西是 compaction provider,在这里用 agentPresets 现取
 // (`serviceFor` 在未提供时返回 undefined,由安装方在边界上报"无 provider")。
-export const name = 'dsh-context-care'
+export const name = 'context-care-runtime'
 export { Config }
 // webServer / connection 在这里是**真依赖**:没有它们就没有客户端卡片那条路由。
 // 写进 inject(而不是用 ctx.get 碰运气)才会让 Cordis 等到它们就绪再 apply ——

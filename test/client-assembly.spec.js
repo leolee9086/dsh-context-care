@@ -1,14 +1,18 @@
 import { test, expect, vi } from 'vitest'
-import { createElement, useState } from 'react'
+import { createElement, useState, useSyncExternalStore } from 'react'
 import { act, fireEvent, waitFor } from '@testing-library/react'
 import { SlotTestRuntime } from '@deepseek-ai/dsh-client-test-runtime'
+import { SidebarRightTabRegistry } from '@care-test/sidebar-tabs'
+import { createSidebarRightController } from '@care-test/sidebar-service'
+import { createSidebarRightStore } from '@care-test/sidebar-store'
 import { createRequire } from 'node:module'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { readFileSync } from 'node:fs'
 import { runInNewContext } from 'node:vm'
 
-// Consume the actual distributed CJS bundle with the shared React identity.
+const TAB = 'dsh-context-care:actions'
+// Consume the distributed factory, real framework hooks and real sidebar state.
 const hostRequire = createRequire(pathToFileURL(resolve(process.env.DSH_TEST_CHECKOUT, 'packages/test-support/client-runtime/package.json')))
 const plugin = { exports: {} }
 runInNewContext(readFileSync('lib/client.js', 'utf8'), {
@@ -18,12 +22,24 @@ runInNewContext(readFileSync('lib/client.js', 'utf8'), {
   }) } } },
   fetch: (...args) => globalThis.fetch(...args), setInterval, clearInterval, AbortController })
 
-test('the distributed client mounts real framework hooks, pages within the selected session and removes entries on unload', async () => {
+test('records open in the real right sidebar, remain session scoped, and leave runtime independent on display unload', async () => {
   const runtime = await SlotTestRuntime.create()
   const dictionaries = new Map()
-  runtime.ctx.provide('locale', { register(name, values) { dictionaries.set(name, values.zh); return () => dictionaries.delete(name) } })
+  const bind = name => key => dictionaries.get(name)?.[key] ?? key
+  runtime.ctx.provide('locale', { bind, register(name, values) { dictionaries.set(name, values.zh); return () => dictionaries.delete(name) } })
   runtime.ctx.provide('uiConversation', { events: { register() { return () => {} } } })
-  runtime.slots.installLocale({ getSnapshot: () => 0, subscribe: () => () => {}, bind: name => key => dictionaries.get(name)?.[key] ?? key })
+  runtime.slots.installLocale({ getSnapshot: () => 0, subscribe: () => () => {}, bind })
+  const tabs = new SidebarRightTabRegistry(runtime.ctx)
+  const sidebar = createSidebarRightController(tabs, () => {}, { autoFullscreen: () => false,
+    openWithFocus: (_sessionId, open) => open(), closeWithFocus: (_sessionId, _paneId, close) => close() })
+  const stores = new Map(['session-one', 'session-two'].map(id => [id, createSidebarRightStore(() => ({ kind: 'guide', title: 'seed' })).create()]))
+  for (const [id, store] of stores) sidebar.adopt(id, store)
+  let selected = 'session-one'
+  sidebar.show(selected)
+  runtime.ctx.provide('sidebarRightTabs', tabs)
+  runtime.ctx.provide('sidebarRight', sidebar.controller)
+  const expand = vi.fn(() => stores.get(selected).actions.setExpanded(selected, true))
+  runtime.ctx.provide('layout', { openRightbar: expand })
   await runtime.sessions.add({ id: 'session-one' })
   await runtime.sessions.add({ id: 'session-two' })
   await runtime.sessions.setProjection('session-one', 'contextCareNumeric', { fatigueValue: 40, wakefulnessValue: 60, fatigue: 'normal', wakefulness: 'elevated' })
@@ -42,32 +58,50 @@ test('the distributed client mounts real framework hooks, pages within the selec
   await runtime.root.declare({
     'conversation.composer.dock': { kind: 'list', scope: 'session' },
     'conversation.chat.node': { kind: 'keyed', scope: 'session' },
+    'sidebar.right.pane.tab': { kind: 'keyed', scope: 'session' },
   }, ({ renderSlot, SessionProvider }) => {
     const [session, select] = useState(one)
     selectSession = select
-    return createElement(SessionProvider, { session }, renderSlot('conversation.composer.dock', {}))
+    selected = session.sessionId
+    sidebar.show(selected)
+    const store = stores.get(selected)
+    const state = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
+    const surface = state.bySession[selected]
+    const tab = Object.values(surface?.layout.tabs ?? {}).find(tab => tab.kind === TAB)
+    return createElement(SessionProvider, { session },
+      createElement('div', { 'data-surface': 'composer' }, renderSlot('conversation.composer.dock', {})),
+      surface?.layout.expanded && tab ? createElement('aside', { 'data-surface': 'right-sidebar' },
+        renderSlot('sidebar.right.pane.tab', {}, { entryKey: tabs.get(TAB)?.id })) : null)
   })
   const feature = await runtime.mount(plugin.exports)
   try {
     const view = runtime.renderRoot()
-    await waitFor(() => expect(view.container.textContent).toContain('session-one-0'))
-    expect(view.container.textContent).toContain('预算与维护记录')
-    expect(view.container.textContent).toContain('疲劳度: 40%')
-    expect(view.container.textContent).toContain('30,000 → 2,000')
-    expect(view.container).toMatchSnapshot('selected-session budget and maintenance')
+    const composer = view.container.querySelector('[data-surface="composer"]')
+    expect(composer.textContent).toContain('疲劳度: 40%')
+    expect(composer.querySelector('[data-context-care-actions]')).toBeNull()
+    expect(view.container.textContent).not.toContain('session-one-0')
+    fireEvent.click(view.getByRole('button', { name: '预算与维护记录' }))
+    await waitFor(() => expect(view.container.querySelector('aside')?.textContent).toContain('session-one-0'))
+    expect(sidebar.controller.isExpanded()).toBe(true)
+    expect(composer.textContent).not.toContain('30,000 → 2,000')
+    expect(view.container.querySelector('aside').textContent).toContain('30,000 → 2,000')
+    expect(view.container).toMatchSnapshot('composer entry and right sidebar records')
+    fireEvent.click(view.getByRole('button', { name: '预算与维护记录' }))
+    expect(Object.values(stores.get(selected).getSnapshot().bySession[selected].layout.tabs).filter(tab => tab.kind === TAB)).toHaveLength(1)
     fireEvent.click(view.getByText('更早记录'))
-    await waitFor(() => expect(view.container.textContent).toContain('session-one-20'))
+    await waitFor(() => expect(view.container.querySelector('aside').textContent).toContain('session-one-20'))
     await act(async () => selectSession(two))
-    await waitFor(() => expect(view.container.textContent).toContain('session-two-0'))
+    expect(view.container.querySelector('aside')).toBeNull()
+    fireEvent.click(view.getByRole('button', { name: '预算与维护记录' }))
+    await waitFor(() => expect(view.container.querySelector('aside')?.textContent).toContain('session-two-0'))
     expect(view.container.textContent).not.toContain('session-one-20')
-    expect(fetcher.mock.calls.some(([url]) => url.includes('sessionId=session-two&limit=20&offset=0'))).toBe(true)
     routeFailure = true
-    await waitFor(() => expect(view.container.textContent).toContain('HTTP 404'), { timeout: 5000 })
-    expect(view.container.querySelector('[role="alert"]')?.textContent).toContain('HTTP 404')
-    expect(view.container.textContent).not.toContain('等待首次状态')
+    await waitFor(() => expect(view.container.querySelector('aside').textContent).toContain('HTTP 404'), { timeout: 5000 })
+    expect(view.container.querySelector('aside [role="alert"]')?.textContent).toContain('HTTP 404')
     await feature.dispose()
-    expect(view.container.textContent).not.toContain('预算与维护记录')
     expect(runtime.slots.entries('conversation.composer.dock')).toHaveLength(0)
+    expect(runtime.slots.entries('sidebar.right.pane.tab')).toHaveLength(0)
     expect(runtime.slots.entries('conversation.chat.node')).toHaveLength(0)
-  } finally { await runtime.dispose(); vi.unstubAllGlobals() }
+    expect(tabs.get(TAB)).toBeUndefined()
+  } finally { sidebar.controller.tabDomain.dispose(); await runtime.dispose(); vi.unstubAllGlobals() }
 })

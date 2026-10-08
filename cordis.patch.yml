@@ -5,5 +5,8 @@
       name: dsh-context-care/requests
     - id: context-care-completion
       name: dsh-context-care/completion
+    # Runtime remains active when the display is disabled.
+    - id: context-care-runtime
+      name: dsh-context-care/runtime
     - id: context-care-display
       name: dsh-context-care

@@ -7,8 +7,8 @@ import { mkdtemp, readFile, rm, copyFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 const pluginModule = path => import(process.env.DSH_TEST_PLUGIN_ROOT
   ? pathToFileURL(resolve(process.env.DSH_TEST_PLUGIN_ROOT, 'src', path)).href : new URL(`../src/${path}`, import.meta.url).href)
-const [plugin, hostPlugin, completionPlugin, requestPlugin] = await Promise.all(
-  ['index.js', 'host.js', 'completion-host.js', 'request-host.js'].map(pluginModule))
+const [plugin, hostPlugin, completionPlugin, requestPlugin, displayPlugin] = await Promise.all(
+  ['index.js', 'host.js', 'completion-host.js', 'request-host.js', 'display-host.js'].map(pluginModule))
 import { completionStateKey, createCompletionObserver, createCompletionStateStore } from '../src/completion-observer.js'
 import { producedBy } from '../src/producer-source.js'
 import { captureInputPricing } from '../src/input-pricing.js'
@@ -50,7 +50,8 @@ const modules = new Map(await Promise.all(Object.entries(paths).map(async ([name
   const module = await load(`packages/${path}/lib/index.js`)
   return [`@deepseek-ai/dsh-${name}`, module.default ?? module]
 })))
-modules.set('dsh-context-care', hostPlugin)
+modules.set('dsh-context-care', displayPlugin)
+modules.set('dsh-context-care/runtime', hostPlugin)
 modules.set('dsh-context-care/agent', plugin)
 modules.set('dsh-context-care/completion', completionPlugin)
 modules.set('dsh-context-care/requests', requestPlugin)
@@ -61,6 +62,9 @@ class ScriptedAdapter extends LlmAdapter {
   calls = 0
   async resolveModel(provider, model) { return { provider, id: model, name: model, context: { contextWindow: 100000 } } }
   async *stream(options) {
+    // Real adapters fuse cancellation before opening a request. Exercise the
+    // same native brand check so a structured-cloned signal cannot pass here.
+    if (options.signal !== undefined) AbortSignal.any([options.signal, new AbortController().signal])
     this.requests.push(options)
     let block
     if (options.purpose === 'compaction') {
@@ -137,11 +141,31 @@ test('exported Host rows mount together, serve the journal, and remove routes an
   assert.deepEqual(await failedPage.json(), { error: 'journal-unavailable', message: 'Persistent journal write failed' })
   assert.match(diagnostics.at(-1), /Persistent journal write failed/)
   ctx.contextCareRequests.flush = originalFlush
-  const row = [...ctx.loader.entries()].find(entry => entry.options.name === 'dsh-context-care')
+  const row = [...ctx.loader.entries()].find(entry => entry.options.name === 'dsh-context-care/runtime')
   await row.fiber.dispose()
   assert.equal((await fetch(actionsUrl + '?sessionId=s1&limit=2')).status, 404)
   assert.equal((await fetch(url)).status, 404)
   assert.equal(ctx.tools.get('context_rest'), undefined)
+})
+
+test('disabling the display leaves runtime sampling, tools, request observation and queries active', async t => {
+  const owned = await fixture(t)
+  const ctx = await owned.open()
+  const adapter = new ScriptedAdapter()
+  ctx.llm.registerAdapter(['care-test'], adapter)
+  const display = [...ctx.loader.entries()].find(entry => entry.options.name === 'dsh-context-care')
+  await display.fiber.dispose()
+  assert.ok(ctx.tools.get('context_rest'), 'Display must not own maintenance tools')
+  const agent = await ctx.agentLoop.create('display-disabled', { provider: 'care-test', model: 'care-test' })
+  await completionTurn(ctx, agent, 'Keep the runtime running without a browser.')
+  await completionTurn(ctx, agent, 'Sample the now-bound request configuration.')
+  assert.equal(adapter.calls, 2)
+  assert.equal(typeof ctx.sessionProjections.stateOf(agent.session, 'contextCareNumeric').fatigueValue, 'number')
+  await ctx.contextCareRequests.flush(agent.id)
+  assert.ok(ctx.contextCareRequests.list(agent.id).some(record => record.kind === 'request' && record.data.dispatched))
+  const page = await fetch(`http://127.0.0.1:${ctx.webServer.port}/context-care/actions?sessionId=${agent.id}&limit=20`)
+  assert.equal(page.status, 200)
+  assert.ok((await page.json()).admission)
 })
 
 test('real Loader/loop preserves request prefix and compacts after tool result, then continues', async t => {
@@ -272,7 +296,7 @@ test('unloading the contribution cancels a live summary and releases session occ
   await ctx.tools.get('context_rest', agent).execute({ note: 'Keep verified findings and continue.'.padEnd(1200, '…') }, { agent, signal: new AbortController().signal })
   const turn = completionTurn(ctx, agent)
   await entered
-  const row = [...ctx.loader.entries()].find(entry => entry.options.name === 'dsh-context-care')
+  const row = [...ctx.loader.entries()].find(entry => entry.options.name === 'dsh-context-care/runtime')
   await row.fiber.dispose()
   await turn
   assert.equal(summarySignal.aborted, true)
@@ -306,6 +330,38 @@ test('auxiliary prepared requests keep their registration across replacement and
   assert.equal(agent.session.deriveMessages().some(message => message.content.some(block => block.text === 'Keep the verified recovery paths.')), false)
   assert.throws(() => prepared.stream(request), /already consumed/)
   ctx.contextCareRequests.release(prepared.callId)
+})
+
+test('request observation preserves native cancellation and prepares only model configuration', async t => {
+  const owned = await fixture(t, false, { modelScopedPrompts: [{ ruleId: 'signal-test', version: '1', provider: 'care-test',
+    model: 'care-test', trigger: 'static', text: 'Preserve the current task.' }] })
+  const ctx = await owned.open()
+  class CancellationAdapter extends ScriptedAdapter {
+    async *stream(options) {
+      this.upstream = AbortSignal.any([options.signal, new AbortController().signal])
+      yield* super.stream(options)
+    }
+  }
+  const adapter = new CancellationAdapter()
+  ctx.llm.registerAdapter(['care-test'], adapter)
+  const agent = await ctx.agentLoop.create('native-cancellation', { provider: 'care-test', model: 'care-test' })
+  const caller = new AbortController()
+  const request = Object.freeze({ provider: 'care-test', model: 'care-test', sessionId: agent.id, signal: caller.signal,
+    messages: [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Continue safely.' }] })] })
+  const preparedConfigs = []
+  const prepare = ctx.llm.prepareCall.bind(ctx.llm)
+  ctx.llm.prepareCall = (config, signal) => { preparedConfigs.push(config); return prepare(config, signal) }
+  const chunks = []
+  for await (const chunk of ctx.llm.stream(request)) chunks.push(chunk)
+  assert.equal(chunks.at(-1).reason.kind, 'stop')
+  assert.equal(adapter.requests[0].signal, caller.signal)
+  assert.deepEqual(preparedConfigs, [{ provider: 'care-test', model: 'care-test' }])
+  assert.equal(adapter.requests[0].messages.at(-1).content[0].text, 'Preserve the current task.')
+  const reason = new Error('Caller stopped this exact request')
+  caller.abort(reason)
+  assert.equal(adapter.upstream.aborted, true)
+  assert.equal(adapter.upstream.reason, reason)
+  assert.equal(request.signal, caller.signal)
 })
 
 test('operation prices keep captured calibration and image projection across adapter and usage changes', async t => {
@@ -813,7 +869,7 @@ test('real first request enforces an exact route policy before adapter dispatch 
   assert.ok(attempt)
   const finish = attempt.data.stream.find(record => record.type === 'chunk' && record.chunk.type === 'finish').chunk
   assert.deepEqual(finish.reason.failure, failures[0])
-  const careEntry = [...ctx.loader.entries()].find(entry => entry.options.name === 'dsh-context-care')
+  const careEntry = [...ctx.loader.entries()].find(entry => entry.options.name === 'dsh-context-care/runtime')
   await careEntry.fiber.dispose()
   assert.equal(ctx.tools.get('context_rest', agent), undefined)
   await completionTurn(ctx, agent, 'A natural followup after controller disposal. '.repeat(500))
@@ -1038,7 +1094,7 @@ test('exact model-switch prompts are request-only, logged, priced and absent fro
   }
   const replay = Session.create('scoped-prompt-replay', agent.session.snapshotEvents(), undefined, undefined, ctx.sessions.messageProjections)
   assert.deepEqual(replay.deriveMessages(), agent.session.deriveMessages())
-  const careEntry = [...ctx.loader.entries()].find(entry => entry.options.name === 'dsh-context-care')
+  const careEntry = [...ctx.loader.entries()].find(entry => entry.options.name === 'dsh-context-care/runtime')
   await careEntry.fiber.dispose()
   await completionTurn(ctx, agent)
   assert.equal(hasReminder(adapter.requests.at(-1)).length, 0)

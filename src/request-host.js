@@ -11,6 +11,13 @@ export const name = 'context-care-requests'
 export const inject = ['agents', 'sessions', 'tools', 'llm', 'tokenMeter', 'storageDomain']
 export const Config = z.object({}).strict().prefault({})
 
+/** prepareCall clones its config. Keep native cancellation and request data out
+ * of that clone; only the public LlmCallConfig fields belong in it. */
+function callConfig(request) {
+  return Object.fromEntries(['provider', 'model', 'reasoningEffort', 'temperature', 'maxTokens', 'stop']
+    .filter(key => request[key] !== undefined).map(key => [key, request[key]]))
+}
+
 /** Own request identities and journals using the official rc.2 stream waterfall. */
 export async function apply(ctx) {
   const journal = await openRequestJournal({ storageDomain: ctx.storageDomain,
@@ -47,7 +54,7 @@ export async function apply(ctx) {
     // Auxiliary callers use this handle so their journal id never depends on a
     // nonexistent prepared.callId in the host. Each stream may be consumed once.
     async prepareCall(config, signal) {
-      const prepared = await ctx.llm.prepareCall(config, signal)
+      const prepared = await ctx.llm.prepareCall(callConfig(config), signal)
       const callId = randomUUID()
       let consumed = false
       return Object.freeze({ ...prepared, callId, stream(request) {
@@ -124,7 +131,7 @@ export async function apply(ctx) {
         reconciled.add(session)
       }
       await completion?.flush(session.id)
-      const prepared = handle?.prepared ?? await ctx.llm.prepareCall(request, request.signal)
+      const prepared = handle?.prepared ?? await ctx.llm.prepareCall(callConfig(request), request.signal)
       const bound = { ...request, ...prepared.config }
       const { segments, request: composed } = service.preview(session, bound)
       if (segments.length) {

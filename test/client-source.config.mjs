@@ -15,6 +15,9 @@ const alias = Object.entries(paths).map(([name, values]) => ({
   find: new RegExp(`^${name.split('*').map(escape).join('(.*)')}$`),
   replacement: resolve(checkout, values[0].replace('*', '$1')),
 }))
+for (const [name, file] of Object.entries({ 'sidebar-service': 'service', 'sidebar-tabs': 'tab-registry', 'sidebar-store': 'stores' })) {
+  alias.unshift({ find: `@care-test/${name}`, replacement: resolve(checkout, `packages/client/ui-sidebar-right/src/client/${file}.ts`) })
+}
 const clientRequire = createRequire(pathToFileURL(resolve(checkout, 'packages/test-support/client-runtime/package.json')))
 for (const name of ['react', 'react/jsx-runtime', 'react/jsx-dev-runtime', 'react-dom', 'react-dom/client', 'react-dom/test-utils', '@testing-library/react']) {
   alias.unshift({ find: new RegExp(`^${escape(name)}$`), replacement: clientRequire.resolve(name) })

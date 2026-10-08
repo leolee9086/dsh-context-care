@@ -6,7 +6,7 @@
 
 参考 S-forge MAGI 的指标曲线和 Codex 的上下文生命周期设计，以独立 Cordis 插件接入，不修改 Harness、S-forge 或 Codex 源码。本文档以中文为主。
 
-> 修复版本：`v0.7.1`，面向官方 DSH `0.2.0-rc.2`。安装 GitHub 版本前确认对应标签已经发布；本地修复包可使用下文的 tgz 装法。源码组合验收使用显式外部 Host 的 `pnpm test:integration:source`，不依赖残留构建产物；桌面产物验收由 Electron 从其封装目录只读加载官方模块。
+> 修复版本：`v0.7.2`，面向官方 DSH `0.2.0-rc.2`。安装 GitHub 版本前确认对应标签已经发布；本地修复包可使用下文的 tgz 装法。源码组合验收使用显式外部 Host 的 `pnpm test:integration:source`，不依赖残留构建产物；桌面产物验收由 Electron 从其封装目录只读加载官方模块。
 
 ## 指标与行为
 
@@ -26,7 +26,7 @@
 
 ## 预算与维护详情
 
-输入框下的“预算与维护记录”折叠面板读取当前会话的请求日志，显示实际路由、物理与政策容量、完整输入估算、文本校准来源和样本、独立视觉价格、软硬阈值、释放目标、尾部与输出预留。维护详情展示选区规则、候选预测降幅、同价前后输入、路由与固定估价降幅、旧来源到新检查点的替换、递归覆盖及加工深度，以及提交、部分进展、失败和无收益结局。深度休息的 operation 与检查点事务显示为同一动作。
+输入框下的“预算与维护记录”按钮在当前会话右侧栏打开记录页，记录页读取该会话的请求日志，显示实际路由、物理与政策容量、完整输入估算、文本校准来源和样本、独立视觉价格、软硬阈值、释放目标、尾部与输出预留。维护详情展示选区规则、候选预测降幅、同价前后输入、路由与固定估价降幅、旧来源到新检查点的替换、递归覆盖及加工深度，以及提交、部分进展、失败和无收益结局。深度休息的 operation 与检查点事务显示为同一动作。
 
 面板每页 20 条，在当前会话内翻页；加载失败在面板和状态行显示具体 HTTP 或读取错误。改写记录失败会单独报告，按退避间隔重试，恢复后清除错误；修复、审计和事务闭合的二次失败保留原始错误码与消息，同时单独报告和记录。若会话已经提交检查点但提交审计不完整，只恢复可核对的替换事实并标明记录不完整，不推测缺失价格。客户端使用框架生成的响应式 hook，切换会话取消旧页请求，卸载停止轮询和未完成请求。Host 只读路径 `/context-care/actions?sessionId=...&limit=20&offset=0` 要求会话和显式页大小（1–200），继承已安装连接服务的鉴权并返回 `no-store`；响应不包含系统提示、工具 schema 或原始输出。
 
@@ -46,7 +46,7 @@ Host 行 `dsh-context-care/requests` 通过官方 `llm/stream` waterfall 拦截�
 
 Host 在 `llm/stream` 委托后，为新增提示使用公开 prepared call 构造独立的不可变请求，并将实际派发关联回原调用。完整段落记录在已有 `request/header` 事件的 `contextCarePrompt` 元数据，完整输入继续经过 ready 预算检查。提示消息只在本次请求中追加，历史 surface、系统头和摘要选区不包含它。另一模型或另一用途的请求重新匹配，返回原路由时收到一份切换提醒。主请求预测和辅助摘要预选使用相同的 preview，再由实际 ready 输入执行最终检查。`output-pattern` 规则显式提供 detector：Markdown 结构解析与 Intl.Segmenter 句/词统计排除代码、引用及配置的局部元讨论前缀；literal 按最长优先合并重叠，记录 N/K/H/F/J/D、源 offset 和有界证据。词表、单篇/滑窗阈值、完整文本/语句/词条/证据上限均须配置；超限记为 unavailable。仅真实派发后完整提交的对话输出纳入独立路由窗口，失败、中断和辅助摘要不作健康证据。反馈按新 seq 去重、完成输出冷却和健康输出重新启用，存入 Host 的 `context_care_output_feedback`，下一次自然请求投递；未主动制造额外 turn。目标路由的 `carryFromOtherRoute` 明确允许携带旧源反馈，否则切换派发将其 superseded。投递前先记录 delivery-unknown，按 detector.maxDeliveries 限制崩溃后的重投。
 
-下面是测试参数构成的完整配置示例，词表和数值用于演示可复验条件，未作为所有模型的默认政策。部署时替换明确的 provider/model、词表、阈值和提醒文字；将 `modelScopedPrompts` 放在负责该会话的主入口或 `/agent` 的 config 中。literal 区分大小写，不接收任意正则。
+下面是测试参数构成的完整配置示例，词表和数值用于演示可复验条件，未作为所有模型的默认政策。部署时替换明确的 provider/model、词表、阈值和提醒文字；将 `modelScopedPrompts` 放在负责该会话的 `/runtime` 或 `/agent` 的 config 中。literal 区分大小写，不接收任意正则。
 
 ```yaml
 modelScopedPrompts:
@@ -148,22 +148,24 @@ UI 显示最近一次请求准备时的状态，与模型读取的同一条持�
 在插件管理界面的包来源填写 tgz 的完整路径，或使用官方 CLI（将路径替换为包的实际位置）：
 
 ```sh
-dsh plugin --profile desktop add "/absolute/path/to/dsh-context-care-0.7.1.tgz"
+dsh plugin --profile desktop add "/absolute/path/to/dsh-context-care-0.7.2.tgz"
 ```
 
 Host 代码更新后需要重启 DSH，再刷新页面；重新启用条目不会清除旧 Node 模块缓存。安装和重启通过官方管理流程完成。
 
 ### 从 GitHub 安装
 
-确认 `v0.7.1` 标签已发布后可使用：
+确认 `v0.7.2` 标签已发布后可使用：
 
 ```sh
-dsh plugin --profile web add "github:leolee9086/dsh-context-care#v0.7.1"
+dsh plugin --profile web add "github:leolee9086/dsh-context-care#v0.7.2"
 ```
 
 构建产物 `lib/` 已入库，装完即可用 —— 不需要额外构建，也不需要手工打包上传 tgz。带上标签安装，版本不会跟着分支漂。
 
-安装不拉取 DSH 本体或内部包，也不需要 DSH 源码目录。所有 DSH 能力都通过 Cordis 的 `inject`、`ctx` 服务及事件参数取得；运行环境需预先提供这些服务。GitHub 安装按已发布标签固定版本，本地修复可直接使用 tgz；包清单不设置 `private` 发布拦截。**安装后挂载宿主补丁中的三行**（请求观察、完成观察和显示/维护入口），所有会话自动生效。
+安装不拉取 DSH 本体或内部包，也不需要 DSH 源码目录。所有 DSH 能力都通过 Cordis 的 `inject`、`ctx` 服务及事件参数取得；运行环境需预先提供这些服务。GitHub 安装按已发布标签固定版本，本地修复可直接使用 tgz；包清单不设置 `private` 发布拦截。**安装后挂载宿主补丁中的四行**（请求观察、完成观察、运行逻辑和显示入口）。`context-care-runtime` 负责全局工具、采样、维护与查询；`context-care-display` 只负责浏览器界面。关闭显示不会停止运行逻辑。
+
+从 0.7.1 升级时，原 `context-care-display` 上的维护配置必须移到新增的 `context-care-runtime` 行，`name` 为 `dsh-context-care/runtime`；显示行保留 `name: dsh-context-care`。旧配置没有自动迁移。已在预设 `/agent` 行上的会话政策保持原位置。
 
 1. 在 Web profile 的 `cordis.patch.yml` 中加入主入口。默认文件位于 `${DSH_HOME}/profiles/web/cordis.patch.yml`，未设置 `DSH_HOME` 时通常位于 `~/.dsh/profiles/web/cordis.patch.yml`。已有 `insert` 时，把行合并到相应列表：
 
@@ -175,11 +177,13 @@ dsh plugin --profile web add "github:leolee9086/dsh-context-care#v0.7.1"
       name: dsh-context-care/completion
       config:
         cooldownMs: 300000
+    - id: context-care-runtime
+      name: dsh-context-care/runtime
     - id: context-care-display
       name: dsh-context-care
 ```
 
-2. **不需要改 preset。** 主入口本身就对所有会话生效：工具在根作用域注册（按 DSH 的工具服务约定，根作用域注册进全局层，每个会话的视图都以它为基底），状态采样与压缩在 `agent/pre-step` 边界执行，唯一按会话的 compaction provider 在边界上用 `agentPresets.serviceFor(agent, 'compaction')` 现取；取不到时如实报告 `no compaction provider is available`，不影响其它功能。
+2. **不需要改 preset。** `/runtime` 入口本身就对所有会话生效：工具在根作用域注册（按 DSH 的工具服务约定，根作用域注册进全局层，每个会话的视图都以它为基底），状态采样与压缩在 `agent/pre-step` 边界执行，唯一按会话的 compaction provider 在边界上用 `agentPresets.serviceFor(agent, 'compaction')` 现取；取不到时如实报告 `no compaction provider is available`，不影响其它功能。
 
    旧的会话内装法仍然可用且不冲突：如果某个 agent preset 的 compaction 隔离组里还留着下面这行，该会话就由 preset 里的实例负责，根入口检测到该 agent 作用域内已有注册后自动退让，不会重复通知或重复压缩。
 
@@ -195,7 +199,7 @@ dsh plugin --profile web add "github:leolee9086/dsh-context-care#v0.7.1"
         maxNoteChars: 10000
 ```
 
-完整组示例见 [agent.example.cordis.yml](agent.example.cordis.yml)，宿主补丁见 [cordis.patch.yml](cordis.patch.yml)。根入口与 `/agent` 入口是等价的两种装法：前者一次覆盖所有会话，后者只覆盖挂载它的那个 agent 作用域。
+完整组示例见 [agent.example.cordis.yml](agent.example.cordis.yml)，宿主补丁见 [cordis.patch.yml](cordis.patch.yml)。`/runtime` 与 `/agent` 入口是等价的两种装法：前者一次覆盖所有会话，后者只覆盖挂载它的那个 agent 作用域。
 
 重新加载 profile（未启用配置热更新时需要重启 DSH），刷新现有 Web 页面。首次有效请求采样后会显示数值；没有模型容量信息时显示“未校准”。
 
@@ -229,12 +233,13 @@ pnpm run test:integration
 |---|---|---|
 | `/requests` | `agents`、`sessions`、`tools`、`llm`、`tokenMeter`、`storageDomain` | 请求计价、预算观察、持久请求记录与输出反馈 |
 | `/completion` | `storageDomain`、`contextCareRequests` | 完成措辞观察、冷恢复与持久通知 |
-| 主入口 | `sessions`、`sessionProjections`、`tools`、`systemPrompt`、`tokenMeter`、`llm`、`webServer`、`contextCareRequests`（`agentPresets`、`compaction`、`connection` 为可选读取） | 全局注册 `context_status` / `context_rest`、系统提示段与请求边界处理；compaction provider 按会话现取；一次挂载覆盖所有会话 |
+| `/runtime` | `sessions`、`sessionProjections`、`tools`、`systemPrompt`、`tokenMeter`、`llm`、`webServer`、`contextCareRequests`（`agentPresets`、`compaction`、`connection` 为可选读取） | 全局注册 `context_status` / `context_rest`、系统提示段与请求边界处理；compaction provider 按会话现取；一次挂载覆盖所有会话 |
 | `/agent` | `agents`、`sessions`、`tools`、`systemPrompt`、`tokenMeter`、`llm`、`compaction`、`sessionProjections`、`contextCareRequests` | 工具、状态采样、请求边界监听与压缩 |
 | `/activate` | `agents`、`agentPresets`、`tools` | 找到指定会话并在其 Cordis 作用域中挂载能力 |
-| 客户端 | `slots`、`locale` | 插槽渲染与本地化；会话投影使用插槽传入的 `useProjection` |
+| 主入口 / 显示行 | 无 Host 服务依赖 | 仅挂载浏览器入口，不注册工具、维护事件或 HTTP 路由 |
+| 客户端 | `slots`、`locale`、`uiConversation`、`sidebarRightTabs`、`sidebarRight`、`layout` | 数值和轻量记录按钮；预算与维护详情在当前会话右侧栏打开，会话投影使用插槽传入的 `useProjection` |
 
-工具以标准 JSON Schema 和回调数据交给注入的 `tools.register`，配置使用 Standard Schema。插件只构造自身拥有的消息数据，消息入队、持久化、计量、模型路由和摘要执行由注入的宿主负责。`package.json` 中 `dsh.client.inject` 的包名用于客户端插件加载顺序，不是 npm 依赖或模块导入。
+工具以标准 JSON Schema 和回调数据交给注入的 `tools.register`，配置使用 Standard Schema。插件只构造自身拥有的消息数据，消息入队、持久化、计量、模型路由和摘要执行由注入的宿主负责。`package.json` 中 `dsh.client.inject` 的包名是客户端依赖说明；实际激活由 Cordis 的服务注入决定，它们不是 npm 依赖或模块导入。
 
 ### 更新已运行的会话（可选）
 

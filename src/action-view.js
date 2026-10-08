@@ -9,7 +9,7 @@ export function ActionDetails({ value, t }) {
     t(value?.status === 'error' ? 'actionsUnavailable' : 'actionsLoading'),
     value?.error ? React.createElement('div', null, `${t('actionsError')}: ${value.error}`) : null)
   const budget = value.admission?.budget
-  return React.createElement('div', { style: { maxHeight: '50vh', overflow: 'auto', padding: '6px 0', overflowWrap: 'anywhere' } },
+  return React.createElement('div', { style: { padding: '6px 0', overflowWrap: 'anywhere' } },
     budget ? React.createElement('div', null,
       row(t('actionsAdmission'), `${value.admission.route.provider} / ${value.admission.route.model}`),
       row(t('actionsInput'), number(budget.inputTokens)),
@@ -39,14 +39,26 @@ export function ActionDetails({ value, t }) {
   )
 }
 
+/** The composer owns only an entry point; the record list lives in the sidebar. */
+export function ContextCareActionsOpener({ sessionId, openActions, t }) {
+  const [error, setError] = useState(null)
+  return React.createElement('div', { style: { fontSize: '12px' } },
+    React.createElement('button', { type: 'button', title: t('actionsOpen'), onClick: () => {
+      try { openActions(sessionId); setError(null) }
+      catch (failure) { setError(String(failure)) }
+    } }, t('actionsTitle')),
+    error ? React.createElement('span', { role: 'alert' }, `${t('actionsOpenFailed')}: ${error}`) : null,
+  )
+}
+
 /** Framework hooks deliver reactive facts; local state owns only paging. */
 export function ContextCareActions({ sessionId, useCareActions, watchActions, t }) {
   const [page, setPage] = useState({ sessionId, offset: 0 })
   const offset = page.sessionId === sessionId ? page.offset : 0
   useEffect(() => watchActions(sessionId, offset), [sessionId, offset, watchActions])
   const value = useCareActions(table => table.get(`${sessionId}:${offset}`))
-  return React.createElement('details', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)' } },
-    React.createElement('summary', null, t('actionsTitle')),
+  return React.createElement('section', { 'data-context-care-actions': '', style: { height: '100%', boxSizing: 'border-box', overflow: 'auto', padding: '12px', fontSize: '12px', color: 'var(--dsw-alias-label-secondary)' } },
+    React.createElement('h3', { style: { margin: '0 0 8px', fontSize: '14px' } }, t('actionsTitle')),
     React.createElement(ActionDetails, { value, t }),
     React.createElement('div', { style: { display: 'flex', gap: '8px', padding: '4px 0' } },
       React.createElement('button', { type: 'button', disabled: offset === 0, onClick: () => setPage({ sessionId, offset: Math.max(0, offset - 20) }) }, t('actionsPrevious')),
