@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import React from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
 import { REWRITE_NODE, RewriteNodeView, createRewriteDefinition, contentHash } from '../src/rewrite-view.js'
 
 const probeText = '哥哥，我会在这条助手消息里放入现有规则的触发标记：`[[REWRITTEN]]`。等下一次请求携带这条消息后，再检查实际改写记录和卡片流水账。'
@@ -35,7 +36,7 @@ function renderNode(node, records) {
       if (typeof selector !== 'function') throw new Error('useRewriteRecords 需要 selector')
       return selector(records)
     },
-    t: key => '[' + key + ']',
+    t: key => key.startsWith('pattern_') ? key : '[' + key + ']',
   })
 }
 
@@ -120,10 +121,9 @@ test('RewriteNodeView renders a record only for the matching session and hash', 
   assert.ok(React.isValidElement(hit))
   assert.equal(hit.type, 'div')
   assert.equal(hit.props.className, 'dsh-context-care-rewrite')
-  assert.equal(hit.props.children[0].props.children, '[rewriteTitle]')
-  const texts = hit.props.children[1].props.children
-    .map(row => typeof row === 'object' ? String(row.props?.children) : String(row))
-  assert.ok(texts.some(text => /probe-request-rewrite · 75 → 71/.test(text)))
+  const markup = renderToStaticMarkup(hit)
+  assert.match(markup, /\[rewriteTitle\]/)
+  assert.match(markup, /probe-request-rewrite · 75 → 71/)
   // 改动片段画成什么样不在这里断言 —— 手工构造记录再断言拼串只能证明字段名没拼错。
   // 两侧对接由 scripts/verify-rewrite-card-e2e.mjs 用索引插件的真实库验证。
   assert.equal(renderNode(node, new Map([['session-b:' + hash, record]])), null)
@@ -144,7 +144,7 @@ test('RewriteNodeView includes removed-line details when available', () => {
     removedLines: 12,
   }]]))
 
-  assert.match(String(view.props.children[1].props.children), /12 \[rewriteLines\]/)
+  assert.match(renderToStaticMarkup(view), /12 \[rewriteLines\]/)
 })
 
 test('match accepts assistant messages only', () => {

@@ -4,6 +4,7 @@ import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { contextCareActions } from '../src/action-view-data.js'
 import { ActionDetails } from '../src/action-view.js'
+import { ActionRecord } from '../src/action-detail.js'
 import { createActionRecords } from '../src/action-records.js'
 import { dictionaries } from '../src/client-view.js'
 
@@ -35,7 +36,7 @@ test('historical compaction exposes stored facts without fabricating before/afte
   assert.equal(view.actions[0].beforeInput, undefined)
   assert.equal(view.actions[0].reason, undefined)
   for (const locale of ['zh', 'en']) {
-    const markup = renderToStaticMarkup(React.createElement(ActionDetails, { value: { status: 'ready', ...view }, t: key => dictionaries[locale][key] }))
+    const markup = renderToStaticMarkup(React.createElement(ActionRecord, { action: view.actions[0], t: key => dictionaries[locale][key] }))
     assert.match(markup, /145.*source|145.*个来源/)
     assert.match(markup, /96,722/)
     assert.match(markup, /116,696.*3,719/)
@@ -80,7 +81,7 @@ test('action display groups transactions, separates pricing units and reports mi
   assert.deepEqual(summary.phases, ['started', 'prepared'])
   assert.doesNotMatch(JSON.stringify(value), /private prompt|private schema|not-for-wire|textScale/)
   for (const locale of ['zh', 'en']) {
-    const markup = renderToStaticMarkup(React.createElement(ActionDetails, { value: { status: 'ready', ...value }, t: key => { assert.ok(dictionaries[locale][key], key); return dictionaries[locale][key] } }))
+    const markup = value.actions.map(action => renderToStaticMarkup(React.createElement(ActionRecord, { action, t: key => { assert.ok(dictionaries[locale][key], key); return dictionaries[locale][key] } }))).join('')
     assert.match(markup, /20,000.*5,000/)
     assert.match(markup, /30,000.*2,000/)
     assert.match(markup, locale === 'zh' ? /已有部分持久进展/ : /Partial durable progress/)

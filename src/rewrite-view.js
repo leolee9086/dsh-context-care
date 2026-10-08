@@ -1,4 +1,6 @@
 import React from 'react'
+import { CareStyles } from './care-styles.js'
+import { label } from './care-ui.js'
 
 /** 会话流中请求改写卡片的节点类型。 */
 export const REWRITE_NODE = 'request-rewrite'
@@ -90,12 +92,12 @@ function snippetRows(hit) {
   const added = typeof hit.added === 'string' ? hit.added : ''
   if (removed.length > 0) {
     rows.push(React.createElement('div', {
-      key: 'removed', style: { color: 'var(--dsw-alias-state-error-primary)' },
+      key: 'removed', className: 'care-diff', 'data-change': 'removed',
     }, '− ' + oneLine(removed)))
   }
   if (added.length > 0) {
     rows.push(React.createElement('div', {
-      key: 'added', style: { color: 'var(--dsw-alias-state-success-primary)' },
+      key: 'added', className: 'care-diff', 'data-change': 'added',
     }, '+ ' + oneLine(added)))
   }
   return rows
@@ -110,18 +112,13 @@ export function RewriteNodeView({ node, sessionId, useRewriteRecords, t }) {
     .filter(record => record !== undefined)
   if (hits.length === 0) return null
   return React.createElement('div', {
-    className: 'dsh-context-care-rewrite',
-    style: {
-      borderLeft: '3px solid var(--dsw-alias-state-warn-primary)',
-      padding: '6px 10px', margin: '6px 0',
-      background: 'var(--dsw-alias-bg-secondary)',
-    },
-  },
-  React.createElement('strong', null, t('rewriteTitle')),
+    className: 'dsh-context-care-rewrite', 'data-care-card': '',
+  }, React.createElement(CareStyles),
+  React.createElement('div', { className: 'care-card-heading' }, React.createElement('strong', null, t('rewriteTitle'))),
   ...hits.map((hit, index) => React.createElement('div', { key: index },
-    (hit.pattern ?? t('rewriteUnknown')) + ' · ' + hit.charsBefore + ' → ' + hit.charsAfter + ' ' + t('rewriteChars'),
+    React.createElement('div', { className: 'care-card-meta' }, (hit.pattern ? label(t, 'pattern', hit.pattern) : t('rewriteUnknown')) + ' · ' + hit.charsBefore + ' → ' + hit.charsAfter + ' ' + t('rewriteChars'),
     Number.isSafeInteger(hit.removedLines)
-      ? ' · ' + t('rewriteRemoved') + ' ' + hit.removedLines + ' ' + t('rewriteLines') : '',
+      ? ' · ' + t('rewriteRemoved') + ' ' + hit.removedLines + ' ' + t('rewriteLines') : ''),
     ...snippetRows(hit),
   )))
 }

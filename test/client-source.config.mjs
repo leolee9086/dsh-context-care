@@ -18,10 +18,15 @@ const alias = Object.entries(paths).map(([name, values]) => ({
 for (const [name, file] of Object.entries({ 'sidebar-service': 'service', 'sidebar-tabs': 'tab-registry', 'sidebar-store': 'stores' })) {
   alias.unshift({ find: `@care-test/${name}`, replacement: resolve(checkout, `packages/client/ui-sidebar-right/src/client/${file}.ts`) })
 }
+for (const [name, file] of Object.entries({
+  conversation: 'ui-conversation/src/client/conversation/assembly.ts',
+  'chat-builder': 'ui-chat/src/client/conversation-nodes/chat-snapshot-builder.ts',
+  'message-definition': 'ui-chat/src/client/conversation-nodes/message.ts',
+})) alias.unshift({ find: `@care-test/${name}`, replacement: resolve(checkout, `packages/client/${file}`) })
 const clientRequire = createRequire(pathToFileURL(resolve(checkout, 'packages/test-support/client-runtime/package.json')))
 for (const name of ['react', 'react/jsx-runtime', 'react/jsx-dev-runtime', 'react-dom', 'react-dom/client', 'react-dom/test-utils', '@testing-library/react']) {
   alias.unshift({ find: new RegExp(`^${escape(name)}$`), replacement: clientRequire.resolve(name) })
 }
 export default { resolve: { alias }, cacheDir: resolve('node_modules/.cache/context-care-client-test'),
-  test: { environment: 'jsdom', include: ['test/client-assembly.spec.js'], testTimeout: 10000,
+  test: { environment: 'jsdom', include: ['test/client-assembly.spec.js', 'test/care-ui.spec.js', 'test/source-navigation.spec.js'], testTimeout: 10000,
     deps: { moduleDirectories: ['node_modules', resolve(checkout, 'node_modules')] } } }

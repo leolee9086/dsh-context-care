@@ -4,6 +4,7 @@ import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { contextCarePrompts, requestCareInstructions } from '../src/prompt-view-data.js'
 import { PromptDetails } from '../src/prompt-view.js'
+import { PromptRecord } from '../src/prompt-detail.js'
 import { GUIDANCE } from '../src/policy.js'
 import { dictionaries } from '../src/client-view.js'
 import { createUserMessage } from '../src/message.js'
@@ -46,8 +47,9 @@ test('prompt catalog restores all insertion paths, exact bodies, selected source
     const markup = renderToStaticMarkup(React.createElement(PromptDetails, { value: { status: 'ready', prompts }, selectedSeq: 11,
       t: key => { assert.ok(dictionaries[locale][key], key); return dictionaries[locale][key] } }))
     assert.match(markup, /exact request body/)
-    assert.match(markup, /refused/)
-    assert.match(markup, /output-pattern|completion-observation/)
+    assert.match(markup, locale === 'zh' ? /尚未派发/ : /Not dispatched/)
+    assert.doesNotMatch(markup, /&quot;callId&quot;|&quot;dispatched&quot;/)
+    assert.match(markup, locale === 'zh' ? /输出模式反馈|完成表述提醒/ : /Output pattern feedback|Completion wording reminder/)
     assert.doesNotMatch(markup, /NaN|undefined/)
   }
 })
@@ -63,7 +65,7 @@ test('rule evidence joins only a persisted stable evaluation identity and legacy
   const legacy = prompts.find(item => item.id === 'request:old')
   assert.equal(legacy.bodyStatus, 'segments-only')
   assert.equal(legacy.text, 'retained segment')
-  const rendered = renderToStaticMarkup(React.createElement(PromptDetails, { value: { status: 'ready', prompts }, t: key => dictionaries.en[key] }))
+  const rendered = prompts.map(prompt => renderToStaticMarkup(React.createElement(PromptRecord, { prompt, t: key => dictionaries.en[key] }))).join('')
   assert.match(rendered, /Durable rule evaluations/)
   assert.match(rendered, /lacks the original wrapper/)
   const missingSelection = renderToStaticMarkup(React.createElement(PromptDetails, { value: { status: 'ready', prompts: [], selectedFound: false }, t: key => dictionaries.en[key] }))

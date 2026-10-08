@@ -6,13 +6,16 @@ import { createActionRecords } from './action-records.js'
 import { createRewriteRecords } from './rewrite-records.js'
 import { ContextCarePrompts } from './prompt-view.js'
 
-export const inject = ['slots', 'locale', 'uiConversation', 'sidebarRightTabs', 'sidebarRight', 'layout']
+import { sourceNavigation } from './source-navigation.js'
+
+export const inject = ['slots', 'locale', 'uiConversation', 'sessions', 'sidebarRightTabs', 'sidebarRight', 'layout']
 const ACTIONS_TAB = 'dsh-context-care:actions'
 const PROMPTS_TAB = 'dsh-context-care:prompts'
 
 /** Mount status, diagnostics and durable rewrite cards through native slots. */
 export function apply(ctx) {
   ctx.effect(() => ctx.locale.register('dsh-context-care', dictionaries))
+  const revealFor = sourceNavigation(ctx)
   const actions = createActionRecords()
   const rewrites = createRewriteRecords()
   const prompts = createActionRecords({ endpoint: '/context-care/prompts', collection: 'prompts' })
@@ -34,12 +37,12 @@ export function apply(ctx) {
   ctx.effect(() => ctx.sidebarRightTabs.register({ id: ACTIONS_TAB, kind: ACTIONS_TAB, title: () => t('actionsTitle') }))
   ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
     name: 'sidebar.right.pane.tab', key: ACTIONS_TAB, locale: 'dsh-context-care',
-    inject: () => ({ hooks: { careActions: actions.source }, watchActions: actions.watch, refreshActions: actions.refresh }),
+    inject: sessionId => ({ hooks: { careActions: actions.source }, watchActions: actions.watch, refreshActions: actions.refresh, revealSource: revealFor(sessionId) }),
   }, ContextCareActions))
   ctx.effect(() => ctx.sidebarRightTabs.register({ id: PROMPTS_TAB, kind: PROMPTS_TAB, title: () => t('promptsTitle') }))
   ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
     name: 'sidebar.right.pane.tab', key: PROMPTS_TAB, locale: 'dsh-context-care',
-    inject: () => ({ hooks: { carePrompts: prompts.source, carePromptSelection: promptSelection }, watchPrompts: prompts.watch, refreshPrompts: prompts.refresh }),
+    inject: sessionId => ({ hooks: { carePrompts: prompts.source, carePromptSelection: promptSelection }, watchPrompts: prompts.watch, refreshPrompts: prompts.refresh, revealSource: revealFor(sessionId) }),
   }, ContextCarePrompts))
   ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
     name: 'conversation.input.right', id: 'context-care-actions', order: 5, locale: 'dsh-context-care',

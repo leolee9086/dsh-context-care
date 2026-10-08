@@ -18,7 +18,7 @@ assert.equal(extracted.status, 0)
 const pkgRoot = join(root, 'package')
 await symlink(resolve('node_modules'), join(pkgRoot, 'node_modules'), 'junction')
 const pkg = JSON.parse(await readFile(join(pkgRoot, 'package.json'), 'utf8'))
-assert.equal(pkg.version, '0.7.4')
+assert.equal(pkg.version, '0.7.5')
 assert.equal(pkg.type, 'module')
 assert.notEqual(pkg.private, true, 'The delivered package must not carry an invented publication prohibition')
 for (const name of Object.keys(pkg.dependencies ?? {})) assert.ok(!name.startsWith('@deepseek-ai/dsh-'), name)
@@ -36,7 +36,7 @@ runInNewContext(await readFile(join(pkgRoot, pkg.exports['./client']), 'utf8'), 
   } } }, fetch, setInterval, clearInterval, AbortController,
 })
 assert.equal(typeof client.apply, 'function')
-assert.deepEqual([...client.inject], ['slots', 'locale', 'uiConversation', 'sidebarRightTabs', 'sidebarRight', 'layout'])
+assert.deepEqual([...client.inject], ['slots', 'locale', 'uiConversation', 'sessions', 'sidebarRightTabs', 'sidebarRight', 'layout'])
 async function checkImports(directory) {
   for (const file of await readdir(directory, { withFileTypes: true })) {
     const path = join(directory, file.name)

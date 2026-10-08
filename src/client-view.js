@@ -1,8 +1,10 @@
 import React, { useEffect } from 'react'
 import { CareStyles } from './care-styles.js'
+import { careCopy } from './care-copy.js'
 
 export const dictionaries = {
   zh: {
+    ...careCopy.zh,
     fatigue: '疲劳度', wakefulness: '唤醒值', unknown: '未校准', low: '低', normal: '正常',
     elevated: '较高', high: '高', 'very-high': '很高',
     waiting: '等待首次状态', description: '最近一次请求准备时的负荷与保留信息量估算；不是记忆可靠性判断，也不是任务时限。',
@@ -44,6 +46,7 @@ export const dictionaries = {
     'rule_fresh-summary': '新内容摘要', 'rule_checkpoint-merge': '检查点合并', 'rule_basic-prefix': '压力前缀兜底',
   },
   en: {
+    ...careCopy.en,
     fatigue: 'Fatigue', wakefulness: 'Wakefulness', unknown: 'Uncalibrated', low: 'Low', normal: 'Normal',
     elevated: 'Elevated', high: 'High', 'very-high': 'Very high',
     waiting: 'Awaiting first sample', description: 'Load and retained-information estimates at the latest request preparation; not a memory-quality diagnosis or a task deadline.',

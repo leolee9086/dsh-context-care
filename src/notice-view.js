@@ -1,5 +1,6 @@
 import React from 'react'
 import { tone } from './client-view.js'
+import { CareStyles } from './care-styles.js'
 
 /**
  * 会话流里的注入通知节点。
@@ -149,17 +150,9 @@ export function NoticeNodeView({ node, t, sessionId, openPrompts }) {
   const data = node?.data
   if (data === undefined) return null
   return React.createElement('div', {
-    'data-context-care-notice': '', 'data-context-care-seq': data.seq,
-    style: {
-      borderLeft: '2px solid var(--dsw-alias-border-l3, rgba(127,127,127,.35))',
-      background: 'var(--dsw-alias-bg-secondary, rgba(127,127,127,.06))',
-      borderRadius: 'var(--dsw-radius-md, 6px)',
-      padding: '8px 12px', margin: '8px 0',
-    },
-  },
-  React.createElement('div', {
-    style: { display: 'flex', alignItems: 'baseline', gap: '10px', flexWrap: 'wrap', marginBottom: 6 },
-  },
+    'data-context-care-notice': '', 'data-context-care-seq': data.seq, 'data-care-card': '',
+  }, React.createElement(CareStyles),
+  React.createElement('div', { className: 'care-card-heading' },
   React.createElement('span', {
     style: { fontSize: 'var(--dsh-content-font-size-secondary, 13px)', fontWeight: 600,
       color: 'var(--dsw-alias-label-secondary)' },
@@ -173,10 +166,6 @@ export function NoticeNodeView({ node, t, sessionId, openPrompts }) {
       : React.createElement('span', {
         style: { fontSize: 'var(--dsh-content-font-size-secondary, 13px)', color: 'var(--dsw-alias-label-tertiary)' },
       }, data.summary)),
-  React.createElement('div', {
-    style: { fontSize: 'var(--dsh-content-font-size, 14px)', lineHeight: '22px',
-      color: 'var(--dsw-alias-label-primary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' },
-  }, data.body),
-  openPrompts && (data.producer === OWN || data.producer.startsWith(OWN + ':')) ? React.createElement('button', { type: 'button', onClick: () => openPrompts(sessionId, data.seq),
-    style: { font: 'inherit', color: 'var(--dsw-alias-label-secondary)', background: 'transparent', border: 0, cursor: 'pointer', marginTop: 6 } }, t('promptsDetails')) : null)
+  React.createElement('div', { className: 'care-card-body' }, data.body),
+  openPrompts && (data.producer === OWN || data.producer.startsWith(OWN + ':')) ? React.createElement('button', { type: 'button', onClick: () => openPrompts(sessionId, data.seq) }, t('promptsDetails'), ' →') : null)
 }
