@@ -65,4 +65,22 @@ test('durable no-useful decisions ignore status and log growth but reset on task
   session.eventAt(1).data.content[0].text = 'New actual work'
   await assert.rejects(run(), /larger checkpoint/)
   assert.equal(calls, 3)
+  const first = records[0].data
+  assert.ok(first.operationId)
+  assert.equal(records[1].data.operationId, first.operationId)
+  assert.equal(records[1].data.phase, 'no-useful-range')
+})
+
+test('selection and executor share trigger identity and settle failures before a summary transaction starts', async () => {
+  const records = []
+  let captured
+  const session = history([user(1)])
+  const requests = { list: () => [], recordAction: async (_session, data) => records.push(data) }
+  const execute = createProposalExecutor(requests, async (...args) => { captured = args[6]; throw new Error('failed before start') })
+  await assert.rejects(execute({ config: {} }, { sourceSeqs: [1], rule: 'fresh-summary' }, { session }, new AbortController().signal,
+    { priceMessages: () => 100, pricingBasis: { header: {} } }, {}, 'requested'), /failed before start/)
+  assert.equal(captured.operationId, records[0].operationId)
+  assert.equal(captured.reason, 'requested')
+  assert.equal(records.at(-1).operationId, captured.operationId)
+  assert.equal(records.at(-1).phase, 'failed')
 })

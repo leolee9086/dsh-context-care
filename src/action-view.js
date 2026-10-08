@@ -43,26 +43,35 @@ function Budget({ admission, t }) {
 
 function Action({ action, t }) {
   const at = date(action.at)
+  const priced = Number.isFinite(action.beforeInput) && Number.isFinite(action.afterInput)
+  const sources = action.shadowedSeqs ?? action.sourceSeqs ?? []
   return h('details', { className: 'care-action' },
     h('summary', null,
       h('svg', { className: 'care-chevron', width: 14, height: 14, viewBox: '0 0 16 16', 'aria-hidden': true }, h('path', { d: 'm6 3 5 5-5 5', fill: 'none', stroke: 'currentColor', strokeWidth: 1.5 })),
       h('span', null,
         h('span', { className: 'care-action-title' }, t(`action_${action.action}`), badge(t(`phase_${action.phase}`), phaseTone(action)),
           at ? h('time', { className: 'care-action-time', dateTime: new Date(action.at).toISOString(), title: new Date(action.at).toLocaleString() }, at) : null),
-        h('span', { className: 'care-action-change' }, `${change(action)} tok`, action.outcome ? ` · ${t(`outcome_${action.outcome}`)}` : ''))),
+        h('span', { className: 'care-action-change' }, priced ? `${change(action)} tok` : `${sources.length} ${t('actionsSourceCount')}`, action.outcome ? ` · ${t(`outcome_${action.outcome}`)}` : ''),
+        h('span', { className: 'care-action-change care-muted' }, action.reason ? t(`reason_${action.reason}`) : t('actionsReasonUnknown')))),
     h('dl', null,
       row(t('actionsIdentity'), action.id),
       action.rule ? row(t('actionsRule'), t(`rule_${action.rule}`)) : null,
-      row(t('actionsSources'), (action.shadowedSeqs ?? action.sourceSeqs ?? []).join(', ') || '—'),
-      row(t('actionsPrice'), change(action)),
-      row(t('actionsSavings'), `${number(action.routeSaving ?? (Number.isFinite(action.beforeInput) && Number.isFinite(action.afterInput) ? action.beforeInput - action.afterInput : undefined))} / ${number(action.heuristicSaving)}`),
+      row(t('actionsSources'), h('details', null, h('summary', null, `${sources.length} ${t('actionsSourceCount')}`), sources.join(', '))),
+      row(t('actionsPrice'), priced ? change(action) : t('actionsMissingPrice')),
+      priced || Number.isFinite(action.routeSaving) || Number.isFinite(action.heuristicSaving) ? row(t('actionsSavings'), `${number(action.routeSaving ?? (Number.isFinite(action.beforeInput) && Number.isFinite(action.afterInput) ? action.beforeInput - action.afterInput : undefined))} / ${number(action.heuristicSaving)}`) : null,
       ...(action.replacements ?? []).map((replacement, index) => row(`${t('actionsReplacement')} ${index + 1}`, `${replacement.oldStartSeq} … ${replacement.oldEndSeq} → ${replacement.newSeq}`)),
       action.checkpointSeq !== undefined ? row(t('actionsCheckpoint'), number(action.checkpointSeq)) : null,
       action.coverage ? row(t('actionsCoverage'), `${action.coverage.leafSeqs.join(', ')} · ${t('actionsDepth')}: ${action.coverage.depth}`) : null,
       action.comparisons ? row(t('actionsCandidates'), action.comparisons.map(candidate => `${candidate.start} … ${candidate.end}: ${t(`rule_${candidate.rule}`)}, ${number(candidate.expectedSaving)}`).join('; ')) : null,
       action.error || action.failure ? row(t('actionsError'), h('span', { role: 'alert' }, action.error ?? action.failure.message)) : null,
       ...(action.secondaryFailures ?? []).map((failure, index) => row(`${t('actionsError')} ${index + 1}`, `${failure.phase}: ${failure.message}`)),
-      row(t('actionsJournal'), t(action.journalPersisted ? 'actionsPersisted' : 'actionsRecovered'))))
+      ...(action.commits ?? []).flatMap((commit, index) => [
+        commit.route?.provider ? row(`${t('actionsSummaryRoute')} ${index + 1}`, `${commit.route.provider} / ${commit.route.model}`) : null,
+        Number.isFinite(commit.shadowedTokenCount) ? row(`${t('actionsShadowPrice')} ${index + 1}`, `${number(commit.shadowedTokenCount)} tok`) : null,
+        commit.usage ? row(`${t('actionsSummaryUsage')} ${index + 1}`, `${number(commit.usage.inputTokens)} / ${number(commit.usage.outputTokens)} tok`) : null,
+      ]),
+      action.auditKeys?.length ? row(t('actionsAuditKeys'), action.auditKeys.join(', ')) : null,
+      row(t('actionsJournal'), t(action.auditStatus === 'session-only' ? 'actionsSessionOnly' : action.auditStatus === 'partial' ? 'actionsPartial' : action.journalPersisted ? 'actionsPersisted' : 'actionsRecovered'))))
 }
 
 /** Request and maintenance facts remain available behind readable summaries. */
@@ -77,13 +86,17 @@ export function ActionDetails({ value, t }) {
 }
 
 /** An operation belongs in the composer toolbar, independently of status. */
-export function ContextCareActionsOpener({ sessionId, openActions, t }) {
+export function ContextCareActionsOpener({ sessionId, openActions, openPrompts, t }) {
   const [error, setError] = useState(null)
   return h('div', { 'data-care-entry': '' }, h(CareStyles),
     h('button', { type: 'button', title: t('actionsOpen'), 'aria-label': t('actionsTitle'),
       onClick: () => { try { openActions(sessionId); setError(null) } catch (failure) { setError(String(failure)) } } },
       h('svg', { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, 'aria-hidden': true, focusable: false },
         h('rect', { x: 3, y: 4, width: 18, height: 16, rx: 3 }), h('path', { d: 'M15 4v16M7 8h4M7 12h4' }))),
+    openPrompts ? h('button', { type: 'button', title: t('promptsOpen'), 'aria-label': t('promptsTitle'), onClick: () => {
+      try { openPrompts(sessionId); setError(null) } catch (failure) { setError(String(failure)) }
+    } }, h('svg', { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, 'aria-hidden': true },
+      h('path', { d: 'M4 4h16v12H9l-5 4V4M8 8h8M8 12h5' }))) : null,
     error ? h('span', { role: 'alert' }, `${t('actionsOpenFailed')}: ${error}`) : null)
 }
 

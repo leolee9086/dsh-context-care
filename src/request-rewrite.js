@@ -139,8 +139,8 @@ export function createRequestRewriter({ rules, onRecord, journal }) {
         detail: `最后一条助手消息去掉 ${loop.removedLines} 行`,
       }, { sessionId })
     }
-    // 记一次改写:走旁路流水账(见 rewrite-journal.js)。索引插件的属性表在就落它那里,
-    // 不在就只在进程内。记录失败不阻断改写 —— 旁路不该毁掉这次请求。
+    // 改写走插件自己的 Host 持久域，旧索引表作为可选副本。
+    // 等待 ACK；写失败不能伪装成已留痕并继续发送。原会话正文保持不变。
     //
     // 哈希统一在这里算,**不区分是谁动的手**:引擎规则(transform)和循环清理都改请求体,
     // 而卡片认的是「这条助手消息的块变了」。原先只有循环清理产出哈希,于是引擎规则的

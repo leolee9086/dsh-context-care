@@ -54,7 +54,7 @@ export function buildSummaryRequest(session, seqs, config, signal) {
   const system = head?.type === 'system/message' ? session.deriveEventMessage(head) : null
   const messages = seqs.map(seq => session.deriveEventMessage(session.eventAt(seq))).filter(Boolean)
   return { ...config, messages: [...(system === null ? [] : [system]), ...messages,
-    { role: 'user', content: [{ type: 'text', text: SUMMARY_INSTRUCTION }] }],
+    { role: 'user', content: [{ type: 'text', text: SUMMARY_INSTRUCTION }], source: { kind: 'plugin:dsh-context-care:summary-instruction', contextCareTrace: { sourceSeqs: [...seqs] } } }],
     tools: session.requestHeader()?.tools, toolHistory: session.toolHistory(), sessionId: session.id, purpose: 'compaction', signal }
 }
 

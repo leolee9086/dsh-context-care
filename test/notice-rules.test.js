@@ -40,6 +40,26 @@ test('命中提示规则时注入一条提醒', () => {
   assert.equal(messages[0].source.kind, 'plugin:dsh-context-care:rules:memory-remember-request')
   assert.equal(messages[0].source.form, 'notice')
   assert.equal(messages[0].source.plugin, undefined)
+  const trace = messages[0].source.contextCareTrace
+  assert.equal(trace.userText, '记住：我在长沙')
+  assert.equal(trace.evaluation.outcome, 'applied')
+  assert.deepEqual(trace.rule, REMEMBER_RULE)
+  assert.deepEqual(JSON.parse(JSON.stringify(messages[0])), messages[0])
+})
+
+test('通知关联相同评估编号并只引用实际输入的持久事件', () => {
+  const ctx = fakeCtx({ memoryNoticeRules: [REMEMBER_RULE] })
+  const captured = []
+  const rules = installNoticeRules(ctx, { plugin: 'dsh-context-care', onHit: record => captured.push(record) })
+  const events = [{ seq: 10, type: 'user/message', data: { id: 'current' } }, { seq: 11, type: 'assistant/message' }]
+  const agent = { id: 'a', session: { id: 'a', snapshotEvents: () => events } }
+  const injected = rules.collect({ agent, messages: [{ ...userMessage('记住：原始输入'), id: 'current' }], facts: { fatigue: 85 } })
+  const trace = injected[0].source.contextCareTrace
+  assert.equal(trace.evaluationId, captured[0].evaluationId)
+  assert.deepEqual(trace.sourceSeqs, [10, 11])
+  assert.deepEqual(captured[0].facts, { fatigue: 85 })
+  const later = rules.collect({ agent: { ...agent, id: 'other' }, messages: [{ ...userMessage('记住：尚未入日志'), id: 'pending' }] })
+  assert.deepEqual(later[0].source.contextCareTrace.sourceSeqs, [11], '不能用上一条输入冒充尚未落盘的本次输入')
 })
 
 test('没命中就不注入', () => {

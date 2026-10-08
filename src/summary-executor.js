@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { recordSecondaryFailure } from './secondary-failure.js'
+import { runMaintenance } from './maintenance-journal.js'
 import { isDeepStrictEqual } from 'node:util'
 import { createUserMessage } from './message.js'
 import { CHECKPOINT_KIND } from './producer-source.js'
@@ -47,10 +48,12 @@ async function collectSummary(stream, signal) {
  */
 export function createSummaryExecutor({ meter, llm, requests, spec, recover = () => false }) {
   const active = new WeakMap()
-  async function run(service, range, agent, signal, operation, envelope) {
-    const config = summaryConfig(service, agent, spec.summary)
-    if (config === undefined) return service.compactRegion(range.start, range.end, agent, signal)
+  async function run(service, range, agent, signal, operation, envelope, audit = {}) {
     const session = agent.session
+    const recordAction = data => requests.recordAction(session, { ...audit, ...data })
+    const config = summaryConfig(service, agent, spec.summary)
+    if (config === undefined) return runMaintenance({ requests, session, pricing: operation, action: 'summary', reason: audit.reason,
+      operationId: audit.operationId, details: audit, run: () => service.compactRegion(range.start, range.end, agent, signal) })
     signal.throwIfAborted()
     const { openTurn, unmatchedCompactionStart } = inspectSession(session)
     if (unmatchedCompactionStart !== undefined) throw failure('context-care: another compaction is already open', 'COMPACTION_BUSY')
@@ -73,7 +76,7 @@ export function createSummaryExecutor({ meter, llm, requests, spec, recover = ()
     let lastError
     let closed = false
     try {
-      await requests.recordAction(session, { action: 'summary', phase: 'started', compactionId, range, beforeInput: before,
+      await recordAction({ action: 'summary', phase: 'started', compactionId, range, beforeInput: before,
         pricingBasis: operation.pricingBasis, summaryConfig: config })
       let overflowRetries = 0
       let repairs = 0
@@ -138,7 +141,7 @@ export function createSummaryExecutor({ meter, llm, requests, spec, recover = ()
             candidateIndex = 0
             repairs++
             try {
-              await requests.recordAction(session, { action: 'summary', phase: 'repaired', compactionId,
+              await recordAction({ action: 'summary', phase: 'repaired', compactionId,
                 oldSourceSeqs: seqs, sourceSeqs: rebased, beforeSummaryInput: selectedPrice, afterSummaryInput: auxiliary.pricing.priceRequest(repaired) })
             } catch (journalError) { recordSecondaryFailure(error, journalError, 'summary audit'); throw error }
             continue
@@ -154,7 +157,8 @@ export function createSummaryExecutor({ meter, llm, requests, spec, recover = ()
           requests.release(prepared.callId)
         }
         assertStable()
-        const replacement = createUserMessage({ content: frameSummary(result.summary), source: { kind: CHECKPOINT_KIND, compactionId } })
+        const replacement = createUserMessage({ content: frameSummary(result.summary), source: { kind: CHECKPOINT_KIND, compactionId,
+          contextCareTrace: { producer: 'dsh-context-care', trigger: 'summary', reason: audit.reason, operationId: audit.operationId, sourceSeqs: seqs, callId: prepared.callId } } })
         const from = surface.indexOf(seqs[0])
         const to = surface.indexOf(seqs.at(-1))
         const afterMessages = surface.flatMap((seq, index) => {
@@ -170,7 +174,7 @@ export function createSummaryExecutor({ meter, llm, requests, spec, recover = ()
         const selected = new Set(seqs)
         const shadowedTokenCount = measured.nodes.filter(node => selected.has(node.seq)).reduce((sum, node) => sum + node.heuristicTokens, 0)
         const shadowedRange = { start: seqs[0], end: seqs.at(-1) }
-        await requests.recordAction(session, { action: 'summary', phase: 'prepared', compactionId, callId: prepared.callId,
+        await recordAction({ action: 'summary', phase: 'prepared', compactionId, callId: prepared.callId,
           shadowedSeqs: seqs, beforeInput: before, afterInput: after })
         assertStable()
         const summaryEvent = session.append('compaction/summary', { compactionId, ...result, llmStreamCall: true,
@@ -179,7 +183,7 @@ export function createSummaryExecutor({ meter, llm, requests, spec, recover = ()
           sourceEventSeqs: [start.seq, summaryEvent.seq, ...seqs] })
         const end = session.append('compaction/end', { compactionId, turn: openTurn })
         closed = true
-        await requests.recordAction(session, { action: 'summary', phase: 'committed', compactionId, summarySeq: summaryEvent.seq,
+        await recordAction({ action: 'summary', phase: 'committed', compactionId, summarySeq: summaryEvent.seq,
           endSeq: end.seq, checkpointSeq: checkpoint.seq, coverage: checkpointCoverage(session, checkpoint.seq),
           shadowedSeqs: seqs, beforeInput: before, afterInput: after })
         return { compactionId, startSeq: start.seq, summarySeq: summaryEvent.seq, endSeq: end.seq,
@@ -194,7 +198,7 @@ export function createSummaryExecutor({ meter, llm, requests, spec, recover = ()
         }
       }
       try {
-        await requests.recordAction(session, { action: 'summary', phase: closed ? 'commit-record-failed' : 'failed', compactionId,
+        await recordAction({ action: 'summary', phase: closed ? 'commit-record-failed' : 'failed', compactionId,
           error: error instanceof Error ? error.message : String(error), secondaryFailures: error.secondaryFailures })
       } catch (journalError) {
         // Audit ACK failures remain observable through flush, without masking this error.
@@ -203,11 +207,11 @@ export function createSummaryExecutor({ meter, llm, requests, spec, recover = ()
       throw error
     }
   }
-  return async function compact(service, range, agent, signal, operation, envelope) {
+  return async function compact(service, range, agent, signal, operation, envelope, audit) {
     const previous = active.get(agent.session) ?? Promise.resolve()
     // The previous caller receives its failure. Its settled transaction releases
     // this session for the next independent operation, including after failure.
-    const task = previous.catch(error => { void error }).then(() => run(service, range, agent, signal, operation, envelope))
+    const task = previous.catch(error => { void error }).then(() => run(service, range, agent, signal, operation, envelope, audit))
     active.set(agent.session, task)
     try { return await task } finally { if (active.get(agent.session) === task) active.delete(agent.session) }
   }

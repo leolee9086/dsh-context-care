@@ -132,6 +132,24 @@ test('exported Host rows mount together, serve the journal, and remove routes an
   const lastPage = await (await fetch(`${actionsUrl}?sessionId=s1&limit=2&offset=2`)).json()
   assert.equal(lastPage.actions.length, 1)
   assert.equal(lastPage.nextOffset, null)
+  const promptSession = ctx.sessions.create('prompt-history')
+  const seqs = []
+  for (let index = 0; index < 25; index++) seqs.push(promptSession.append('user/message', createUserMessage({
+    content: [{ type: 'text', text: `<context-care>exact notice ${index}</context-care>` }],
+    source: { kind: 'plugin:dsh-context-care:state', form: 'notice', contextCareTrace: { trigger: 'budget-state' } },
+  }), { surfaceOp: 'append' }).seq)
+  const promptsUrl = `http://127.0.0.1:${ctx.webServer.port}/context-care/prompts`
+  assert.equal((await fetch(`${promptsUrl}?sessionId=unknown&limit=20`)).status, 404)
+  assert.equal((await fetch(`${promptsUrl}?sessionId=prompt-history&limit=20&seq=-1`)).status, 400)
+  const selectedPage = await (await fetch(`${promptsUrl}?sessionId=prompt-history&limit=20&seq=${seqs[0]}`)).json()
+  assert.equal(selectedPage.offset, 20)
+  assert.equal(selectedPage.selectedFound, true)
+  assert.equal(selectedPage.total, 25)
+  assert.equal(selectedPage.prompts.at(-1).text, '<context-care>exact notice 0</context-care>')
+  assert.doesNotMatch(JSON.stringify(selectedPage), /private-s2/)
+  const missingSelection = await (await fetch(`${promptsUrl}?sessionId=prompt-history&limit=20&seq=999999`)).json()
+  assert.equal(missingSelection.selectedFound, false)
+  assert.equal(missingSelection.offset, 0, 'A missing selection must not fabricate a matching historical page')
   const originalFlush = ctx.contextCareRequests.flush
   ctx.contextCareRequests.flush = async () => { throw new Error('Persistent journal write failed') }
   const diagnostics = []
@@ -145,6 +163,7 @@ test('exported Host rows mount together, serve the journal, and remove routes an
   await row.fiber.dispose()
   assert.equal((await fetch(actionsUrl + '?sessionId=s1&limit=2')).status, 404)
   assert.equal((await fetch(url)).status, 404)
+  assert.equal((await fetch(`${promptsUrl}?sessionId=prompt-history&limit=20`)).status, 404)
   assert.equal(ctx.tools.get('context_rest'), undefined)
 })
 

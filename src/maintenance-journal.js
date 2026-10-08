@@ -6,9 +6,10 @@ import { recordSecondaryFailure } from './secondary-failure.js'
  * both outcomes with the caller's frozen prices and retain that partial progress.
  * Recording an error never replaces the operation's original error; journal
  * failures remain observable through the Host service's flush acknowledgement.
+ * @param options operationId joins the caller's planning record; details retains its rule and comparisons.
+ * The journal owns persistent ACKs; this wrapper owns only measurement and operation settlement.
  */
-export async function runMaintenance({ requests, session, pricing, action, reason, run }) {
-  const operationId = randomUUID()
+export async function runMaintenance({ requests, session, pricing, action, reason, run, operationId = randomUUID(), details = {} }) {
   const beforeInput = pricing.measure().inputTokens
   const beforeSeq = session.seq
   const sourceSeqs = [...session.surface.nodes]
@@ -26,7 +27,7 @@ export async function runMaintenance({ requests, session, pricing, action, reaso
       routeSaving: beforeInput - afterInput, heuristicSaving: beforeHeuristic - measured.nodes.reduce((sum, node) => sum + node.heuristicTokens, 0),
       progressed: replacements.length > 0 && afterInput < beforeInput }
   }
-  const record = data => requests.recordAction(session, { operationId, action, reason, beforeSeq, beforeInput, sourceSeqs,
+  const record = data => requests.recordAction(session, { ...details, operationId, action, reason, beforeSeq, beforeInput, sourceSeqs,
     beforeGeneration: generation, journalPersisted: true, ...data })
   await record({ phase: 'started', pricingBasis: pricing.pricingBasis })
   let result

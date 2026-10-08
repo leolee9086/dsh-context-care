@@ -51,6 +51,17 @@ test('没有变化时不报任何块', () => {
   assert.deepEqual(changedBlocks(messages, messages), [])
 })
 
+test('Host-owned rewrite records survive reconstruction without an optional index plugin', async () => {
+  const stored = []
+  const durable = { async put(value) { stored.push(JSON.parse(JSON.stringify(value))) }, async list(sessionId) { return stored.filter(row => sessionId === undefined || row.sessionId === sessionId) } }
+  const create = () => createRewriteJournal({ store: () => undefined, durable })
+  assert.equal((await create().record({ sessionId: 'one', hash: 'stable', pattern: 'loop', charsBefore: 50, charsAfter: 20 })).persisted, true)
+  assert.equal((await create().list({ sessionId: 'one' }))[0].hash, 'stable')
+  assert.deepEqual(await create().list({ sessionId: 'two' }), [])
+  const failed = createRewriteJournal({ store: () => undefined, durable: { put: async () => { throw new Error('Host journal failure') }, list: durable.list } })
+  await assert.rejects(failed.record({ sessionId: 'one', hash: 'fail' }), /Host journal failure/)
+})
+
 test('进程内记录:写进去能读出来', async () => {
   const journal = createRewriteJournal({ store: () => undefined })
   const result = await journal.record({

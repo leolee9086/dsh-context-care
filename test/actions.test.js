@@ -24,6 +24,46 @@ test('action polling preserves the Host storage diagnostic in its visible error 
 
 const record = (key, data, kind = 'maintenance') => ({ key, at: 10, kind, data })
 
+test('historical compaction exposes stored facts without fabricating before/after or audit failure', () => {
+  const sources = Array.from({ length: 145 }, (_, index) => 18085 + index)
+  const events = [{ seq: 18685, type: 'compaction/summary', data: { compactionId: 'historical', llmStreamCall: true,
+    shadowedSeqs: sources, shadowedTokenCount: 96722, provider: 'aihub', model: 'gpt-6.1-sol', usage: { inputTokens: 116696, outputTokens: 3719 } } },
+  { seq: 18686, type: 'user/message', time: 1791311051163, data: { source: { kind: 'compact-checkpoint', compactionId: 'historical' } },
+    surfaceOp: { op: 'replace', startSeq: 18085, endSeq: 18346 } }]
+  const view = contextCareActions([], { snapshotEvents: () => events, eventAt: seq => events.find(event => event.seq === seq) })
+  assert.equal(view.actions[0].auditStatus, 'session-only')
+  assert.equal(view.actions[0].beforeInput, undefined)
+  assert.equal(view.actions[0].reason, undefined)
+  for (const locale of ['zh', 'en']) {
+    const markup = renderToStaticMarkup(React.createElement(ActionDetails, { value: { status: 'ready', ...view }, t: key => dictionaries[locale][key] }))
+    assert.match(markup, /145.*source|145.*个来源/)
+    assert.match(markup, /96,722/)
+    assert.match(markup, /116,696.*3,719/)
+    assert.match(markup, /aihub.*gpt-6.1-sol/)
+    assert.doesNotMatch(markup, /— → — tok|audit incomplete|动作记录不完整|NaN|undefined/)
+  }
+})
+
+test('multiple summary transactions retain one failed operation and enrich already settled audits', () => {
+  const events = ['child1', 'child2'].flatMap((id, index) => [{ seq: 10 + index * 2, type: 'compaction/summary',
+    data: { compactionId: id, shadowedSeqs: [index + 1], provider: 'p', model: 'm', usage: { inputTokens: 100, outputTokens: 10 } } },
+  { seq: 11 + index * 2, type: 'user/message', data: { source: { kind: 'compact-checkpoint', compactionId: id } }, surfaceOp: { op: 'replace', startSeq: index + 1, endSeq: index + 1 } }])
+  const view = contextCareActions([record('plan', { action: 'selection', operationId: 'op', phase: 'planning', reason: 'requested' }),
+    record('child', { action: 'summary', compactionId: 'child1', phase: 'committed' }),
+    record('fail', { action: 'prune', operationId: 'op', summaryTransactions: ['child1', 'child2'], phase: 'failed', beforeInput: 5000, afterInput: 1500, error: 'late error' }),
+    record('rule', { action: 'rule-evaluation', phase: 'evaluated' }), record('rewrite', { action: 'request-rewrite', phase: 'recorded' })],
+  { snapshotEvents: () => events, eventAt: seq => events.find(event => event.seq === seq) })
+  assert.equal(view.actions.length, 1)
+  const action = view.actions[0]
+  assert.equal(action.id, 'op')
+  assert.equal(action.phase, 'failed')
+  assert.equal(action.reason, 'requested')
+  assert.equal(action.afterInput, 1500)
+  assert.equal(action.commits.length, 2)
+  assert.equal(action.auditStatus, 'complete')
+  assert.equal(action.replacements.length, 2)
+})
+
 test('action display groups transactions, separates pricing units and reports missing audit after a durable commit', () => {
   const events = [{ seq: 1, type: 'user/message', data: { source: { kind: 'user' } } }, { seq: 2, type: 'compaction/summary', data: { compactionId: 'c', shadowedSeqs: [1] } },
     { seq: 3, type: 'user/message', time: 10, data: { source: { kind: 'compact-checkpoint', compactionId: 'c' } }, surfaceOp: { op: 'replace', startSeq: 1, endSeq: 1 } }]
@@ -44,7 +84,7 @@ test('action display groups transactions, separates pricing units and reports mi
     assert.match(markup, /20,000.*5,000/)
     assert.match(markup, /30,000.*2,000/)
     assert.match(markup, locale === 'zh' ? /已有部分持久进展/ : /Partial durable progress/)
-    assert.match(markup, locale === 'zh' ? /动作记录不完整/ : /audit incomplete/)
+    assert.match(markup, locale === 'zh' ? /已有部分动作审计/ : /Partial action audit/)
     assert.doesNotMatch(markup, /NaN|undefined/)
   }
 })

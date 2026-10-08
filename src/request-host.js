@@ -4,6 +4,7 @@ import { RequestBudgetExceeded } from './context-budget.js'
 import { captureInputPricing } from './input-pricing.js'
 import { openRequestJournal, requestFingerprint } from './request-journal.js'
 import { withScopedPrompts } from './scoped-prompts.js'
+import { requestCareInstructions } from './prompt-view-data.js'
 import { openOutputFeedback } from './output-feedback.js'
 import { calibrationHeaderKey, journalCalibration } from './input-calibration.js'
 
@@ -139,18 +140,24 @@ export async function apply(ctx) {
           header: session.requestHeader() ?? { config: prepared.config, ...(request.tools === undefined ? {} : { tools: request.tools }) }, reason: 'series',
           contextCarePrompt: { callId: call.callId, segments, message: composed.messages.at(-1) },
         })
-        call.promptDecision = { seq: decision.seq, segments }
+        call.promptDecision = { seq: decision.seq, segments, message: composed.messages.at(-1) }
       }
       const model = await ctx.llm.resolveModelInfo(composed.provider, composed.model, request.signal)
       call.ready = { request: composed, model: { ...model, ...(prepared.context ? { context: prepared.context } : {}) },
         imageRequestPricing: ctx.llm.imageRequestPricing(composed.provider, composed.model) }
       call.dispatchBudget = await owner.check(call, call.ready)
+      const careInstructions = requestCareInstructions(composed)
+      const summaryInstruction = careInstructions.find(instruction => instruction.kind === 'summary-instruction')
+      const systemSeq = call.sourceSeqs.find(seq => session.eventAt(seq)?.type === 'system/message')
       await persist(call, 'ready', { route: { provider: composed.provider, model: composed.model, maxTokens: composed.maxTokens,
         reasoningEffort: composed.reasoningEffort, temperature: composed.temperature }, system: composed.system, tools: composed.tools,
         inputHash: requestFingerprint({ system: composed.system, messages: composed.messages, tools: composed.tools }),
         pricingBasis: call.dispatchPricing.pricingBasis, budget: call.dispatchBudget,
         rawInput: call.dispatchPricing.decomposeRequest(composed), calibrationHeaderKey: calibrationHeaderKey(call.dispatchPricing.pricingBasis.header),
-        promptDecision: call.promptDecision })
+        promptDecision: call.promptDecision,
+        requestSourceSeqs: summaryInstruction ? [...(systemSeq === undefined ? [] : [systemSeq]), ...summaryInstruction.sourceSeqs] : call.sourceSeqs,
+        careInstructions: careInstructions.map(instruction => ({ ...instruction,
+          sourceSeq: instruction.kind === 'guidance' ? systemSeq : undefined })) })
       if (call.dispatchBudget.hardInput !== undefined && call.dispatchBudget.inputTokens > call.dispatchBudget.hardInput) throw new RequestBudgetExceeded(call.dispatchBudget)
       await feedback.reserve(session, segments, call.callId)
       await completion?.reserve(session, segments, call.callId)

@@ -6,7 +6,8 @@ import { httpFailure } from './http-failure.js'
  * @param options fetch function, polling interval and timer providers
  * @returns stable source, watch(sessionId, offset) disposer and unload disposer
  */
-export function createActionRecords({ fetcher = fetch, pollMs = 2000, setTimer = setInterval, clearTimer = clearInterval } = {}) {
+export function createActionRecords({ fetcher = fetch, pollMs = 2000, setTimer = setInterval, clearTimer = clearInterval,
+  endpoint = '/context-care/actions', collection = 'actions' } = {}) {
   let snapshot = new Map()
   const listeners = new Set()
   const watches = new Map()
@@ -20,10 +21,10 @@ export function createActionRecords({ fetcher = fetch, pollMs = 2000, setTimer =
     if (disposed || watch.loading) return
     watch.loading = true
     try {
-      const response = await fetcher(`/context-care/actions?sessionId=${encodeURIComponent(watch.sessionId)}&limit=20&offset=${watch.offset}`, { signal: watch.controller.signal, headers: { accept: 'application/json' } })
-      if (!response.ok) throw await httpFailure(response, '/context-care/actions')
+      const response = await fetcher(`${endpoint}?sessionId=${encodeURIComponent(watch.sessionId)}&limit=20&offset=${watch.offset}${watch.seq === undefined ? '' : `&seq=${watch.seq}`}`, { signal: watch.controller.signal, headers: { accept: 'application/json' } })
+      if (!response.ok) throw await httpFailure(response, endpoint)
       const body = await response.json()
-      if (!Array.isArray(body.actions)) throw new Error('Invalid action response')
+      if (!Array.isArray(body[collection])) throw new Error(`Invalid ${collection} response`)
       if (!watch.controller.signal.aborted) publish(watch.key, { status: 'ready', ...body })
     } catch (error) {
       if (!watch.controller.signal.aborted) publish(watch.key, { status: 'error', error: String(error) })
@@ -32,12 +33,12 @@ export function createActionRecords({ fetcher = fetch, pollMs = 2000, setTimer =
   const timer = setTimer(() => { for (const watch of watches.values()) void load(watch) }, pollMs)
   return {
     source: { getSnapshot: () => snapshot, subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener) } },
-    watch(sessionId, offset = 0) {
+    watch(sessionId, offset = 0, seq) {
       if (disposed) return () => {}
-      const key = `${sessionId}:${offset}`
+      const key = `${sessionId}:${offset}${seq === undefined ? '' : `:${seq}`}`
       let watch = watches.get(key)
       if (!watch) {
-        watch = { key, sessionId, offset, count: 0, controller: new AbortController(), loading: false }
+        watch = { key, sessionId, offset, seq, count: 0, controller: new AbortController(), loading: false }
         watches.set(key, watch)
         publish(key, { status: 'loading' })
         void load(watch)
@@ -52,8 +53,8 @@ export function createActionRecords({ fetcher = fetch, pollMs = 2000, setTimer =
         for (const listener of listeners) listener()
       }
     },
-    refresh(sessionId, offset = 0) {
-      const watch = watches.get(`${sessionId}:${offset}`)
+    refresh(sessionId, offset = 0, seq) {
+      const watch = watches.get(`${sessionId}:${offset}${seq === undefined ? '' : `:${seq}`}`)
       if (watch) void load(watch)
     },
     dispose() { disposed = true; clearTimer(timer); for (const watch of watches.values()) watch.controller.abort(); watches.clear(); listeners.clear(); snapshot = new Map() },

@@ -10,6 +10,7 @@
 // 判的 surface 是「用户刚说了什么」(placement: user);
 // when.produced 和 when.idle 要的助手输出与工具调用历史,从会话事件里取(见 prompt-text.js)。
 
+import { randomUUID } from 'node:crypto'
 import { createEngine } from '@leolee9086/dsh-rule-engine'
 import { createUserMessage } from './message.js'
 import { producerKind } from './producer-source.js'
@@ -38,6 +39,8 @@ export function installNoticeRules(ctx, { plugin, onHit = () => {} }) {
    * run 是同步的,中间插不进别的会话,所以一个变量就够,不用按会话分。
    */
   let sink = null
+  let hitSink = null
+  let runEvidence = null
 
   function warn(message) {
     if (typeof ctx.logger?.warn === 'function') ctx.logger.warn(message)
@@ -52,7 +55,11 @@ export function installNoticeRules(ctx, { plugin, onHit = () => {} }) {
       // 每次命中都留一条记录。规则命中和提醒注入都是对上下文的介入,
       // 不记下来就没人知道模型为什么突然收到那句话。
       onRecord(record) {
-        onHit(record, { sessionId: agent.session?.id })
+        // The same stable identity is persisted and attached to the resulting prompt; never join by time.
+        const captured = { ...record, evaluationId: randomUUID(), ...runEvidence,
+          rule: ctx.get(RULES_SERVICE)?.find(rule => rule.id === record.ruleId) }
+        onHit(captured, { sessionId: agent.session?.id })
+        hitSink?.push(captured)
         if (record.outcome === 'applied') return
         warn(`context-care: 提示规则 ${record.ruleId} 未生效(${record.outcome})${record.detail === undefined ? '' : ': ' + record.detail}`)
       },
@@ -75,7 +82,7 @@ export function installNoticeRules(ctx, { plugin, onHit = () => {} }) {
   }
 
   /** 把一条命中变成要注入的消息。规则没说清楚要提醒什么,就是规则写错了。 */
-  function render(payload) {
+  function render(payload, trace) {
     const say = payload.action?.say
     if (typeof say !== 'string' || say.length === 0) {
       throw new Error(`context-care: 提示规则 "${payload.ruleId}" 没有 action.say,不知道该提醒什么`)
@@ -86,6 +93,7 @@ export function installNoticeRules(ctx, { plugin, onHit = () => {} }) {
         kind: producerKind(`${plugin}:rules:${payload.ruleId}`),
         form: 'notice',
         summary: `Notice rule: ${payload.ruleId}`,
+        contextCareTrace: trace,
       },
     })
   }
@@ -108,6 +116,12 @@ export function installNoticeRules(ctx, { plugin, onHit = () => {} }) {
     if (text.length === 0) return []
     const engine = engineFor(agent)
     const collected = []
+    const hits = []
+    const events = agent.session?.snapshotEvents?.() ?? []
+    const userEvent = message.id === undefined ? undefined : events.findLast(event => event.type === 'user/message' && event.data.id === message.id)
+    const assistantEvent = events.findLast(event => event.type === 'assistant/message')
+    runEvidence = { inputMessageId: message.id, userText: text, facts, sourceSeqs: [userEvent?.seq, assistantEvent?.seq].filter(seq => seq !== undefined) }
+    hitSink = hits
     sink = collected
     try {
       // 助手输出和工具调用历史都从会话里取 —— 规则里的 when.produced / when.idle 靠它们。
@@ -125,8 +139,14 @@ export function installNoticeRules(ctx, { plugin, onHit = () => {} }) {
       })
     } finally {
       sink = null
+      hitSink = null
+      runEvidence = null
     }
-    return collected.map(render)
+    return collected.map(payload => {
+      const evaluation = hits.find(hit => hit.ruleId === payload.ruleId && hit.outcome === 'applied')
+      return render(payload, { trigger: 'notice-rule', ruleId: payload.ruleId, evaluationId: evaluation?.evaluationId,
+        userText: text, sourceSeqs: evaluation?.sourceSeqs ?? [], facts, evaluation, rule: evaluation?.rule })
+    })
   }
 
   return { collect }

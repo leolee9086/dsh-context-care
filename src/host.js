@@ -1,5 +1,6 @@
 import { installContextCare, Config } from './index.js'
 import { contextCareActions } from './action-view-data.js'
+import { contextCarePrompts } from './prompt-view-data.js'
 
 // 通用入口:挂在 profile 层一次,对所有会话生效。
 //
@@ -39,7 +40,7 @@ export function apply(ctx, config = {}) {
   // connection 是**可选**依赖(手册里的写法就是 ctx.get('connection')?. ),不写进 inject ——
   // 猜错服务名会让插件一直停在 PENDING,那比少一层鉴权严重得多。
   const connection = ctx.get('connection')
-  ctx.effect(() => server.register({ kind: 'exact', path: '/context-care/actions', async handler(req, res) {
+  for (const collection of ['actions', 'prompts']) ctx.effect(() => server.register({ kind: 'exact', path: `/context-care/${collection}`, async handler(req, res) {
     const rejected = connection?.requestRejection(req)
     if (rejected !== undefined) { res.writeHead(rejected); res.end(); return }
     if (req.method !== 'GET') { res.writeHead(405, { allow: 'GET' }); res.end(); return }
@@ -55,11 +56,20 @@ export function apply(ctx, config = {}) {
       // A readable old table is not evidence that the latest journal write
       // succeeded. Surface retained storage failures to the status panel.
       await ctx.contextCareRequests.flush(sessionId)
-      const view = contextCareActions(ctx.contextCareRequests.list(sessionId), ctx.sessions.get(sessionId))
-      const actions = view.actions.slice(offset, offset + limit)
+      const session = ctx.sessions.get(sessionId)
+      if (collection === 'prompts' && !session) { res.writeHead(404); res.end(JSON.stringify({ error: 'session-unavailable' })); return }
+      const records = ctx.contextCareRequests.list(sessionId)
+      const view = collection === 'actions' ? contextCareActions(records, session) : { prompts: contextCarePrompts(records, session) }
+      const items = view[collection]
+      const selectedSeq = query.has('seq') ? Number(query.get('seq')) : undefined
+      if (selectedSeq !== undefined && (!Number.isSafeInteger(selectedSeq) || selectedSeq < 0)) { res.writeHead(400); res.end(JSON.stringify({ error: 'invalid-sequence' })); return }
+      const selectedIndex = selectedSeq === undefined ? -1 : items.findIndex(item => item.seq === selectedSeq)
+      const pageOffset = selectedIndex < 0 ? offset : Math.floor(selectedIndex / limit) * limit
+      const page = items.slice(pageOffset, pageOffset + limit)
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-      res.end(JSON.stringify({ admission: view.admission, actions, total: view.actions.length,
-        nextOffset: offset + actions.length < view.actions.length ? offset + actions.length : null }))
+      res.end(JSON.stringify({ admission: view.admission, [collection]: page, total: items.length, offset: pageOffset,
+        selectedFound: selectedSeq === undefined ? undefined : selectedIndex >= 0,
+        nextOffset: pageOffset + page.length < items.length ? pageOffset + page.length : null }))
     } catch (error) {
       ctx.logger.warn(`context-care: action query failed: ${String(error)}`)
       res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'journal-unavailable', message: error instanceof Error ? error.message : String(error) }))
@@ -80,9 +90,8 @@ export function apply(ctx, config = {}) {
           return
         }
         try {
-          // 不带 sessionId = 所有会话。客户端节点定义拿不到 sessionId
-          // (ConversationNodeContext 里只有 key/kind/id/matches/start/state),
-          // 所以它拉全量、按内容哈希匹配 —— 哈希相同就意味着文本相同,不会配错。
+          // 保留旧全量改写接口；客户端实际按 sessionId + hash 查询对应卡片。
+          // 新提示目录另走会话分页接口，不依赖此旁路的哈希匹配。
           const records = await journal.list({})
           res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
           res.end(JSON.stringify({ records }))

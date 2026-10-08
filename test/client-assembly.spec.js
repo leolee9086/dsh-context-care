@@ -12,6 +12,7 @@ import { readFileSync } from 'node:fs'
 import { runInNewContext } from 'node:vm'
 
 const TAB = 'dsh-context-care:actions'
+const PROMPTS = 'dsh-context-care:prompts'
 // Consume the distributed factory, real framework hooks and real sidebar state.
 const hostRequire = createRequire(pathToFileURL(resolve(process.env.DSH_TEST_CHECKOUT, 'packages/test-support/client-runtime/package.json')))
 const plugin = { exports: {} }
@@ -50,6 +51,15 @@ test('records open in the real right sidebar, remain session scoped, and leave r
     if (routeFailure) return { ok: false, status: 404 }
     if (url.includes('rewrite-journal')) return { ok: true, json: async () => ({ records: [] }) }
     const query = new URL(url, 'http://localhost').searchParams
+    if (url.includes('/prompts?')) {
+      const offset = query.has('seq') ? 20 : Number(query.get('offset'))
+      const sessionId = query.get('sessionId')
+      return { ok: true, json: async () => ({ total: 21, offset, selectedFound: query.has('seq') ? query.get('seq') === '4' : undefined,
+        nextOffset: offset === 0 ? 20 : null, prompts: [{ id: `${sessionId}-prompt-${offset}`, seq: offset === 20 ? 4 : 24, kind: 'message',
+          producer: 'dsh-context-care:state', at: 100, text: `<context-care>exact ${sessionId} prompt ${offset}</context-care>`,
+          source: { contextCareTrace: { trigger: 'budget-state' } }, calls: [{ callId: 'call-one', dispatched: false }],
+          sources: [{ seq: 2, type: 'assistant/message', excerpt: 'verified source', truncated: false }] }] }) }
+    }
     return { ok: true, json: async () => ({ total: 21, nextOffset: query.get('offset') === '0' ? 20 : null,
       actions: [{ id: `${query.get('sessionId')}-${query.get('offset')}`, action: 'summary', phase: 'committed', beforeInput: 30000, afterInput: 2000, journalPersisted: true }] }) }
   })
@@ -68,13 +78,15 @@ test('records open in the real right sidebar, remain session scoped, and leave r
     const store = stores.get(selected)
     const state = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
     const surface = state.bySession[selected]
-    const tab = Object.values(surface?.layout.tabs ?? {}).find(tab => tab.kind === TAB)
+    const activeTabId = surface?.layout.nodes[surface.layout.activePaneId]?.activeTabId
+    const tab = surface?.layout.tabs[activeTabId]
     return createElement(SessionProvider, { session },
       createElement('div', { 'data-surface': 'composer' },
         createElement('div', { 'data-surface': 'toolbar' }, renderSlot('conversation.input.right', {})),
         createElement('div', { 'data-surface': 'status' }, renderSlot('conversation.composer.dock', {}))),
+      renderSlot('conversation.chat.node', { node: { data: { seq: 4, producer: 'dsh-context-care:state', body: 'Original notice', summary: '', values: [] } } }, { entryKey: 'context-care-notice' }),
       surface?.layout.expanded && tab ? createElement('aside', { 'data-surface': 'right-sidebar' },
-        renderSlot('sidebar.right.pane.tab', {}, { entryKey: tabs.get(TAB)?.id })) : null)
+        renderSlot('sidebar.right.pane.tab', {}, { entryKey: tabs.get(tab.kind)?.id })) : null)
   })
   const feature = await runtime.mount(plugin.exports)
   try {
@@ -100,11 +112,33 @@ test('records open in the real right sidebar, remain session scoped, and leave r
     expect(Object.values(stores.get(selected).getSnapshot().bySession[selected].layout.tabs).filter(tab => tab.kind === TAB)).toHaveLength(1)
     fireEvent.click(view.getByText('更早记录'))
     await waitFor(() => expect(view.container.querySelector('aside').textContent).toContain('session-one-20'))
+    fireEvent.click(view.getByRole('button', { name: '详情与溯源' }))
+    await waitFor(() => expect(view.container.querySelector('aside')?.textContent).toContain('exact session-one prompt 20'))
+    expect(fetcher.mock.calls.some(([url]) => url.includes('/prompts?sessionId=session-one') && url.includes('seq=4'))).toBe(true)
+    expect(view.container.querySelector('aside .care-action')?.open).toBe(true)
+    expect(view.getByText('页 2 / 2')).toBeTruthy()
+    expect(view.container.querySelector('aside').textContent).toContain('verified source')
+    expect(view.container.querySelector('aside').textContent).toContain('"dispatched": false')
+    const promptCalls = () => fetcher.mock.calls.filter(([url]) => url.includes('/prompts?')).length
+    const beforeRefresh = promptCalls()
+    fireEvent.click(view.getByRole('button', { name: '刷新' }))
+    await waitFor(() => expect(promptCalls()).toBeGreaterThan(beforeRefresh))
+    expect(view.container).toMatchSnapshot('selected prompt in official sidebar')
+    fireEvent.click(view.getByText('较新记录'))
+    await waitFor(() => expect(view.container.querySelector('aside')?.textContent).toContain('exact session-one prompt 0'))
+    fireEvent.click(view.getByRole('button', { name: '详情与溯源' }))
+    await waitFor(() => expect(view.container.querySelector('aside')?.textContent).toContain('exact session-one prompt 20'))
+    fireEvent.click(view.getByRole('button', { name: '提示详情与溯源' }))
+    await waitFor(() => expect(view.container.querySelector('aside')?.textContent).toContain('exact session-one prompt 0'))
+    expect(Object.values(stores.get(selected).getSnapshot().bySession[selected].layout.tabs).filter(tab => tab.kind === PROMPTS)).toHaveLength(1)
     await act(async () => selectSession(two))
     expect(view.container.querySelector('aside')).toBeNull()
     fireEvent.click(view.getByRole('button', { name: '预算与维护记录' }))
     await waitFor(() => expect(view.container.querySelector('aside')?.textContent).toContain('session-two-0'))
     expect(view.container.textContent).not.toContain('session-one-20')
+    fireEvent.click(view.getByRole('button', { name: '提示详情与溯源' }))
+    await waitFor(() => expect(view.container.querySelector('aside')?.textContent).toContain('exact session-two prompt 0'))
+    expect(view.container.textContent).not.toContain('exact session-one prompt')
     routeFailure = true
     await waitFor(() => expect(view.container.querySelector('aside').textContent).toContain('HTTP 404'), { timeout: 5000 })
     expect(view.container.querySelector('aside [role="alert"]')?.textContent).toContain('HTTP 404')
@@ -114,5 +148,6 @@ test('records open in the real right sidebar, remain session scoped, and leave r
     expect(runtime.slots.entries('sidebar.right.pane.tab')).toHaveLength(0)
     expect(runtime.slots.entries('conversation.chat.node')).toHaveLength(0)
     expect(tabs.get(TAB)).toBeUndefined()
+    expect(tabs.get(PROMPTS)).toBeUndefined()
   } finally { sidebar.controller.tabDomain.dispose(); await runtime.dispose(); vi.unstubAllGlobals() }
 })

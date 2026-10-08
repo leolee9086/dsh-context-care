@@ -145,7 +145,7 @@ function valueRow(values, t) {
  * @param props - 框架给的节点与字典座位。
  * @returns 一行/一张通知卡片。
  */
-export function NoticeNodeView({ node, t }) {
+export function NoticeNodeView({ node, t, sessionId, openPrompts }) {
   const data = node?.data
   if (data === undefined) return null
   return React.createElement('div', {
@@ -176,5 +176,7 @@ export function NoticeNodeView({ node, t }) {
   React.createElement('div', {
     style: { fontSize: 'var(--dsh-content-font-size, 14px)', lineHeight: '22px',
       color: 'var(--dsw-alias-label-primary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' },
-  }, data.body))
+  }, data.body),
+  openPrompts && (data.producer === OWN || data.producer.startsWith(OWN + ':')) ? React.createElement('button', { type: 'button', onClick: () => openPrompts(sessionId, data.seq),
+    style: { font: 'inherit', color: 'var(--dsw-alias-label-secondary)', background: 'transparent', border: 0, cursor: 'pointer', marginTop: 6 } }, t('promptsDetails')) : null)
 }

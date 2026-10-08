@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { recordSecondaryFailure } from './secondary-failure.js'
 import { producedUnder } from './producer-source.js'
 
@@ -11,7 +11,7 @@ import { producedUnder } from './producer-source.js'
  * @returns proposal execution returning null for an unchanged useless proposal
  */
 export function createProposalExecutor(requests, compact) {
-  return async function execute(service, proposal, agent, signal, operation, spec) {
+  return async function execute(service, proposal, agent, signal, operation, spec, reason) {
     const session = agent.session
     const seqs = proposal.sourceSeqs.filter(seq => {
       const event = session.eventAt(seq)
@@ -23,18 +23,23 @@ export function createProposalExecutor(requests, compact) {
       summary: spec.summary ?? service.config, prompts: spec.modelScopedPrompts })).digest('hex')
     if (requests.list(session.id).some(record => record.kind === 'maintenance'
       && record.data.proposalKey === key && record.data.phase === 'no-useful-range')) return null
-    await requests.recordAction(session, { action: 'selection', phase: 'planning', proposalKey: key,
-      rule: proposal.rule, sourceSeqs: proposal.sourceSeqs, comparisons: proposal.comparisons })
-    try { return await compact(service, proposal, agent, signal, operation) }
+    const audit = { operationId: randomUUID(), reason, proposalKey: key, rule: proposal.rule, comparisons: proposal.comparisons }
+    await requests.recordAction(session, { ...audit, action: 'selection', phase: 'planning', sourceSeqs: proposal.sourceSeqs })
+    try { return await compact(service, proposal, agent, signal, operation, undefined, audit) }
     catch (error) {
       if (['SUMMARY_NOT_SMALLER', 'SUMMARY_INPUT_BUDGET', 'SUMMARY_EMPTY'].includes(error.code)) {
         try {
-          await requests.recordAction(session, { action: 'selection', phase: 'no-useful-range', proposalKey: key,
+          await requests.recordAction(session, { ...audit, action: 'summary', phase: 'no-useful-range', proposalKey: key,
             rule: proposal.rule, sourceSeqs: proposal.sourceSeqs, failure: { code: error.code, message: error.message } })
         } catch (journalError) {
           // The journal flush reports this error; the original summary failure wins.
           recordSecondaryFailure(error, journalError, 'selection audit')
         }
+      } else {
+        try {
+          await requests.recordAction(session, { ...audit, action: 'summary', phase: 'failed', sourceSeqs: proposal.sourceSeqs,
+            failure: { code: error.code, message: error instanceof Error ? error.message : String(error) } })
+        } catch (journalError) { recordSecondaryFailure(error, journalError, 'selection audit') }
       }
       throw error
     }

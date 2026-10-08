@@ -5,12 +5,12 @@
 //   · llm/retry 也不行:token-meter 要求当前 open attempt 已有 usage 样本,
 //     而我们的改写发生在"这个 step 第一次请求发出之前",那时没有任何 attempt,
 //     写下去会让整个 turn 的 token 统计判 invalid。
-// 所以改写事实走旁路:索引插件的属性表在就落它那里(持久、可与块索引 JOIN),
-// 不在就只在进程内维护。这是"索引插件存在就存它那里,不存在就在进程内"那条范式。
+// 改写事实走插件自己的 Host 持久域；可选索引属性表仍写一份用于块索引 JOIN。
+// 单独使用此工厂可不传 durable；正式 runtime 必须传入，避免无索引时重启丢记录。
 //
 // 客户端怎么认出"哪条消息被改过":**用内容哈希,不用 seq**。
 // 改写器拿到的是组装好的请求体,里面没有事件 seq —— 它只知道"我清理了这段文本"。
-// 而客户端手里有消息原文。两边算同一个哈希就能对上,跨会话也不会误配。
+// 客户端用 sessionId + 内容哈希查找；哈希是显示关联线索，不是无碰撞的身份或发送证明。
 // 哈希用 FNV-1a 32 位:纯 JS,Host 和浏览器两边各一份逐字相同的实现,
 // 不需要 node:crypto,也不需要异步的 crypto.subtle。
 
@@ -152,15 +152,16 @@ export function changedBlocks(before, after) {
 /**
  * 造一个改写流水账。
  *
- * 两个落点:索引插件的属性表(在时)与进程内(不在时)。读的时候两边都看 ——
- * 属性表可能因为库不可用而写不进去,那时记录只在内存里,读也得读得到。
+ * 正式运行由 durable 提供 Host 持久存储；读取与可选旧属性表、进程内结果合并。
+ * durable 写失败会传播，旧属性表失败仅影响索引副本，不否认 Host 已确认的写入。
  *
  * @param {object} deps
  * @param {() => object|undefined} deps.store 取索引插件服务;每次现取(它可能晚于本插件注册)。
- * @param {(message: string) => void} [deps.warn] 诊断输出。
+ * @param {{put: Function, list: Function}} [deps.durable] Host 持久写入及 ACK 后读取；正式 runtime 提供。
+ * @param {(message: string) => void} [deps.warn] 旧属性表的诊断输出。
  * @returns {{record: Function, list: Function}} 记录与查询。
  */
-export function createRewriteJournal({ store, warn = () => {} }) {
+export function createRewriteJournal({ store, durable, warn = () => {} }) {
   /** 进程内的那份。sessionId → 记录数组。 */
   const memory = new Map()
 
@@ -170,11 +171,10 @@ export function createRewriteJournal({ store, warn = () => {} }) {
     /**
      * 记一次改写。
      *
-     * 索引服务在就写属性表(持久);写不进去或服务不在,退到进程内。
-     * **任何失败都不抛** —— 记录是旁路,不该毁掉这次请求。
+     * 先等待 Host 持久写入，再写可选索引副本；Host 失败传播，不能用内存结果掩盖失败。
      *
      * @param {object} entry 记录内容。
-     * @returns {Promise<{persisted: boolean}>} 是否落了属性表。
+     * @returns {Promise<{persisted: boolean}>} 是否由 Host 或旧属性表确认持久化。
      */
     async record(entry) {
       const row = {
@@ -200,14 +200,16 @@ export function createRewriteJournal({ store, warn = () => {} }) {
       bucket.push(row)
       memory.set(row.sessionId, bucket)
 
+      // Runtime always supplies the Host journal. A write failure propagates and remains visible through flush.
+      if (durable) await durable.put(row.value)
       const service = store()
-      if (service === undefined || typeof service.putAttribute !== 'function') return { persisted: false }
+      if (service === undefined || typeof service.putAttribute !== 'function') return { persisted: Boolean(durable) }
       try {
         const id = await service.putAttribute(row)
-        return { persisted: typeof id === 'string' }
+        return { persisted: Boolean(durable) || typeof id === 'string' }
       } catch (error) {
-        warn('context-care: 改写记录没写进属性表,只留在进程内: ' + (error instanceof Error ? error.message : String(error)))
-        return { persisted: false }
+        warn((durable ? 'context-care: 索引副本写入失败，Host 已确认持久化: ' : 'context-care: 改写记录没写进属性表,只留在进程内: ') + (error instanceof Error ? error.message : String(error)))
+        return { persisted: Boolean(durable) }
       }
     },
 
@@ -223,10 +225,9 @@ export function createRewriteJournal({ store, warn = () => {} }) {
     async list(filter = {}) {
       const sessionId = filter.sessionId
       const rows = []
+      if (durable) for (const value of await durable.list(sessionId)) rows.push({ hash: value.hash, value })
       const service = store()
-      // 不带 sessionId = 所有会话。客户端节点定义拿不到 sessionId
-      // (ConversationNodeContext 里只有 key/kind/id/matches/start/state),
-      // 所以它拉全量、按内容哈希匹配 —— 哈希相同就意味着文本相同,不会配错。
+      // 旧客户端接口仍读取所有会话；实际卡片按 sessionId + hash 匹配，保持会话隔离。
       if (service !== undefined && typeof service.listAttributes === 'function') {
         try {
           const query = { namespace: NAMESPACE, name: REWRITE_NAME }
@@ -234,7 +235,7 @@ export function createRewriteJournal({ store, warn = () => {} }) {
           const stored = await service.listAttributes(query)
           for (const item of stored) rows.push({ hash: item.value?.hash, value: { ...item.value, sessionId: item.sessionId } })
         } catch (error) {
-          warn('context-care: 读属性表失败,只返回进程内的记录: ' + (error instanceof Error ? error.message : String(error)))
+          warn((durable ? 'context-care: 旧索引读取失败，仍返回 Host 持久记录: ' : 'context-care: 读属性表失败,只返回进程内的记录: ') + (error instanceof Error ? error.message : String(error)))
         }
       }
       const buckets = sessionId === undefined ? [...memory.values()] : [memory.get(sessionId) ?? []]

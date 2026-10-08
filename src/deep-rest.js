@@ -75,7 +75,8 @@ export function clearRange(session, meter, range, text, pricing) {
   const selectedTokens = measurement.nodes.filter(node => selected.has(node.seq)).reduce((sum, node) => sum + node.tokens, 0)
   const content = [{ type: 'text', text }]
   const compactionId = randomUUID()
-  const replacement = createUserMessage({ content, source: checkpointSource(compactionId) })
+  const replacement = createUserMessage({ content, source: { ...checkpointSource(compactionId),
+    contextCareTrace: { producer: 'dsh-context-care', trigger: 'deep-rest', sourceSeqs: [...range.shadowedSeqs] } } })
   const replacementTokens = pricing === undefined
     ? meter.estimateMessage(replacement) : pricing.priceMessages([replacement])
   if (replacementTokens >= selectedTokens) {

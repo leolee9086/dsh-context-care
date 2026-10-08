@@ -247,24 +247,27 @@ export function installContextCare(ctx, raw, compactionSource) {
   // 判断什么时候该提醒、提醒什么,都在这里发生。规则本身不属于本插件。
   // ---------------------------------------------------------- 变换记录
   //
-  // 写进会话日志的 log-only 事件:模型看不到,但持久、可回放、能推给界面。
-  // 为什么这么做见 transform-log.js 的头注释。
+  // Rule evaluations use the Host journal; no new Session event type is introduced.
   const transformLog = createTransformLog({ ctx })
-  // 改写记录:会话日志之外的旁路。索引插件的属性表在就落它那里(持久、可与块索引 JOIN),
-  // 不在就只在进程内。服务名是索引插件自己的,这里现取 —— 它可能晚于本插件注册。
+  // 改写由本插件的 Host 持久域保管，不依赖可选索引服务。
+  // 索引属性表仍可写副本用于 JOIN；在调用边界现取，允许它晚于本插件注册。
   const rewriteJournal = createRewriteJournal({
     store: () => ctx.get('sessionBlockQuery'),
+    durable: {
+      put(entry) {
+        const session = ctx.sessions.get(entry.sessionId)
+        if (!session) throw new Error(`context-care: rewrite session unavailable: ${entry.sessionId}`)
+        return ctx.contextCareRequests.recordAction(session, { action: 'request-rewrite', phase: 'recorded', rewrite: entry })
+      },
+      async list(sessionId) {
+        await ctx.contextCareRequests.flush(sessionId)
+        return ctx.contextCareRequests.list(sessionId).filter(record => record.kind === 'maintenance' && record.data.action === 'request-rewrite').map(record => record.data.rewrite)
+      },
+    },
     warn: message => ctx.logger.warn(message),
   })
   /** 两个来源的命中都记到一处,面板和排查都只看这一张表。 */
-  const recordHit = (layer, record, where) => transformLog.record({
-    sessionId: where.sessionId,
-    layer,
-    ruleId: record.ruleId,
-    outcome: record.outcome,
-    loss: record.loss,
-    detail: record.detail,
-  })
+  const recordHit = (layer, record, where) => transformLog.record({ ...record, ...where, layer })
 
   const noticeRules = installNoticeRules(ctx, {
     plugin: name,
@@ -406,7 +409,8 @@ export function installContextCare(ctx, raw, compactionSource) {
         // 文案可能需要最近一次状态报告里的数值（上下文焦虑用它给证据）。
         // previousState 只扫 surface 尾部、是同步的；这里不能 await sample()。
         const state = agent.session === undefined ? undefined : previousState(agent.session)
-        agent.inject(notice(watchPlugin(trigger.id), wording.text(hit, state), wording.summary))
+        agent.inject(notice(watchPlugin(trigger.id), wording.text(hit, state), wording.summary, undefined,
+          { contextCareTrace: { trigger: 'stream-watch', detector: trigger.id, evidence: hit } }))
       },
       /** 掐断这一轮。已生成的部分由 agent-loop 自己落成 interrupted 消息，不会静默丢。 */
       abort({ agent, hit }) {
@@ -428,7 +432,8 @@ export function installContextCare(ctx, raw, compactionSource) {
         if ((abortCounts.get(key) ?? 0) > MAX_AUTO_RESUME) return
         const wording = WATCH_NOTICES[trigger.id]
         if (wording === undefined) return
-        agent.steer(notice(watchPlugin(trigger.id), wording.text(hit), wording.summary))
+        agent.steer(notice(watchPlugin(trigger.id), wording.text(hit), wording.summary, undefined,
+          { contextCareTrace: { trigger: 'stream-resume', detector: trigger.id, evidence: hit } }))
       },
     },
     onError(error, context) {
@@ -574,7 +579,7 @@ export function installContextCare(ctx, raw, compactionSource) {
       // Inbox insertion is durable. All calls in this batch settle before pre-step claims it.
       exec.agent.inject(notice(requestPlugin, sections.join('\n\n'),
         deep ? 'Deep rest requested' : 'History compaction requested', undefined,
-        deep ? { contextRest: { deep: true } } : undefined))
+        { contextRest: { deep }, contextCareTrace: { trigger: 'context_rest', deep } }))
       return deep
         ? '深度休息已经排定在下一个请求边界。它还没完成；下一次上下文状态会报告结果。'
         : '历史压缩已经排定在下一个请求边界。它还没完成；下一次上下文状态会报告结果，之后继续任务。'
@@ -639,7 +644,7 @@ export function installContextCare(ctx, raw, compactionSource) {
           const measured = failed.dispatchPricing.measure()
           const range = selectRestRange(session, measured, 0, 0, name)
           if (range !== null) await compactSummary(compaction, { ...range, minFreshTokens: 0 }, agent, signal, failed.dispatchPricing,
-            { ...failed.ready.request, messages: session.deriveMessages() })
+            { ...failed.ready.request, messages: session.deriveMessages() }, { reason: 'overflow', callId: failed.callId })
         }
       } catch (error) {
         if (signal.aborted) throw error
@@ -672,13 +677,15 @@ export function installContextCare(ctx, raw, compactionSource) {
       const assistant = lastAssistantMessage(accepted)
       const notices = await noticeChannel.collect({ agentId: agent.id,
         userText: user === undefined ? '' : textOf(user), assistantText: assistant === undefined ? lastAssistantText(agent.session) : textOf(assistant), signal })
-      for (const incoming of notices) messages.push(notice(`${name}:notice:${incoming.source}`, incoming.text, incoming.summary ?? `Notice from ${incoming.source}`))
+      for (const incoming of notices) messages.push(notice(`${name}:notice:${incoming.source}`, incoming.text, incoming.summary ?? `Notice from ${incoming.source}`, undefined,
+        { contextCareTrace: { trigger: 'notice-channel', provider: incoming.source } }))
     } catch (error) {
       if (signal.aborted) throw error
       ctx.logger.warn(`context-care: 通知通道没有跑起来: ${error instanceof Error ? error.message : String(error)}`)
     }
     const loop = detectLoop(agent.session)
-    if (loopNeedsReminder(loop, cleanupActive) && !alreadyWarned(agent.session, loopPlugin)) messages.push(notice(loopPlugin, loopNoticeText(loop), 'Output loop detected'))
+    if (loopNeedsReminder(loop, cleanupActive) && !alreadyWarned(agent.session, loopPlugin)) messages.push(notice(loopPlugin, loopNoticeText(loop), 'Output loop detected', undefined,
+      { contextCareTrace: { trigger: 'loop-guard', evidence: loop } }))
     return messages
   }
 
@@ -737,7 +744,7 @@ export function installContextCare(ctx, raw, compactionSource) {
         while (pressure.shouldMaintain && compaction !== undefined && passes < passLimit) {
           const proposal = propose(agent, current, true)
           if (proposal === null) break
-          const result = await executeProposal(compaction, proposal, agent, signal, operation, spec)
+          const result = await executeProposal(compaction, proposal, agent, signal, operation, spec, requested ? 'requested' : 'automatic')
           if (result === null) break
           passes += 1
           current = await sample(agent, signal, messages, true, operation)
@@ -777,7 +784,7 @@ export function installContextCare(ctx, raw, compactionSource) {
             if (proposal === null) {
               outcome = '没有执行——留存近况之外没有足够大的新鲜前缀或可合并检查点'
             } else {
-              const result = await executeProposal(compaction, proposal, agent, signal, operation, spec)
+              const result = await executeProposal(compaction, proposal, agent, signal, operation, spec, requested ? 'requested' : 'automatic')
               outcome = result === null ? '没有执行——同一选区已验证无法缩小，历史保留' : '较早的历史已摘要，近况与交接笔记保留'
               current = await sample(agent, signal, messages, true, operation)
             }
@@ -799,7 +806,8 @@ export function installContextCare(ctx, raw, compactionSource) {
       // 即便状态没变，只要循环提醒挂上了就得把消息带回去。
       return messages.length === decision.messages.length ? decision : { ...decision, messages }
     }
-    messages.push(notice(statePlugin, text, 'Context state', current.state))
+    messages.push(notice(statePlugin, text, 'Context state', current.state,
+      { contextCareTrace: { trigger: requested ? 'rest-result' : 'budget-state', budget: current.budget, outcome } }))
     return { ...decision, messages }
     })
   }, { prepend: true })
