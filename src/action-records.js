@@ -52,6 +52,10 @@ export function createActionRecords({ fetcher = fetch, pollMs = 2000, setTimer =
         for (const listener of listeners) listener()
       }
     },
+    refresh(sessionId, offset = 0) {
+      const watch = watches.get(`${sessionId}:${offset}`)
+      if (watch) void load(watch)
+    },
     dispose() { disposed = true; clearTimer(timer); for (const watch of watches.values()) watch.controller.abort(); watches.clear(); listeners.clear(); snapshot = new Map() },
   }
 }

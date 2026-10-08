@@ -57,6 +57,7 @@ test('records open in the real right sidebar, remain session scoped, and leave r
   let selectSession
   await runtime.root.declare({
     'conversation.composer.dock': { kind: 'list', scope: 'session' },
+    'conversation.input.right': { kind: 'list', scope: 'session' },
     'conversation.chat.node': { kind: 'keyed', scope: 'session' },
     'sidebar.right.pane.tab': { kind: 'keyed', scope: 'session' },
   }, ({ renderSlot, SessionProvider }) => {
@@ -69,7 +70,9 @@ test('records open in the real right sidebar, remain session scoped, and leave r
     const surface = state.bySession[selected]
     const tab = Object.values(surface?.layout.tabs ?? {}).find(tab => tab.kind === TAB)
     return createElement(SessionProvider, { session },
-      createElement('div', { 'data-surface': 'composer' }, renderSlot('conversation.composer.dock', {})),
+      createElement('div', { 'data-surface': 'composer' },
+        createElement('div', { 'data-surface': 'toolbar' }, renderSlot('conversation.input.right', {})),
+        createElement('div', { 'data-surface': 'status' }, renderSlot('conversation.composer.dock', {}))),
       surface?.layout.expanded && tab ? createElement('aside', { 'data-surface': 'right-sidebar' },
         renderSlot('sidebar.right.pane.tab', {}, { entryKey: tabs.get(TAB)?.id })) : null)
   })
@@ -78,6 +81,8 @@ test('records open in the real right sidebar, remain session scoped, and leave r
     const view = runtime.renderRoot()
     const composer = view.container.querySelector('[data-surface="composer"]')
     expect(composer.textContent).toContain('疲劳度: 40%')
+    expect(composer.querySelector('[data-surface="status"] button')).toBeNull()
+    expect(composer.querySelector('[data-surface="toolbar"] button')?.getAttribute('aria-label')).toBe('预算与维护记录')
     expect(composer.querySelector('[data-context-care-actions]')).toBeNull()
     expect(view.container.textContent).not.toContain('session-one-0')
     fireEvent.click(view.getByRole('button', { name: '预算与维护记录' }))
@@ -85,6 +90,11 @@ test('records open in the real right sidebar, remain session scoped, and leave r
     expect(sidebar.controller.isExpanded()).toBe(true)
     expect(composer.textContent).not.toContain('30,000 → 2,000')
     expect(view.container.querySelector('aside').textContent).toContain('30,000 → 2,000')
+    fireEvent.click(view.getByRole('button', { name: '刷新' }))
+    await waitFor(() => expect(fetcher.mock.calls.filter(([url]) => url.includes('/actions?')).length).toBeGreaterThan(1))
+    fireEvent.click(view.getByText('摘要'))
+    expect(view.container.querySelector('.care-action')?.open).toBe(true)
+    expect(view.getByText('页 1 / 2')).toBeTruthy()
     expect(view.container).toMatchSnapshot('composer entry and right sidebar records')
     fireEvent.click(view.getByRole('button', { name: '预算与维护记录' }))
     expect(Object.values(stores.get(selected).getSnapshot().bySession[selected].layout.tabs).filter(tab => tab.kind === TAB)).toHaveLength(1)
@@ -100,6 +110,7 @@ test('records open in the real right sidebar, remain session scoped, and leave r
     expect(view.container.querySelector('aside [role="alert"]')?.textContent).toContain('HTTP 404')
     await feature.dispose()
     expect(runtime.slots.entries('conversation.composer.dock')).toHaveLength(0)
+    expect(runtime.slots.entries('conversation.input.right')).toHaveLength(0)
     expect(runtime.slots.entries('sidebar.right.pane.tab')).toHaveLength(0)
     expect(runtime.slots.entries('conversation.chat.node')).toHaveLength(0)
     expect(tabs.get(TAB)).toBeUndefined()

@@ -24,7 +24,7 @@ test('Chinese UI displays numeric percentages, levels and independent colors', (
   const markup = render({ fatigue: 'elevated', fatigueValue: 42.3, wakefulness: 'high', wakefulnessValue: 100 })
   assert.match(markup, /疲劳度: 42.3% \(较高\)/)
   assert.match(markup, /唤醒值: 100% \(高\)/)
-  assert.match(markup, /color:#3b82f6/)
+  assert.match(markup, /color:var\(--dsw-alias-state-business-primary\)/)
   assert.match(markup, /var\(--dsw-alias-state-success-primary\)/)
   assert.match(markup, /最近一次请求准备/)
 })
@@ -47,7 +47,7 @@ test('UI does not invent numeric samples for old or uncalibrated observations', 
   const markup = render({ fatigue: 'high', wakefulness: 'low', fatigueValue: null, wakefulnessValue: null })
   assert.match(markup, /疲劳度: 未校准/)
   assert.match(markup, /唤醒值: 未校准/)
-  assert.doesNotMatch(markup, /NaN|undefined|\d+%/)
+  assert.doesNotMatch(markup.replace(/<style>[\s\S]*?<\/style>/g, ''), /NaN|undefined|\d+%/)
   assert.match(render({ fatigue: 'normal', wakefulness: 'low', fatigueValue: 0, wakefulnessValue: 0 }), /疲劳度: 0%/)
 })
 

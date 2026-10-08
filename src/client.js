@@ -22,10 +22,10 @@ export function apply(ctx) {
   ctx.effect(() => ctx.sidebarRightTabs.register({ id: ACTIONS_TAB, kind: ACTIONS_TAB, title: () => t('actionsTitle') }))
   ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
     name: 'sidebar.right.pane.tab', key: ACTIONS_TAB, locale: 'dsh-context-care',
-    inject: () => ({ hooks: { careActions: actions.source }, watchActions: actions.watch }),
+    inject: () => ({ hooks: { careActions: actions.source }, watchActions: actions.watch, refreshActions: actions.refresh }),
   }, ContextCareActions))
-  ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
-    name: 'conversation.composer.dock', id: 'context-care-actions', order: 5, locale: 'dsh-context-care',
+  ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
+    name: 'conversation.input.right', id: 'context-care-actions', order: 5, locale: 'dsh-context-care',
     inject: () => ({ openActions(sessionId) {
       ctx.sidebarRight.openTabIn(sessionId, ACTIONS_TAB)
       if (ctx.sidebarRight.isExpanded() !== true) ctx.layout.openRightbar(false, false)

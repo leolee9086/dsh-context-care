@@ -1,4 +1,5 @@
 import React, { useEffect } from 'react'
+import { CareStyles } from './care-styles.js'
 
 export const dictionaries = {
   zh: {
@@ -20,6 +21,8 @@ export const dictionaries = {
     actionsCoverage: '原始覆盖序号', actionsDepth: '加工深度', actionsCandidates: '候选范围与预测降幅', actionsError: '失败原因',
     actionsJournal: '记录状态', actionsPersisted: '动作记录已持久化', actionsRecovered: '已从会话恢复提交事实，动作记录不完整',
     actionsPrevious: '较新记录', actionsNext: '更早记录',
+    actionsBudget: '当前请求预算', actionsUsage: '输入占硬限额 ', actionsSoftLimit: '软阈值', actionsReleaseTarget: '释放目标',
+    actionsTechnical: '计价与保留策略', actionsHistory: '维护记录', actionsRefresh: '刷新', actionsPage: '页',
     actionsOpen: '在右侧栏打开预算与维护记录', actionsOpenFailed: '无法打开记录',
     action_prune: '裁剪', action_summary: '摘要', 'action_deep-rest': '深度休息', action_selection: '选区规划',
     phase_started: '执行中', phase_planning: '规划', phase_prepared: '提交准备', phase_repaired: '输入已修复',
@@ -46,6 +49,8 @@ export const dictionaries = {
     actionsCoverage: 'Original leaf sequences', actionsDepth: 'Processing depth', actionsCandidates: 'Candidates and predicted saving', actionsError: 'Failure',
     actionsJournal: 'Record status', actionsPersisted: 'Action record persisted', actionsRecovered: 'Commit recovered from session; action audit incomplete',
     actionsPrevious: 'Newer records', actionsNext: 'Older records',
+    actionsBudget: 'Current request budget', actionsUsage: 'Input / hard limit ', actionsSoftLimit: 'Soft limit', actionsReleaseTarget: 'Release target',
+    actionsTechnical: 'Pricing and retention', actionsHistory: 'Maintenance history', actionsRefresh: 'Refresh', actionsPage: 'Page',
     actionsOpen: 'Open budget and maintenance in the right sidebar', actionsOpenFailed: 'Unable to open records',
     action_prune: 'Prune', action_summary: 'Summary', 'action_deep-rest': 'Deep rest', action_selection: 'Selection',
     phase_started: 'Running', phase_planning: 'Planning', phase_prepared: 'Prepared', phase_repaired: 'Input repaired',
@@ -60,14 +65,14 @@ export function tone(value, kind) {
   const band = value < 30 ? 0 : value < 60 ? 1 : value < 85 ? 2 : 3
   // High wakefulness means more retained information, so it is not a danger color.
   const palette = kind === 'wakefulness'
-    ? ['var(--dsw-alias-state-warn-primary)', '#3b82f6', '#14b8a6', 'var(--dsw-alias-state-success-primary)']
-    : ['var(--dsw-alias-state-success-primary)', '#3b82f6', 'var(--dsw-alias-state-warn-primary)', 'var(--dsw-alias-state-error-primary)']
+    ? ['var(--dsw-alias-state-warn-primary)', 'var(--dsw-alias-state-business-primary)', 'var(--dsw-alias-state-success-secondary)', 'var(--dsw-alias-state-success-primary)']
+    : ['var(--dsw-alias-state-success-primary)', 'var(--dsw-alias-state-business-primary)', 'var(--dsw-alias-state-warn-primary)', 'var(--dsw-alias-state-error-primary)']
   return palette[band]
 }
 
 function indicator(label, value, level, kind, t) {
   const text = value === null || value === undefined ? `${label}: ${t('unknown')}` : `${label}: ${value}% (${t(level)})`
-  return React.createElement('span', { style: { color: tone(value, kind), fontWeight: 600 } }, text)
+  return React.createElement('span', { style: { color: tone(value, kind) } }, text)
 }
 
 /** Pure display receives the framework-owned projection hook. */
@@ -79,8 +84,8 @@ export function ContextCareStatus({ useProjection, useCareActions, useRewriteHea
   const error = actions?.status === 'error' ? actions.error : health?.status === 'error' ? health.error : undefined
   return React.createElement('div', {
     'data-context-care': '', role: 'status', title: t('description'),
-    style: { display: 'flex', flexWrap: 'wrap', gap: '12px', alignItems: 'center', fontSize: '12px', color: 'var(--dsw-alias-label-secondary)', padding: '2px 4px' },
   },
+  React.createElement(CareStyles),
   indicator(t('fatigue'), state?.fatigueValue, state?.fatigue ?? 'unknown', 'fatigue', t),
   indicator(t('wakefulness'), state?.wakefulnessValue, state?.wakefulness ?? 'unknown', 'wakefulness', t),
   error ? React.createElement('span', { role: 'alert', style: { color: 'var(--dsw-alias-state-error-primary)' } }, `${t('actionsUnavailable')}: ${error}`)
