@@ -4,6 +4,7 @@ import { installContextCare, inject as agentInject, previousState, shouldNotify 
 import { calculateState, renderState, resolveConfig } from './policy.js'
 import { createUserMessage } from './message.js'
 import { producedBy, producerKind } from './producer-source.js'
+import { CARE_SOURCE, controlledState } from './control-catalog.js'
 
 export const name = 'dsh-context-care-activate'
 export const inject = ['agents', 'agentPresets', 'tools']
@@ -38,19 +39,28 @@ export async function apply(ctx, config) {
           const spec = resolveConfig()
           const load = Math.ceil(measurement.inputTokens + incoming)
           const state = calculateState(load, retained, info?.context?.contextWindow, spec)
-          const prior = previousState(owner.session)
-          const notificationText = existing ? existing.content.filter(block => block.type === 'text').map(block => block.text).join('\n') : renderState(state)
           const requested = decision.messages.some(message => producedBy(message.source, 'dsh-context-care:request'))
-          if (!requested && !shouldNotify(prior, notificationText, state)) {
+          const controls = scoped.get('contextCareRequests')?.controls
+          controls?.sample(String(owner.session.id), state)
+          const existingText = existing?.content.filter(block => block.type === 'text').map(block => block.text).join('\n')
+          const outcome = existingText?.split('\n').find(line => /^(休息结果：|Rest outcome:)/.test(line))
+            ?.replace(/^(休息结果：|Rest outcome:\s*)/, '').replace(/[。.]$/, '')
+
+          const rendered = controls ? controlledState(state, outcome,
+            (ruleId, actionId) => controls.enabled(String(owner.session.id), CARE_SOURCE, ruleId, actionId), requested) : renderState(state)
+          const prior = previousState(owner.session)
+          const notificationText = controls ? rendered : existingText ?? rendered
+
+          if (!requested && (!rendered || !shouldNotify(prior, notificationText, state))) {
             return existing ? { ...decision, messages: decision.messages.filter(message => !isState(message)) } : decision
           }
           const numeric = createUserMessage({
-            content: [{ type: 'text', text: renderState(state) }],
+            content: [{ type: 'text', text: rendered }],
             source: { kind: producerKind('dsh-context-care:state'), form: 'notice', summary: 'Context state', contextCare: { fatigueValue: state.fatigueValue, wakefulnessValue: state.wakefulnessValue } },
           })
           // Keep any outcome text from the old producer; values are display-only.
           const messages = existing
-            ? decision.messages.map(message => isState(message) ? createUserMessage({ content: message.content, source: { ...message.source, contextCare: numeric.source.contextCare } }) : message)
+            ? decision.messages.map(message => isState(message) ? createUserMessage({ content: controls ? numeric.content : message.content, source: { ...message.source, contextCare: numeric.source.contextCare } }) : message)
             : [...decision.messages, numeric]
           return { ...decision, messages }
         }, { prepend: true })

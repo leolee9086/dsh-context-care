@@ -74,7 +74,7 @@ export function completionStateKey(sessionId, sourceId) {
 /**
  * Create a durable state adapter over the injected storage-domain service.
  *
- * The `ready` promise is awaited by every read and write. With the real
+ * The `ready` promise gates every read and write. With the real
  * service, a successful `save` therefore includes the storage-domain
  * durability acknowledgement. Opening, validation and write errors retain
  * their original identity. The caller owns the handle and must drain users
@@ -86,12 +86,17 @@ export function completionStateKey(sessionId, sourceId) {
  */
 export function createCompletionStateStore({ storageDomain } = {}) {
   if (storageDomain === undefined) throw new Error('completion state requires storageDomain')
-  const opening = Promise.resolve().then(() => storageDomain.open(COMPLETION_STATE_DOMAIN))
-  const table = async () => (await opening).table('observations')
+  let observations
+  const opening = Promise.resolve().then(() => storageDomain.open(COMPLETION_STATE_DOMAIN)).then(handle => {
+    observations = handle.table('observations')
+    return handle
+  })
   return {
     ready: opening,
-    load: async key => (await table()).get(key),
-    save: async (key, value) => (await table()).put(key, value),
+    load: key => observations === undefined ? opening.then(() => observations.get(key)) : observations.get(key),
+    // Observer load already established readiness. Start put synchronously at
+    // the eligibility check's boundary instead of inserting another await gap.
+    save: (key, value) => observations === undefined ? opening.then(() => observations.put(key, value)) : observations.put(key, value),
     close: async () => (await opening).close(),
   }
 }
@@ -109,11 +114,14 @@ export function createCompletionObserver({ load, save, now = () => Date.now(), c
     return value === undefined || value === null ? { version: 1, pending: undefined, cooldownUntil: 0 } : value
   }
 
-  async function observe(input) {
+  async function observe(input, eligible = () => true) {
     const key = identity(input)
     const candidate = parseCompletion(input.text)
     if (candidate === undefined) return { status: 'ignored', key }
     const previous = await current(key)
+    // Recheck after the asynchronous read, immediately before starting a write.
+    // A write already started belongs to the earlier execution boundary.
+    if (!eligible()) return { status: 'disabled', key, state: previous }
     if (previous.cooldownUntil > now()) return { status: 'cooldown', key, state: previous }
     if (previous.pending?.line === candidate.line && (input.occurrenceId === undefined || previous.pending.occurrenceId === input.occurrenceId)) {
       return { status: 'pending', key, state: previous }
@@ -127,9 +135,10 @@ export function createCompletionObserver({ load, save, now = () => Date.now(), c
     return { status: 'pending', key, state: next }
   }
 
-  async function settle(input) {
+  async function settle(input, eligible = () => true) {
     const key = identity(input)
     const previous = await current(key)
+    if (!eligible()) return { status: 'disabled', key, state: previous }
     if (previous.pending === undefined || (input.occurrenceId !== undefined && previous.pending.occurrenceId !== input.occurrenceId)) {
       return { status: 'recovery', key, state: previous }
     }

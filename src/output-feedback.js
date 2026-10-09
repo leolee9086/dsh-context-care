@@ -17,7 +17,7 @@ export const OUTPUT_FEEDBACK_DOMAIN = {
 function keyFor(sessionId, rule) { return requestFingerprint({ sessionId: String(sessionId), rule }) }
 
 /** Open durable episodes, then serialize each session's observations and delivery decisions. */
-export async function openOutputFeedback(storageDomain) {
+export async function openOutputFeedback(storageDomain, { eligible = () => true } = {}) {
   const handle = await storageDomain.open(OUTPUT_FEEDBACK_DOMAIN)
   const table = handle.table('episodes')
   const states = new Map(table.entries())
@@ -36,9 +36,11 @@ export async function openOutputFeedback(storageDomain) {
     return enqueue(session.id, async () => {
       const text = event.data.message.content.filter(block => block.type === 'text').map(block => block.text).join('\n\n')
       for (const rule of rules) {
-        if (rule.trigger !== 'output-pattern' || rule.provider !== route.provider || rule.model !== route.model) continue
+        if (rule.trigger !== 'output-pattern' || rule.provider !== route.provider || rule.model !== route.model
+          || !eligible(String(session.id), rule.ruleId, [event.seq])) continue
         const key = keyFor(session.id, rule)
-        const old = states.get(key)
+        const saved = states.get(key)
+        const old = saved && eligible(String(session.id), rule.ruleId, [saved.lastSeq]) ? saved : undefined
         if (old?.lastSeq >= event.seq) continue
         const state = old === undefined ? { version: 1, sessionId: String(session.id), ruleId: rule.ruleId, ruleVersion: rule.version,
           specHash: requestFingerprint(rule.detector), route: { provider: route.provider, model: route.model },
@@ -77,7 +79,8 @@ export async function openOutputFeedback(storageDomain) {
         && state.sessionId === String(session.id) && (state.route.provider !== request.provider || state.route.model !== request.model)))
       for (const [feedbackKey, state] of candidates) {
       const pending = state.pending
-      if (pending === undefined || pending.deliveries >= pending.maxDeliveries || selected.has(feedbackKey)) continue
+      if (pending === undefined || pending.deliveries >= pending.maxDeliveries || selected.has(feedbackKey)
+         || !eligible(String(session.id), rule.ruleId, pending.sourceSeqs)) continue
       selected.add(feedbackKey)
       const values = { boundModelLabel: `${request.provider}/${request.model}`, sourceModel: `${state.route.provider}/${state.route.model}`,
         H: pending.sample.H, K: pending.sample.K, N: pending.sample.N,
@@ -91,16 +94,36 @@ export async function openOutputFeedback(storageDomain) {
     }
     return segments
   }
+  const reservations = new Map()
   function reserve(session, segments, callId) {
     return enqueue(session.id, async () => {
       for (const segment of segments.filter(value => value.feedbackKey !== undefined)) {
         const state = structuredClone(states.get(segment.feedbackKey))
         if (state?.pending?.segmentId !== segment.segmentId) throw new Error('context-care: pending feedback changed before dispatch')
+        const previous = reservations.get(callId) ?? new Map()
+        previous.set(segment.feedbackKey, structuredClone(state))
+        reservations.set(callId, previous)
         state.pending.deliveries++
         state.lastDelivery = { segmentId: segment.segmentId, callId, status: 'delivery-unknown', attempts: state.pending.deliveries }
         await save(segment.feedbackKey, state)
       }
     })
+  }
+  function rollback(session, callId) {
+    // Only a caller that knows handoff never started may restore this snapshot.
+    // Crash/restart loses it intentionally: unknown deliveries remain bounded.
+    const restore = async () => {
+      for (const [key, previous] of reservations.get(callId) ?? []) {
+        const current = states.get(key)
+        if (current?.lastDelivery?.callId === callId && current.lastDelivery.status === 'delivery-unknown') await save(key, previous)
+      }
+      reservations.delete(callId)
+    }
+    // A failed reservation is already reported by the caller. Still run repair
+    // after that settled write, without poisoning the repair queue itself.
+    const task = (queues.get(String(session.id)) ?? Promise.resolve()).then(restore, restore)
+    queues.set(String(session.id), task)
+    return task
   }
   function dispatched(session, segments, callId, request) {
     return enqueue(session.id, async () => {
@@ -111,6 +134,7 @@ export async function openOutputFeedback(storageDomain) {
         state.lastDelivery = { ...state.lastDelivery, callId, status: 'dispatched' }
         await save(segment.feedbackKey, state)
       }
+      reservations.delete(callId)
       if ((request?.purpose ?? 'conversation') === 'conversation') {
         for (const [key, old] of states) {
           if (old.sessionId !== String(session.id) || old.pending === undefined || request === undefined
@@ -126,7 +150,7 @@ export async function openOutputFeedback(storageDomain) {
   async function flush(sessionId) {
     await Promise.all([...queues].filter(([id]) => sessionId === undefined || id === String(sessionId)).map(([, task]) => task))
   }
-  return { observe, collect, reserve, dispatched, flush,
+  return { observe, collect, reserve, rollback, dispatched, flush,
     list: sessionId => [...states.values()].filter(value => sessionId === undefined || value.sessionId === String(sessionId)),
     async close() { try { await flush() } finally { await handle.close() } } }
 }

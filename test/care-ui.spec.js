@@ -5,7 +5,43 @@ import { Sources, TextReader, Fields, RawRecord } from '../src/care-ui.js'
 import { ActionDetails } from '../src/action-view.js'
 import { PromptDetails } from '../src/prompt-view.js'
 import { dictionaries } from '../src/client-view.js'
+import { ControlPanel } from '../src/control-view.js'
 const t = key => dictionaries.zh[key] ?? key
+
+test('rule controls expose registrants, independent actions and acknowledged save failures', () => {
+  const changeControls = vi.fn()
+  const refreshControls = vi.fn()
+  const value = { status: 'ready', revision: 4, sources: [{ sourceId: 'third-party-rules', plugin: 'memory-plugin',
+    registration: 'memory-plugin/entry', executor: 'dsh-context-care', rules: [{ id: 'shared-rule', title: 'Memory reminder', paused: false,
+      actions: [{ id: 'notice', selected: true, reason: 'enabled' }, { id: 'abort', selected: false, reason: 'action-disabled' }] }] },
+    { sourceId: 'legacy', plugin: null, registration: 'legacy-entry', executor: 'dsh-context-care', rules: [{ id: 'other', actions: [], paused: false }] }] }
+  const props = { value, sessionId: 'session-one', changeControls, refreshControls, t }
+  const view = render(h(ControlPanel, props))
+  try {
+    expect(view.getByText('memory-plugin')).toBeTruthy()
+    expect(view.getByText('memory-plugin/entry')).toBeTruthy()
+    expect(view.getByText('未声明（旧接口）')).toBeTruthy()
+    fireEvent.change(view.getByRole('searchbox'), { target: { value: 'memory-plugin' } })
+    expect(view.queryByText('未声明（旧接口）')).toBeNull()
+    fireEvent.click(view.getByRole('checkbox', { name: '提醒' }))
+    expect(changeControls).toHaveBeenLastCalledWith('session-one', { sourceId: 'third-party-rules', ruleId: 'shared-rule', actionId: 'notice', enabled: false })
+    expect(view.getByRole('checkbox', { name: '提醒' }).checked).toBe(true)
+    expect(view.getByRole('checkbox', { name: '中止输出' }).checked).toBe(false)
+    fireEvent.click(view.getByRole('checkbox', { name: '暂停规则' }))
+    expect(changeControls).toHaveBeenLastCalledWith('session-one', { sourceId: 'third-party-rules', ruleId: 'shared-rule', paused: true })
+    fireEvent.click(view.getByRole('button', { name: '恢复声明默认值' }))
+    expect(changeControls).toHaveBeenLastCalledWith('session-one', { sourceId: 'third-party-rules', ruleId: 'shared-rule', reset: true })
+    view.rerender(h(ControlPanel, { ...props, value: { ...value, saving: true } }))
+    expect(view.getByRole('checkbox', { name: '提醒' }).disabled).toBe(true)
+    expect(view.getByText('正在保存')).toBeTruthy()
+    view.rerender(h(ControlPanel, { ...props, value: { ...value, status: 'error', error: 'HTTP 503: storage-unavailable' } }))
+    expect(view.getByRole('alert').textContent).toContain('HTTP 503: storage-unavailable')
+    expect(view.getByRole('checkbox', { name: '提醒' }).disabled).toBe(true)
+    expect(view.queryByText('已保存')).toBeNull()
+    fireEvent.click(view.getByRole('button', { name: '刷新规则' }))
+    expect(refreshControls).toHaveBeenCalledWith('session-one')
+  } finally { cleanup() }
+})
 
 test('thousands of source references stay bounded and remain searchable and navigable', async () => {
   const revealSource = vi.fn(async () => {})

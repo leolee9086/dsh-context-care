@@ -36,9 +36,9 @@ function Preview() {
         : mode === 'prompts' ? h(PromptDetails, { value: { status: 'ready', prompts: [prompt] }, t, revealSource })
         : h(React.Fragment, null,
           h(ContextCareStatus, { sessionId: 'preview', t, useProjection: () => ({ fatigueValue: 61.2, wakefulnessValue: 32.8, fatigue: 'high', wakefulness: 'normal' }),
-            useCareActions: selector => selector(new Map()), useRewriteHealth: selector => selector({ status: 'ready' }), watchActions: () => () => {} }),
+            useCareActions: selector => selector(new Map()), useRewriteHealth: selector => selector(new Map([['preview', { status: 'ready' }]])), watchActions: () => () => {}, watchRewrites: () => () => {} }),
           h(NoticeNodeView, { sessionId: 'preview', t, openPrompts: () => setMode('prompts'), node: { data: { seq: 33100, producer: 'dsh-context-care:state', summary: '', values: [{ kind: 'fatigue', value: 61.2 }, { kind: 'wakefulness', value: 32.8 }], body: '上下文负载在上升。到自然的工作边界时，保存当前目标、已验证结果和找回路径，然后继续任务。' } } }),
-          h(RewriteNodeView, { sessionId: 'preview', t, node: { data: { hashes: ['example'] } }, useRewriteRecords: selector => selector(new Map([['preview:example', { pattern: 'line-repeat', charsBefore: 1220, charsAfter: 840, removedLines: 12, removed: '同一段落重复出现……', added: '保留一次原段落。' }]])) }))),
+          h(RewriteNodeView, { sessionId: 'preview', t, watchRewrites: () => () => {}, node: { data: { hashes: ['example'] } }, useRewriteRecords: selector => selector(new Map([['preview:example', { pattern: 'line-repeat', charsBefore: 1220, charsAfter: 840, removedLines: 12, removed: '同一段落重复出现……', added: '保留一次原段落。' }]])) }))),
       h('footer', null, h('span', null, '第 1 / 1 页'), located == null ? null : h('span', { role: 'status' }, `预览请求定位 #${located}`))))
 }
 createRoot(document.getElementById('root')).render(h(Preview))

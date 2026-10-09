@@ -46,14 +46,18 @@ async function collectSummary(stream, signal) {
  * @param deps injected services, validated policy and optional explicit settings
  * @returns async compact(service, range, agent, signal, operation, request?) executor
  */
-export function createSummaryExecutor({ meter, llm, requests, spec, recover = () => false }) {
+export function createSummaryExecutor({ meter, llm, requests, spec, recover = () => false, eligible = () => true }) {
   const active = new WeakMap()
   async function run(service, range, agent, signal, operation, envelope, audit = {}) {
     const session = agent.session
+    const assertEligible = () => {
+      if (!eligible(agent, audit.reason)) throw failure('context-care: automatic summary disabled before execution', 'CONTROL_DISABLED')
+    }
+    assertEligible()
     const recordAction = data => requests.recordAction(session, { ...audit, ...data })
     const config = summaryConfig(service, agent, spec.summary)
     if (config === undefined) return runMaintenance({ requests, session, pricing: operation, action: 'summary', reason: audit.reason,
-      operationId: audit.operationId, details: audit, run: () => service.compactRegion(range.start, range.end, agent, signal) })
+      operationId: audit.operationId, details: audit, run: () => { assertEligible(); return service.compactRegion(range.start, range.end, agent, signal) } })
     signal.throwIfAborted()
     const { openTurn, unmatchedCompactionStart } = inspectSession(session)
     if (unmatchedCompactionStart !== undefined) throw failure('context-care: another compaction is already open', 'COMPACTION_BUSY')
@@ -108,6 +112,7 @@ export function createSummaryExecutor({ meter, llm, requests, spec, recover = ()
           outsideMessages: surface.filter(seq => !seqs.includes(seq)).map(seq => structuredClone(session.deriveEventMessage(session.eventAt(seq)))) }
         let result
         try {
+          assertEligible()
           result = await collectSummary(prepared.stream(request), signal)
           const actual = requests.snapshot(prepared.callId)?.ready?.request ?? request
           result = { ...result, provider: actual.provider, model: actual.model, maxTokens: actual.maxTokens }

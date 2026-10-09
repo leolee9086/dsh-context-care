@@ -133,15 +133,14 @@ export const GUIDANCE = `上下文照料（疲劳度 / 唤醒值）：
 如果已经在「要不要压缩」上打转两次，那就直接压：纠结的消耗比压一次更大。这跟「因为标签升高而反复压缩」是两件事 —— 前者是自己下不了决心，后者是被数字推着走。`
 
 /** 有界、缓存稳定的状态文本：不给原始的剩余 token 倒计时。 */
-export function renderState(state, outcome) {
-  const lines = [
-    '<context-care>',
-    `疲劳：${FATIGUE_LABEL[state.fatigue] ?? state.fatigue}；唤醒值：${WAKEFULNESS_LABEL[state.wakefulness] ?? state.wakefulness}。`,
-    '这是基于最近一次请求与当前留存历史的估计，不是任务的截止时间。',
-  ]
-  if (state.fatigue === 'unknown') lines.push('这次请求没有校准容量，不要猜。')
+export function renderState(state, outcome, { report = true, advice = true } = {}) {
+  const lines = []
+  if (report) {
+    lines.push(`疲劳：${FATIGUE_LABEL[state.fatigue] ?? state.fatigue}；唤醒值：${WAKEFULNESS_LABEL[state.wakefulness] ?? state.wakefulness}。`,
+      '这是基于最近一次请求与当前留存历史的估计，不是任务的截止时间。')
+    if (state.fatigue === 'unknown') lines.push('这次请求没有校准容量，不要猜。')
+  }
   if (outcome) lines.push(`休息结果：${outcome}。`)
-  // 建议放在最后：它是这一整段里唯一要照做的东西，位置也该在最后。
-  lines.push(...(ADVICE[state.fatigue] ?? ADVICE.normal), '</context-care>')
-  return lines.join('\n')
+  if (advice) lines.push(...(ADVICE[state.fatigue] ?? ADVICE.normal))
+  return lines.length ? ['<context-care>', ...lines, '</context-care>'].join('\n') : ''
 }

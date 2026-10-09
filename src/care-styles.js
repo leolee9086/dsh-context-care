@@ -7,6 +7,13 @@ export const css = `
   line-height: calc(20px + var(--dsh-content-font-delta-secondary, 0px));
   font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-secondary);
 }
+[data-care-manager] > nav { display: flex; flex: none; gap: 4px; padding: 8px 12px; overflow-x: auto; border-bottom: 1px solid var(--dsw-alias-border-l2); }
+[data-care-manager] > nav button { flex: none; white-space: nowrap; }
+[data-care-manager] > nav button[aria-pressed='true'] { background: var(--dsw-alias-interactive-bg-active); color: var(--dsw-alias-label-primary); }
+[data-care-manager] > [data-care-panel] { flex: 1; height: auto; }
+[data-care-runtime] > main > article { margin-top: 14px; }
+[data-care-runtime] :is(h4, summary) { overflow-wrap: anywhere; }
+[data-care-runtime] select { max-width: 65%; padding: 6px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); font: inherit; border: 1px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-sm, 6px); }
 [data-care-panel] { display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; box-sizing: border-box; container-type: inline-size; }
 [data-care-panel] :is(h3,h4,p,pre) { margin: 0; }
 [data-care-panel] :is(h3,h4) { color: var(--dsw-alias-label-primary); font-size: inherit; font-weight: 600; }
@@ -26,6 +33,10 @@ export const css = `
 [data-care-entry] button { width: 32px; height: 32px; padding: 5px; }
 [data-care-panel] .care-intro { color: var(--dsw-alias-label-tertiary); margin-bottom: 24px; }
 [data-care-panel] .care-section-heading, [data-care-panel] .care-budget-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+[data-care-panel] .care-control-rule { border: 1px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-md, 10px); padding: 14px; background: var(--dsw-alias-bg-layer-2); }
+[data-care-panel] .care-control-line { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin: 8px 0; }
+[data-care-panel] .care-control-line label { display: flex; align-items: center; gap: 8px; }
+[data-care-panel] .care-control-line input { accent-color: var(--dsw-alias-state-business-primary); }
 [data-care-panel] .care-record-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
 [data-care-panel] button.care-record { display: flex; width: 100%; flex-direction: column; align-items: stretch; text-align: start; gap: 8px; padding: 16px; border: 1px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-md, 10px); background: var(--dsw-alias-bg-layer-2); }
 [data-care-panel] .care-record-top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }

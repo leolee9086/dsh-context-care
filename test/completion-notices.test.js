@@ -28,6 +28,23 @@ test('a natural dispatch consumes the newest completion notice and supersedes ol
   await outbox.close()
 })
 
+test('known unstarted completion handoff restores the prior unknown allowance and cannot undo a sent notice', async () => {
+  const outbox = await openCompletionNotices(storage())
+  await outbox.publish(session, 2, route, { label: 'DONE', line: 'DONE' }, 3)
+  const segments = outbox.collect(session, route)
+  await outbox.reserve(session, segments, 'older-unknown')
+  const previous = structuredClone(outbox.list())
+  await outbox.reserve(session, segments, 'known-unstarted')
+  await outbox.rollback(session, 'known-unstarted')
+  await outbox.rollback(session, 'known-unstarted')
+  assert.deepEqual(outbox.list(), previous)
+  await outbox.reserve(session, segments, 'sent')
+  await outbox.dispatched(session, segments, 'sent', route)
+  await outbox.rollback(session, 'sent')
+  assert.equal(outbox.list()[0].status, 'dispatched')
+  await outbox.close()
+})
+
 test('an unknown completion delivery retains its id after restart, with a bounded allowance', async () => {
   const store = storage()
   let outbox = await openCompletionNotices(store)

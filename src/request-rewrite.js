@@ -13,9 +13,10 @@
 // 循环清理(loop-clean 的模式表)也在这里执行:请求体里的 messages 含上一轮
 // 助手输出,这是 pre-step 够不着的部分。
 //
-// 请求层的规则没有会话可依附:引擎的冷却与 surface 去重都按请求本身算。
+// Resolve the public fetch-router scope before evaluation. Each session owns its
+// engine cooldown and surface deduplication; cache comparisons also include the session.
 
-import { createEngine } from '@leolee9086/dsh-rule-engine'
+import { createEngine, applyRules } from '@leolee9086/dsh-rule-engine'
 import { cleanMessages } from './loop-clean.js'
 import { changedBlocks } from './rewrite-journal.js'
 
@@ -38,7 +39,7 @@ function targetOf(url) {
  * @param {string} body 请求体原文。
  * @returns {{body: string, removedLines: number, pattern: string}|undefined} 命中时返回改写后的请求体。
  */
-function cleanLoopInBody(body) {
+function cleanLoopInBody(body, only) {
   let parsed
   try {
     parsed = JSON.parse(body)
@@ -47,7 +48,7 @@ function cleanLoopInBody(body) {
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
   if (!Array.isArray(parsed.messages)) return undefined
-  const cleaned = cleanMessages(parsed.messages)
+  const cleaned = cleanMessages(parsed.messages, only)
   if (cleaned.removedLines === 0) return undefined
   return {
     body: JSON.stringify({ ...parsed, messages: cleaned.messages }),
@@ -95,10 +96,10 @@ function blocksChangedBetween(before, after) {
  * @param {(record: object, where: {sessionId: string|undefined}) => void} deps.onRecord 命中记录的回调。
  * @returns {(request: {body: string, url: string, scope?: object}) => Promise<string|undefined>} 改写器;没改动就返回 undefined。
  */
-export function createRequestRewriter({ rules, onRecord, journal }) {
+export function createRequestRewriter({ rules, onRecord, journal, cleanPatterns, revision = () => 0 }) {
   // 不把 onRecord 交给引擎:引擎回调在 run 内部触发,那时还不知道这次请求属于哪个会话。
   // 从 run 的返回值里拿记录,就能把 sessionId 一起带上。
-  const engine = createEngine()
+  const engines = new Map()
   /**
    * 每个接口上一次真正发出去的 body。
    *
@@ -110,34 +111,52 @@ export function createRequestRewriter({ rules, onRecord, journal }) {
    * 存的是最终文本:引擎规则和循环清理都改完之后的 body。
    */
   const lastSent = new Map()
-  engine.provideRules('request-rewrite', rules)
-  // 改写器自己就是篡改动作的消费者。引擎在 gate 阶段先判「有没有人接」,
-  // 没人接的规则不执行 —— 所以这里必须注册,否则规则会全部被判成 no-consumer。
-  // 接住之后不用做什么:改后的文本就是 engine.run 的返回值,
-  // 这一环在这里的语义是「这条规则有主」。
-  engine.registerConsumer({ name: REWRITER_NAME, kinds: ['transform'], handle() {} })
+  function engineFor(sessionId) {
+    let engine = engines.get(sessionId)
+    if (engine === undefined) {
+      engine = createEngine()
+      engine.provideRules('request-rewrite', () => rules(sessionId))
+      engine.registerConsumer({ name: REWRITER_NAME, kinds: ['transform'], handle() {} })
+      engines.set(sessionId, { engine, lastRunAt: new Map(), seen: new Set() })
+    }
+    return engines.get(sessionId)
+  }
   return async function rewrite({ body, url, scope }) {
-    const key = targetOf(url)
-    const previous = lastSent.get(key) ?? null
-    const result = engine.run({
-      surface: { placement: 'request', text: body },
-      ctx: { now: Date.now(), previous },
-    })
-    let text = result.text
     const sessionId = typeof scope?.sessionId === 'string' ? scope.sessionId : undefined
+    const capturedRevision = revision(sessionId)
+    const state = engineFor(sessionId)
+    const key = JSON.stringify([sessionId, targetOf(url)])
+    const previous = lastSent.get(key) ?? null
+    const now = Date.now()
+    const definitions = state.engine.rules()
+    const print = ruleId => state.engine.fingerprintOf(ruleId, body)
+    // The public pure evaluator plans without consuming engine bookkeeping.
+    // Failed audit ACKs and control edits must not spend cooldown/once-per-body.
+    const evaluated = applyRules({ rules: definitions, surface: { placement: 'request', text: body },
+      ctx: { now, previous }, previous, gate(rule) {
+        if (rule.oncePerSurface && state.seen.has(print(rule.id))) return { ok: false, outcome: 'duplicate', detail: '这个 surface 上已经出现过' }
+        const since = state.lastRunAt.get(rule.id)
+        if (rule.cooldownMinutes > 0 && since !== undefined && now - since < rule.cooldownMinutes * 60000) return { ok: false, outcome: 'cooldown', detail: '冷却中' }
+        if (rule.action.kind !== 'transform' || (rule.action.by !== undefined && rule.action.by !== REWRITER_NAME)) return { ok: false, outcome: 'no-consumer', detail: '请求改写执行者不接此动作' }
+        return { ok: true }
+      } })
+    const result = { ...evaluated, records: evaluated.hits.map(hit => ({ at: now, ruleId: hit.ruleId, kind: hit.kind,
+      placement: hit.placement, outcome: hit.applied ? 'applied' : hit.outcome, detail: hit.detail, loss: hit.loss ?? 0, changed: hit.changed === true })) }
+    let text = result.text
     // 循环清理:与 transform 规则同在 fetch-router 的改写通道上。
     // 请求体里的 messages 含上一轮助手输出,所以这里能碰到 pre-step 碰不到的循环。
     // 不依赖任何会话事件 —— 清理只是「这一次不把循环发出去」,日志原文不动。
-    const loop = cleanLoopInBody(text)
+    const loop = cleanLoopInBody(text, cleanPatterns?.(sessionId))
+    let loopRecord
     if (loop !== undefined) {
       text = loop.body
-      onRecord({
+      loopRecord = {
         layer: 'loop',
         ruleId: `loop-clean:${loop.pattern}`,
         outcome: 'applied',
         loss: 0,
         detail: `最后一条助手消息去掉 ${loop.removedLines} 行`,
-      }, { sessionId })
+      }
     }
     // 改写走插件自己的 Host 持久域，旧索引表作为可选副本。
     // 等待 ACK；写失败不能伪装成已留痕并继续发送。原会话正文保持不变。
@@ -162,7 +181,20 @@ export function createRequestRewriter({ rules, onRecord, journal }) {
         })
       }
     }
+    if (revision(sessionId) !== capturedRevision) {
+      // The audit describes a proposal; it must not certify a body delivered
+      // after its controls changed. Refuse this request explicitly for retry.
+      throw Object.assign(new Error('context-care: rule controls changed while acknowledging request rewrite'), { code: 'CONTROL_CHANGED' })
+    }
     lastSent.set(key, text)
+    for (const hit of result.hits.filter(hit => hit.applied)) {
+      state.lastRunAt.set(hit.ruleId, now)
+      if (definitions.find(rule => rule.id === hit.ruleId)?.oncePerSurface) {
+        state.seen.add(print(hit.ruleId))
+        if (state.seen.size > 500) state.seen.delete(state.seen.values().next().value)
+      }
+    }
+    if (loopRecord) onRecord(loopRecord, { sessionId })
     for (const record of result.records) onRecord(record, { sessionId })
     // 没变就交回 undefined —— 「没人改」和「改成一样的东西」是两回事,
     // 前者不该让调用方重建 body。

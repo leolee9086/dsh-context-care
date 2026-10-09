@@ -7,7 +7,7 @@ import { httpFailure } from './http-failure.js'
  * @returns stable source, watch(sessionId, offset) disposer and unload disposer
  */
 export function createActionRecords({ fetcher = fetch, pollMs = 2000, setTimer = setInterval, clearTimer = clearInterval,
-  endpoint = '/context-care/actions', collection = 'actions' } = {}) {
+  endpoint = '/context-care/actions', collection = 'actions', parse = body => body } = {}) {
   let snapshot = new Map()
   const listeners = new Set()
   const watches = new Map()
@@ -23,8 +23,8 @@ export function createActionRecords({ fetcher = fetch, pollMs = 2000, setTimer =
     try {
       const response = await fetcher(`${endpoint}?sessionId=${encodeURIComponent(watch.sessionId)}&limit=20&offset=${watch.offset}${watch.seq === undefined ? '' : `&seq=${watch.seq}`}`, { signal: watch.controller.signal, headers: { accept: 'application/json' } })
       if (!response.ok) throw await httpFailure(response, endpoint)
-      const body = await response.json()
-      if (!Array.isArray(body[collection])) throw new Error(`Invalid ${collection} response`)
+      const body = parse(await response.json(), { sessionId: watch.sessionId, seq: watch.seq })
+      if (!Array.isArray(body?.[collection])) throw new Error(`Invalid ${collection} response`)
       if (!watch.controller.signal.aborted) publish(watch.key, { status: 'ready', ...body })
     } catch (error) {
       if (!watch.controller.signal.aborted) publish(watch.key, { status: 'error', error: String(error) })

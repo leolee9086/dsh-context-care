@@ -1,6 +1,9 @@
 import { installContextCare, Config } from './index.js'
 import { contextCareActions } from './action-view-data.js'
 import { contextCarePrompts } from './prompt-view-data.js'
+import { installControlRoute } from './control-route.js'
+import { installWorkbenchRoute } from './workbench-route.js'
+import { installDisplayRoute } from './display-route.js'
 
 // 通用入口:挂在 profile 层一次,对所有会话生效。
 //
@@ -11,10 +14,10 @@ import { contextCarePrompts } from './prompt-view-data.js'
 // (`serviceFor` 在未提供时返回 undefined,由安装方在边界上报"无 provider")。
 export const name = 'context-care-runtime'
 export { Config }
-// webServer / connection 在这里是**真依赖**:没有它们就没有客户端卡片那条路由。
+// webServer 是路由的硬依赖；connection 在每次请求时现取，未挂载时明确返回 503。
 // 写进 inject(而不是用 ctx.get 碰运气)才会让 Cordis 等到它们就绪再 apply ——
 // 用 ctx.get 的话,本行先于 webServer 加载时拿到 undefined,路由就静默地没了。
-export const inject = ['sessions', 'sessionProjections', 'tools', 'systemPrompt', 'tokenMeter', 'llm', 'webServer', 'contextCareRequests']
+export const inject = ['agents', 'sessions', 'sessionProjections', 'tools', 'systemPrompt', 'tokenMeter', 'llm', 'webServer', 'contextCareRequests']
 
 /**
  * 客户端卡片从这里拿「哪些内容被改写过」。
@@ -31,18 +34,28 @@ export function apply(ctx, config = {}) {
     config,
     agent => ctx.get('agentPresets')?.serviceFor(agent, 'compaction') ?? ctx.get('compaction'),
   )
+  ctx.effect(() => installDisplayRoute(ctx))
+  ctx.effect(() => installControlRoute(ctx))
+  ctx.effect(() => installWorkbenchRoute(ctx))
+  ctx.effect(() => installWorkbenchRoute(ctx, '/context-care/rule-runtime'))
   const journal = care?.rewriteJournal
   if (journal === undefined) return
 
   // 两者都已在 inject 里声明,所以直接用属性代理读:**声明的服务用 ctx.<name>,
   // 未声明的可选服务才用 ctx.get**(见 packages/AGENTS.md 的 Optional services 那条)。
   const server = ctx.webServer
-  // connection 是**可选**依赖(手册里的写法就是 ctx.get('connection')?. ),不写进 inject ——
-  // 猜错服务名会让插件一直停在 PENDING,那比少一层鉴权严重得多。
-  const connection = ctx.get('connection')
+  // Authentication may mount after this plugin. Absence denies access without blocking model tools.
+  function authorized(req, res) {
+    res.setHeader('cache-control', 'no-store')
+    const connection = ctx.get('connection')
+    const rejected = connection === undefined ? 503 : connection.requestRejection(req)
+    if (rejected === undefined) return true
+    res.writeHead(rejected, { 'content-type': 'application/json; charset=utf-8' })
+    res.end(JSON.stringify({ error: connection === undefined ? 'authorization-unavailable' : 'unauthorized' }))
+    return false
+  }
   for (const collection of ['actions', 'prompts']) ctx.effect(() => server.register({ kind: 'exact', path: `/context-care/${collection}`, async handler(req, res) {
-    const rejected = connection?.requestRejection(req)
-    if (rejected !== undefined) { res.writeHead(rejected); res.end(); return }
+    if (!authorized(req, res)) return
     if (req.method !== 'GET') { res.writeHead(405, { allow: 'GET' }); res.end(); return }
     const query = new URL(req.url, 'http://localhost').searchParams
     const sessionId = query.get('sessionId')
@@ -67,7 +80,7 @@ export function apply(ctx, config = {}) {
       const pageOffset = selectedIndex < 0 ? offset : Math.floor(selectedIndex / limit) * limit
       const page = items.slice(pageOffset, pageOffset + limit)
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-      res.end(JSON.stringify({ admission: view.admission, [collection]: page, total: items.length, offset: pageOffset,
+      res.end(JSON.stringify({ admission: view.admission, currentState: ctx.contextCareRequests.controls.currentSample(sessionId), [collection]: page, total: items.length, offset: pageOffset,
         selectedFound: selectedSeq === undefined ? undefined : selectedIndex >= 0,
         nextOffset: pageOffset + page.length < items.length ? pageOffset + page.length : null }))
     } catch (error) {
@@ -82,17 +95,13 @@ export function apply(ctx, config = {}) {
       path: JOURNAL_ROUTE,
       handler: async (req, res) => {
         res.setHeader('x-context-care-journal-format', journal.format ?? 'legacy')
-        // 裸路由没有自动鉴权,必须自己问 connection(401 未过 Cookie 校验 / 403 Host 校验失败)。
-        const rejected = connection?.requestRejection(req)
-        if (rejected !== undefined) {
-          res.writeHead(rejected, { 'content-type': 'application/json' })
-          res.end(JSON.stringify({ error: 'unauthorized' }))
-          return
-        }
+        if (!authorized(req, res)) return
+        if (req.method !== 'GET') { res.writeHead(405, { allow: 'GET' }); res.end(); return }
+        const sessionId = new URL(req.url, 'http://localhost').searchParams.get('sessionId')
+        if (!sessionId) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid-query' })); return }
+        if (!ctx.sessions.get(sessionId)) { res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'session-unavailable' })); return }
         try {
-          // 保留旧全量改写接口；客户端实际按 sessionId + hash 查询对应卡片。
-          // 新提示目录另走会话分页接口，不依赖此旁路的哈希匹配。
-          const records = await journal.list({})
+          const records = await journal.list({ sessionId })
           res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
           res.end(JSON.stringify({ records }))
         } catch (error) {

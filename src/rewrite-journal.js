@@ -196,12 +196,12 @@ export function createRewriteJournal({ store, durable, warn = () => {} }) {
         origin: 'plugin',
         visibility: 'user',
       }
+      // Publish the local index only after the authoritative write acknowledges it.
+      // A failed or pending write must not appear as a completed rewrite.
+      if (durable) await durable.put(row.value)
       const bucket = memory.get(row.sessionId) ?? []
       bucket.push(row)
       memory.set(row.sessionId, bucket)
-
-      // Runtime always supplies the Host journal. A write failure propagates and remains visible through flush.
-      if (durable) await durable.put(row.value)
       const service = store()
       if (service === undefined || typeof service.putAttribute !== 'function') return { persisted: Boolean(durable) }
       try {
@@ -227,7 +227,7 @@ export function createRewriteJournal({ store, durable, warn = () => {} }) {
       const rows = []
       if (durable) for (const value of await durable.list(sessionId)) rows.push({ hash: value.hash, value })
       const service = store()
-      // 旧客户端接口仍读取所有会话；实际卡片按 sessionId + hash 匹配，保持会话隔离。
+      // Constrain both the backend query and the merged response to the requested session.
       if (service !== undefined && typeof service.listAttributes === 'function') {
         try {
           const query = { namespace: NAMESPACE, name: REWRITE_NAME }
@@ -246,6 +246,7 @@ export function createRewriteJournal({ store, durable, warn = () => {} }) {
       // **按时间取最新的那份** —— 先到先得会把刚写的那条丢掉。
       const latest = new Map()
       for (const row of rows) {
+        if (sessionId !== undefined && row.value?.sessionId !== sessionId) continue
         if (typeof row.hash !== 'string' || row.hash === '') continue
         const key = row.value?.sessionId + ':' + row.hash
         const previous = latest.get(key)

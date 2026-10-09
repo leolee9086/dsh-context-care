@@ -239,7 +239,7 @@ export const DETECTORS = {
  * @param options.onError - 判定或操作抛错时的回调，默认交给 `console.error`
  * @returns 管线实例
  */
-export function createStreamWatch({ triggers, actions, onError }) {
+export function createStreamWatch({ triggers, actions, onError, enabled = () => true, epoch = () => 0 }) {
   /** 本次挂载用到的 scope，去重后固定下来，避免每帧重新推导。 */
   const scopes = [...new Set(triggers.map(trigger => trigger.scope ?? 'combined'))]
   const perAgent = new Map()
@@ -252,7 +252,7 @@ export function createStreamWatch({ triggers, actions, onError }) {
   function entryFor(agentId) {
     let entry = perAgent.get(agentId)
     if (entry === undefined) {
-      entry = { views: new Map(), states: new Map(), fired: new Set(), hits: [], errors: [] }
+      entry = { views: new Map(), states: new Map(), fired: new Set(), hits: [], errors: [], epochs: new Map(), localViews: new Map(), actionFired: new Set() }
       perAgent.set(agentId, entry)
     }
     return entry
@@ -277,17 +277,25 @@ export function createStreamWatch({ triggers, actions, onError }) {
   }
 
   function fire(agent, entry, trigger, hit) {
-    entry.fired.add(trigger.id)
     entry.hits.push({ at: Date.now(), triggerId: trigger.id, ...hit })
     if (entry.hits.length > 40) entry.hits.shift()
+    const succeeded = new Set()
     for (const name of trigger.actions ?? []) {
+      const key = JSON.stringify([trigger.id, name])
+      if (!enabled(agent, trigger, name) || entry.actionFired.has(key)) continue
+      if (name === 'resume' && !succeeded.has('abort')) continue
+      entry.actionFired.add(key)
+      entry.fired.add(trigger.id)
       const action = actions[name]
       if (typeof action !== 'function') {
-        entry.errors.push(`unknown action ${name}`)
+        const error = new Error(`unknown action ${name}`)
+        entry.errors.push(error.message)
+        report(error, `action ${name}`)
         continue
       }
       try {
-        action({ agent, trigger, hit })
+        if (action({ agent, trigger, hit }) === false) continue
+        succeeded.add(name)
       } catch (error) {
         entry.errors.push(`action ${name}: ${error instanceof Error ? error.message : String(error)}`)
         report(error, `action ${name}`)
@@ -308,6 +316,9 @@ export function createStreamWatch({ triggers, actions, onError }) {
       entry.views.clear()
       entry.states.clear()
       entry.fired.clear()
+      entry.epochs.clear()
+      entry.localViews.clear()
+      entry.actionFired.clear()
       return
     }
     if (type !== 'chunk') return
@@ -327,7 +338,15 @@ export function createStreamWatch({ triggers, actions, onError }) {
     }
 
     for (const trigger of triggers) {
-      if (entry.fired.has(trigger.id)) continue
+      const signature = JSON.stringify([epoch(agent, trigger), (trigger.actions ?? []).map(name => enabled(agent, trigger, name))])
+      if (entry.epochs.get(trigger.id) !== signature) {
+        entry.epochs.set(trigger.id, signature)
+        entry.states.delete(trigger.id)
+        entry.localViews.set(trigger.id, createView())
+        entry.fired.delete(trigger.id)
+        for (const name of trigger.actions ?? []) entry.actionFired.delete(JSON.stringify([trigger.id, name]))
+      }
+      if (!(trigger.actions ?? []).some(name => enabled(agent, trigger, name) && !entry.actionFired.has(JSON.stringify([trigger.id, name])))) continue
       const detector = DETECTORS[trigger.kind]
       if (detector === undefined) continue
       const scope = trigger.scope ?? 'combined'
@@ -338,7 +357,9 @@ export function createStreamWatch({ triggers, actions, onError }) {
           if (scope === 'reasoning' && !isReasoning) continue
           hit = detector.feed(stateFor(entry, trigger), text, trigger)
         } else {
-          const view = viewFor(entry, scope)
+          if (scope === 'text' && !isText || scope === 'reasoning' && !isReasoning) continue
+          const view = entry.localViews.get(trigger.id)
+          appendText(view, text)
           if (view.bytes < (trigger.everyBytes ?? WINDOWED_EVERY)) continue
           view.bytes = 0
           hit = detector.check(view, stateFor(entry, trigger), trigger)

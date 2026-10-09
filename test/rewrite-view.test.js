@@ -28,9 +28,9 @@ function messageEvent(content, seq = 18893) {
 }
 
 function renderNode(node, records) {
-  return RewriteNodeView({
+  return React.createElement(RewriteNodeView, {
     node,
-    sessionId: 'session-a',
+    sessionId: 'session-a', watchRewrites: () => () => {},
     // 严格按契约实现：selector 是必需参数。真实渲染器漏传它会被 uSES 判为崩溃并退役。
     useRewriteRecords: selector => {
       if (typeof selector !== 'function') throw new Error('useRewriteRecords 需要 selector')
@@ -118,16 +118,14 @@ test('RewriteNodeView renders a record only for the matching session and hash', 
   }
   const hit = renderNode(node, new Map([['session-a:' + hash, record]]))
 
-  assert.ok(React.isValidElement(hit))
-  assert.equal(hit.type, 'div')
-  assert.equal(hit.props.className, 'dsh-context-care-rewrite')
   const markup = renderToStaticMarkup(hit)
+  assert.match(markup, /class="dsh-context-care-rewrite"/)
   assert.match(markup, /\[rewriteTitle\]/)
   assert.match(markup, /probe-request-rewrite · 75 → 71/)
   // 改动片段画成什么样不在这里断言 —— 手工构造记录再断言拼串只能证明字段名没拼错。
   // 两侧对接由 scripts/verify-rewrite-card-e2e.mjs 用索引插件的真实库验证。
-  assert.equal(renderNode(node, new Map([['session-b:' + hash, record]])), null)
-  assert.equal(renderNode(node, new Map()), null)
+  assert.equal(renderToStaticMarkup(renderNode(node, new Map([['session-b:' + hash, record]]))), '')
+  assert.equal(renderToStaticMarkup(renderNode(node, new Map())), '')
 })
 
 test('RewriteNodeView includes removed-line details when available', () => {

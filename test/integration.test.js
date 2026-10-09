@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 import { resolve } from 'node:path'
-import { mkdtemp, readFile, rm, copyFile } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile, rm, copyFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 const pluginModule = path => import(process.env.DSH_TEST_PLUGIN_ROOT
   ? pathToFileURL(resolve(process.env.DSH_TEST_PLUGIN_ROOT, 'src', path)).href : new URL(`../src/${path}`, import.meta.url).href)
@@ -37,12 +37,13 @@ const load = async path => {
 }
 const { Context } = await load('vendor/cordis/lib/index.js')
 const { LlmAdapter, createUserMessage, createMessage } = await load('packages/llm/llm/lib/index.js')
-const { Session } = await load('packages/core/session/lib/index.js')
+const { Session, buildForkSeed } = await load('packages/core/session/lib/index.js')
 const { default: Loader } = await load('vendor/loader/lib/index.js')
 const { default: Include } = await load('vendor/include/lib/index.js')
 const paths = {
   llm: 'llm/llm', session: 'core/session', 'session-projection': 'session/session-projection',
   'system-prompt': 'core/system-prompt', tools: 'core/tools', agent: 'core/agent',
+  'client-connection': 'client/connection',
   'agent-loop': 'core/agent-loop', 'token-meter': 'llm/token-meter', 'compaction-basic': 'compaction/compaction-basic',
   storage: 'storage/storage', 'storage-json': 'storage/storage-json', 'storage-domain': 'storage/storage-domain', 'host-webserver': 'host/webserver', 'compaction-image-offload': 'compaction/compaction-image-offload',
 }
@@ -55,6 +56,39 @@ modules.set('dsh-context-care/runtime', hostPlugin)
 modules.set('dsh-context-care/agent', plugin)
 modules.set('dsh-context-care/completion', completionPlugin)
 modules.set('dsh-context-care/requests', requestPlugin)
+// Only the secret backend is external; admission and cookie verification use real Connection.
+modules.set('@care-test/credentials', { name: 'care-test-credentials', apply(ctx) {
+  const records = new Map()
+  ctx.provide('credentials', { async modifyRecord(key, update) {
+    const next = await update(records.get(key))
+    if (next !== undefined) records.set(key, next)
+    return records.get(key)
+  } })
+} })
+const registeredRuleSource = { sourceId: 'test-memory', plugin: 'example-memory-plugin', registration: 'memory/rules', executor: 'dsh-context-care',
+  rules: [{ id: 'remember', actions: [{ id: 'notify' }], definition: { id: 'remember', order: 10, placement: ['user'], when: { said: '/MEMORIZE/' },
+    action: { kind: 'notify', by: 'context-care', say: 'Persist the verified memory before continuing.' }, cooldownMinutes: 0, oncePerSurface: false } }] }
+modules.set('@care-test/rules', { name: 'care-test-rules', inject: ['contextCareControls'], apply(ctx) {
+  ctx.effect(() => ctx.contextCareControls.register(registeredRuleSource))
+} })
+async function addFixtureRow(ctx, name) {
+  await ctx.loader.create({ name })
+  await ctx.loader.await()
+  const entry = [...ctx.loader.entries()].find(entry => entry.options.name === name)
+  await entry.fiber.await()
+  return entry
+}
+async function controlCookie(ctx) {
+  await addFixtureRow(ctx, '@care-test/credentials')
+  await addFixtureRow(ctx, '@deepseek-ai/dsh-client-connection')
+  const base = `http://127.0.0.1:${ctx.webServer.port}`
+  let cookie
+  ctx.connection.authorizeIndex({ method: 'GET', url: ctx.connection.authenticatedUrl(`${base}/`), headers: { host: new URL(base).host } }, {
+    writeHead(status, headers) { assert.equal(status, 303); cookie = headers['set-cookie'].split(';')[0] }, end() {},
+  })
+  assert.ok(cookie)
+  return { base, cookie }
+}
 
 class ScriptedAdapter extends LlmAdapter {
   constructor(deep = false) { super(); this.deep = deep }
@@ -115,10 +149,25 @@ async function boot(root, completion = true, config = {}, completionConfig = {})
 test('exported Host rows mount together, serve the journal, and remove routes and tools on unload', async t => {
   const owned = await fixture(t)
   const ctx = await owned.open()
-  const url = `http://127.0.0.1:${ctx.webServer.port}/context-care/rewrite-journal`
+  const base = `http://127.0.0.1:${ctx.webServer.port}`
+  for (const route of ['rewrite-journal', 'actions', 'prompts']) assert.equal((await globalThis.fetch(`${base}/context-care/${route}`)).status, 503)
+  const { cookie } = await controlCookie(ctx)
+  const fetch = (url, options = {}) => globalThis.fetch(url, { ...options, headers: { cookie, ...options.headers } })
+  for (const route of ['rewrite-journal', 'actions', 'prompts']) assert.equal((await globalThis.fetch(`${base}/context-care/${route}`)).status, 401)
+  ctx.sessions.create('journal-one'); ctx.sessions.create('journal-two')
+  const url = `${base}/context-care/rewrite-journal?sessionId=journal-one`
+  assert.equal((await fetch(`${base}/context-care/rewrite-journal`)).status, 400)
+  assert.equal((await fetch(`${base}/context-care/rewrite-journal?sessionId=missing`)).status, 404)
+  assert.equal((await fetch(url, { method: 'POST' })).status, 405)
   const response = await fetch(url)
   assert.equal(response.status, 200)
   assert.deepEqual((await response.json()).records, [])
+  for (const sessionId of ['journal-one', 'journal-two']) await ctx.contextCareRequests.recordAction(ctx.sessions.get(sessionId), {
+    action: 'request-rewrite', phase: 'recorded', rewrite: { sessionId, hash: sessionId === 'journal-one' ? 'visible' : 'private-other' } })
+  const rewritePage = await fetch(url)
+  assert.equal(rewritePage.headers.get('cache-control'), 'no-store')
+  assert.deepEqual((await rewritePage.json()).records.map(record => record.hash), ['visible'])
+  assert.equal((await fetch(url, { headers: { origin: 'http://foreign.test' } })).status, 403)
   const actionsUrl = `http://127.0.0.1:${ctx.webServer.port}/context-care/actions`
   assert.equal((await fetch(actionsUrl)).status, 400)
   assert.equal((await fetch(`${actionsUrl}?sessionId=s1&limit=999`)).status, 400)
@@ -178,11 +227,12 @@ test('disabling the display leaves runtime sampling, tools, request observation 
   const agent = await ctx.agentLoop.create('display-disabled', { provider: 'care-test', model: 'care-test' })
   await completionTurn(ctx, agent, 'Keep the runtime running without a browser.')
   await completionTurn(ctx, agent, 'Sample the now-bound request configuration.')
-  assert.equal(adapter.calls, 2)
+  assert.equal(adapter.calls, 2, JSON.stringify(agent.session.snapshotEvents().filter(event => event.type === 'turn/end').map(event => event.data)))
   assert.equal(typeof ctx.sessionProjections.stateOf(agent.session, 'contextCareNumeric').fatigueValue, 'number')
   await ctx.contextCareRequests.flush(agent.id)
   assert.ok(ctx.contextCareRequests.list(agent.id).some(record => record.kind === 'request' && record.data.dispatched))
-  const page = await fetch(`http://127.0.0.1:${ctx.webServer.port}/context-care/actions?sessionId=${agent.id}&limit=20`)
+  const { cookie } = await controlCookie(ctx)
+  const page = await fetch(`http://127.0.0.1:${ctx.webServer.port}/context-care/actions?sessionId=${agent.id}&limit=20`, { headers: { cookie } })
   assert.equal(page.status, 200)
   assert.ok((await page.json()).admission)
 })
@@ -567,6 +617,26 @@ test('summary planner fits the complete auxiliary request and preserves a balanc
   assert.deepEqual(replay.deriveMessages(), agent.session.deriveMessages())
 })
 
+test('a custom summary provider is rechecked after its audit acknowledgement', async t => {
+  const owned = await fixture(t)
+  const ctx = await owned.open()
+  ctx.llm.registerAdapter(['care-test'], new CompletionAdapter([{ blocks: [{ type: 'text', text: 'Work continues.' }] }]))
+  const agent = await ctx.agentLoop.create('summary-toggle-before-provider', { provider: 'care-test', model: 'care-test' })
+  await completionTurn(ctx, agent, 'Verified prefix. '.repeat(100))
+  let active = true
+  let called = false
+  const compact = createSummaryExecutor({ meter: ctx.tokenMeter, llm: ctx.llm,
+    requests: { ...ctx.contextCareRequests, async recordAction(...args) {
+      await ctx.contextCareRequests.recordAction(...args)
+      active = false
+    } }, spec: resolveConfig({}), eligible: () => active })
+  const pricing = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session })
+  const seqs = agent.session.surface.nodes
+  await assert.rejects(compact({ compactRegion() { called = true } }, { start: seqs[0], end: seqs.at(-1) }, agent,
+    new AbortController().signal, pricing), { code: 'CONTROL_DISABLED' })
+  assert.equal(called, false)
+})
+
 test('summary overflow shrinks its candidate once and a changed surface closes without replacement', async t => {
   const owned = await fixture(t)
   const ctx = await owned.open()
@@ -754,6 +824,32 @@ async function completionTurn(ctx, agent, text = 'Continue the requested task.')
   await ctx.get('contextCareCompletion')?.flush(String(agent.session.id))
 }
 
+test('disabled model state report retains numeric sampling and explicit status results', async t => {
+  const owned = await fixture(t)
+  const ctx = await owned.open()
+  ctx.llm.registerAdapter(['care-test'], new CompletionAdapter(Array.from({ length: 2 }, () => ({ blocks: [{ type: 'text', text: 'Work continues.' }] }))))
+  const agent = await ctx.agentLoop.create('care-report-off', { provider: 'care-test', model: 'care-test' })
+  const controls = ctx.contextCareRequests.controls
+  for (const actionId of ['report', 'advice']) await controls.patch(agent.id, {
+    revision: controls.revision(agent.id), sourceId: 'dsh-context-care', ruleId: 'state', actionId, enabled: false,
+  })
+  await completionTurn(ctx, agent)
+  assert.equal(agent.session.snapshotEvents().some(event => event.type === 'user/message'
+    && producedBy(event.data.source, 'dsh-context-care:state')), false)
+  // The first boundary may precede the Session's routed header. A second
+  // natural turn supplies authoritative capacity instead of guessing it.
+  await completionTurn(ctx, agent, 'Continue after the first routed request.')
+  assert.equal(agent.session.snapshotEvents().some(event => event.type === 'user/message'
+    && producedBy(event.data.source, 'dsh-context-care:state')), false)
+  assert.equal(typeof controls.currentSample(agent.id).fatigueValue, 'number')
+  const { cookie } = await controlCookie(ctx)
+  const page = await (await fetch(`http://127.0.0.1:${ctx.webServer.port}/context-care/actions?sessionId=${agent.id}&limit=20`, { headers: { cookie } })).json()
+  assert.equal(typeof page.currentState.wakefulnessValue, 'number')
+  const text = await ctx.tools.get('context_status', agent).execute({}, { agent, signal: new AbortController().signal })
+  assert.match(text, /疲劳/)
+  assert.doesNotMatch(text, /写细交接/)
+})
+
 test('real stream persists pending before settlement, excludes reasoning and quotes, and scopes cooldown by session/source', async t => {
   const owned = await fixture(t)
   const ctx = await owned.open()
@@ -792,7 +888,7 @@ test('real stream persists pending before settlement, excludes reasoning and quo
   assert.deepEqual(table.get(changes[0].key), { version: 1, cooldownUntil: saved.cooldownUntil, completedOccurrenceId: saved.completedOccurrenceId })
 })
 
-test('completion preferences retain observation while disabling notices, and oversized text is unavailable', async t => {
+test('disabled completion notices do not consume observation cooldown, and oversized text is unavailable', async t => {
   for (const config of [{ notifications: false }, { maxObservedChars: 16 }]) {
     const owned = await fixture(t, true, {}, config)
     const ctx = await owned.open()
@@ -801,8 +897,7 @@ test('completion preferences retain observation while disabling notices, and ove
     const agent = await ctx.agentLoop.create(`completion-preferences-${Object.keys(config)[0]}`, { provider: 'care-test', model: 'care-test' })
     await completionTurn(ctx, agent)
     const state = ctx.storageDomain.get('context_care_completion').table('observations').get(completionStateKey(String(agent.session.id), 'assistant'))
-    if (config.notifications === false) assert.ok(state.cooldownUntil > Date.now())
-    else assert.equal(state, undefined)
+    assert.equal(state, undefined)
     assert.equal(ctx.contextCareCompletion.list(agent.session.id).length, 0)
     assert.deepEqual(ctx.contextCareCompletion.collect(agent.session, { provider: 'care-test', model: 'care-test' }), [])
   }
@@ -940,6 +1035,26 @@ test('real provider overflow below the estimated soft limit forces a prefix and 
   assert.equal(attempts[1].data.promptDecision.segments.length, 1)
 })
 
+test('disabled overflow actions retain the original provider failure without maintenance or retry', async t => {
+  const owned = await fixture(t)
+  const ctx = await owned.open()
+  const adapter = new OverflowAdapter()
+  ctx.llm.registerAdapter(['care-test'], adapter)
+  const agent = await ctx.agentLoop.create('care-overflow-off', { provider: 'care-test', model: 'care-test' })
+  const controls = ctx.contextCareRequests.controls
+  for (const actionId of ['prune', 'summary', 'retry']) await controls.patch(agent.id, {
+    revision: controls.revision(agent.id), sourceId: 'dsh-context-care', ruleId: 'overflow', actionId, enabled: false,
+  })
+  await completionTurn(ctx, agent, 'Earlier verified work. '.repeat(800))
+  await completionTurn(ctx, agent, 'Continue.')
+  assert.equal(adapter.conversationCalls, 2)
+  assert.equal(adapter.requests.filter(request => request.purpose === 'compaction').length, 0)
+  assert.equal(agent.session.snapshotEvents().some(event => event.surfaceOp?.op === 'replace'), false)
+  const attempt = agent.session.snapshotEvents().find(event => event.type === 'assistant/attempt')
+  const failure = attempt.data.stream.find(record => record.type === 'chunk' && record.chunk.type === 'finish').chunk.reason.failure
+  assert.equal(failure.code, 'CONTEXT_WINDOW_EXCEEDED')
+})
+
 test('failed overflow summary leaves the original provider failure terminal and never retries without shrink', async t => {
   const owned = await fixture(t)
   const ctx = await owned.open()
@@ -1017,7 +1132,8 @@ test('real deep rest commits one handoff, fixed shadow prices, and replayable co
   assert.equal(deepRecord.data.compactionId, summary.data.compactionId)
   assert.equal(deepRecord.data.progressed, true)
   assert.ok(deepRecord.data.afterInput < deepRecord.data.beforeInput)
-  const actions = await (await fetch(`http://127.0.0.1:${ctx.webServer.port}/context-care/actions?sessionId=${agent.session.id}&limit=20`)).json()
+  const { cookie } = await controlCookie(ctx)
+  const actions = await (await fetch(`http://127.0.0.1:${ctx.webServer.port}/context-care/actions?sessionId=${agent.session.id}&limit=20`, { headers: { cookie } })).json()
   const deepActions = actions.actions.filter(action => action.action === 'deep-rest')
   assert.equal(deepActions.length, 1)
   assert.equal(deepActions[0].phase, 'completed')
@@ -1193,6 +1309,67 @@ test('committed output feedback waits for a natural request, uses actual dispatc
   assert.deepEqual(records[1].data.promptDecision.segments[0].sourceSeqs, [committed.seq])
 })
 
+test('a control edit during durable notice reservation refuses handoff and restores both delivery allowances', async t => {
+  const owned = await fixture(t, true, { modelScopedPrompts: [{ ruleId: 'pattern', version: '1', provider: 'care-test', model: 'care-test',
+    trigger: 'output-pattern', detector: detectorFixture, text: 'Review the output evidence.' }] })
+  const ctx = await owned.open()
+  const adapter = new CompletionAdapter([{ blocks: [{ type: 'text', text: '我不会做第一项。\n我不会做第二项。\n我不会做第三项。\n任务完成了。' }] }])
+  ctx.llm.registerAdapter(['care-test'], adapter)
+  const agent = await ctx.agentLoop.create('notice-reservation-toggle', { provider: 'care-test', model: 'care-test' })
+  await completionTurn(ctx, agent)
+  await ctx.contextCareRequests.flush(agent.id)
+  const completion = ctx.get('contextCareCompletion')
+  const beforeFeedback = structuredClone(ctx.contextCareRequests.feedback(agent.id))
+  const beforeCompletion = structuredClone(completion.list())
+  assert.equal(beforeFeedback[0].pending.deliveries, 0)
+  assert.equal(beforeCompletion[0].deliveries, 0)
+  const reserve = completion.reserve
+  // Preserve the real Cordis outbox write, then exercise the asynchronous ACK
+  // boundary before Request Host can hand the prepared request to the adapter.
+  completion.reserve = async (...args) => {
+    await reserve(...args)
+    const controls = ctx.contextCareRequests.controls
+    await controls.patch(agent.id, { revision: controls.revision(agent.id), sourceId: 'dsh-context-care:completion',
+      ruleId: 'completion', actionId: 'notice', enabled: false })
+  }
+  t.after(() => { completion.reserve = reserve })
+  const signal = new AbortController().signal
+  const prepared = await ctx.contextCareRequests.prepareCall({ provider: 'care-test', model: 'care-test' }, signal)
+  const request = { ...prepared.config, signal, sessionId: agent.id, messages: agent.session.deriveMessages() }
+  await assert.rejects(async () => { for await (const chunk of prepared.stream(request)) void chunk }, { code: 'CONTROL_CHANGED' })
+  assert.deepEqual(ctx.contextCareRequests.feedback(agent.id), beforeFeedback)
+  assert.deepEqual(completion.list(), beforeCompletion)
+  const call = ctx.contextCareRequests.snapshot(prepared.callId)
+  assert.equal(call.dispatched, false)
+  assert.equal(call.record.phase, 'failed')
+  assert.equal(call.record.outcome, 'not-dispatched')
+  assert.equal(call.record.failure.code, 'CONTROL_CHANGED')
+})
+
+test('source disposal during preflight invalidates a request even without a preference revision change', async t => {
+  const owned = await fixture(t)
+  const ctx = await owned.open()
+  const adapter = new ScriptedAdapter()
+  ctx.llm.registerAdapter(['care-test'], adapter)
+  const agent = await ctx.agentLoop.create('source-disposal-preflight', { provider: 'care-test', model: 'care-test' })
+  const controls = ctx.contextCareRequests.controls
+  const remove = controls.register(registeredRuleSource)
+  t.after(remove)
+  const initialRevision = controls.revision(agent.id)
+  const completion = ctx.get('contextCareCompletion')
+  const reserve = completion.reserve
+  completion.reserve = async (...args) => { await reserve(...args); remove() }
+  t.after(() => { completion.reserve = reserve })
+  const signal = new AbortController().signal
+  const prepared = await ctx.contextCareRequests.prepareCall({ provider: 'care-test', model: 'care-test' }, signal)
+  await assert.rejects(async () => {
+    for await (const chunk of prepared.stream({ ...prepared.config, signal, sessionId: agent.id, messages: [] })) void chunk
+  }, { code: 'CONTROL_CHANGED' })
+  assert.equal(controls.revision(agent.id), initialRevision)
+  assert.equal(adapter.requests.length, 0)
+  assert.equal(ctx.contextCareRequests.snapshot(prepared.callId).dispatched, false)
+})
+
 test('completion outbox restores a bounded notice and delivers it on the next natural request', async t => {
   const owned = await fixture(t)
   let ctx = await owned.open()
@@ -1277,4 +1454,1060 @@ test('real JSON storage acknowledges pending, restores it after restart, and ret
   assert.equal((await observer.observe({ ...input, sourceId: 'other:source' })).status, 'pending')
   assert.equal((await observer.recover({ ...input, sourceId: 'other:source' })).status, 'recovered')
   await store.close()
+})
+
+test('real Connection admits session controls, rejects malformed writes, and preserves CAS', async t => {
+  const owned = await fixture(t, false)
+  const ctx = await owned.open()
+  ctx.llm.registerAdapter(['care-test'], new ScriptedAdapter())
+  const agent = await ctx.agentLoop.create('rule-http', { provider: 'care-test', model: 'care-test' })
+  const path = `/context-care/rules?sessionId=${agent.id}`
+  assert.equal((await fetch(`http://127.0.0.1:${ctx.webServer.port}${path}`)).status, 503)
+  const { base, cookie } = await controlCookie(ctx)
+  assert.equal((await fetch(`${base}${path}`)).status, 401)
+  const headers = { cookie, 'content-type': 'application/json' }
+  const get = await fetch(`${base}${path}`, { headers })
+  assert.equal(get.status, 200)
+  assert.equal(get.headers.get('cache-control'), 'no-store')
+  assert.equal((await get.json()).sessionId, agent.id)
+  const change = { revision: 0, sourceId: 'dsh-context-care', ruleId: 'state', actionId: 'advice', enabled: false }
+  const send = (body, extra = {}) => fetch(`${base}${path}`, { method: 'PATCH', headers: { ...headers, ...extra }, body })
+  assert.equal((await send(JSON.stringify(change), { origin: 'http://foreign.test' })).status, 403)
+  assert.equal((await send(JSON.stringify(change), { origin: '%%%malformed' })).status, 403)
+  assert.equal((await send(JSON.stringify(change), { 'content-type': 'application/jsonBAD' })).status, 415)
+  assert.equal((await send('{')).status, 400)
+  assert.equal((await send(JSON.stringify({ ...change, unexpected: true }))).status, 400)
+  assert.equal((await send(' '.repeat(65537))).status, 413)
+  const result = await send(JSON.stringify(change), { origin: base })
+  assert.equal(result.status, 200)
+  const saved = await result.json()
+  assert.equal(saved.revision, 1)
+  assert.equal(saved.sources.find(source => source.sourceId === change.sourceId).rules.find(rule => rule.id === 'state').actions.find(action => action.id === 'advice').selected, false)
+  assert.equal((await send(JSON.stringify(change))).status, 409)
+  assert.equal(ctx.contextCareControls.revision(agent.id), 1)
+  assert.equal((await fetch(`${base}/context-care/rules?sessionId=missing`, { headers })).status, 404)
+})
+
+test('Loader registrants execute declared rules, respect toggles, and unload without losing persisted choices', async t => {
+  const owned = await fixture(t, false)
+  let ctx = await owned.open()
+  const row = await addFixtureRow(ctx, '@care-test/rules')
+  const adapter = new CompletionAdapter(Array.from({ length: 6 }, () => ({ blocks: [{ type: 'text', text: 'Continue the current work.' }] })))
+  ctx.llm.registerAdapter(['care-test'], adapter)
+  const agent = await ctx.agentLoop.create('rule-actions', { provider: 'care-test', model: 'care-test' })
+  const control = ctx.contextCareControls
+  const change = input => control.patch(agent.id, { revision: control.revision(agent.id), sourceId: 'test-memory', ruleId: 'remember', ...input })
+  const generated = () => agent.session.snapshotEvents().filter(event => event.type === 'user/message' && event.data.content.some(block => block.text === registeredRuleSource.rules[0].definition.action.say)).length
+  assert.equal(control.snapshot(agent.id).sources.find(source => source.sourceId === 'test-memory').plugin, 'example-memory-plugin')
+  await completionTurn(ctx, agent, 'MEMORIZE the initial evidence.')
+  assert.equal(generated(), 1, JSON.stringify({ events: agent.session.snapshotEvents().filter(event => event.type === 'turn/end'), journal: ctx.contextCareRequests.list(agent.id).map(record => ({ kind: record.kind, evaluation: record.data.evaluation })), external: control.catalog(agent.id).find(source => source.sourceId === 'test-memory') }))
+  await change({ actionId: 'notify', enabled: false })
+  await completionTurn(ctx, agent, 'MEMORIZE the disabled occurrence.')
+  assert.equal(generated(), 1)
+  await change({ actionId: 'notify', enabled: true })
+  await completionTurn(ctx, agent, 'Continue without requesting memory.')
+  assert.equal(generated(), 1)
+  await completionTurn(ctx, agent, 'MEMORIZE the newly requested evidence.')
+  assert.equal(generated(), 2)
+  await change({ paused: true })
+  assert.equal(control.enabled(agent.id, 'test-memory', 'remember', 'notify'), false)
+  await change({ paused: false })
+  assert.equal(control.enabled(agent.id, 'test-memory', 'remember', 'notify'), true)
+  await change({ actionId: 'notify', enabled: false })
+  await row.fiber.dispose()
+  assert.equal(control.snapshot(agent.id).sources.some(source => source.sourceId === 'test-memory'), false)
+  await owned.close(ctx)
+  ctx = await owned.open()
+  await addFixtureRow(ctx, '@care-test/rules')
+  assert.equal(ctx.contextCareControls.enabled(agent.id, 'test-memory', 'remember', 'notify'), false)
+  assert.equal(ctx.contextCareControls.enabled('other-session', 'test-memory', 'remember', 'notify'), true)
+})
+
+test('Workbench v2 edits request copies, renders strict entry templates, logs the diff and preserves committed source text', async t => {
+  const owned = await fixture(t, false)
+  const ctx = await owned.open()
+  class WorkbenchAdapter extends CompletionAdapter {
+    requests = []
+    async *stream(request) { this.requests.push(request); yield* super.stream(request) }
+  }
+  const adapter = new WorkbenchAdapter([{ blocks: [{ type: 'text', text: 'The requested work is continuing.' }] }])
+  ctx.llm.registerAdapter(['care-test'], adapter)
+  const agent = await ctx.agentLoop.create('workbench-request', { provider: 'care-test', model: 'care-test' })
+  const service = ctx.contextCareWorkbench
+  await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: {
+    schemaVersion: 2, id: 'editable', revision: 1, title: 'Editable rules', variables: [{ name: 'label', scope: 'session', type: 'string', default: 'literal {{unused}}' }],
+    rules: [{ schemaVersion: 2, sourceId: 'context-care:document:editable', id: 'rewrite', revision: 1, title: 'Replace request text', on: ['request.assemble'],
+      select: { view: 'model', roles: ['user'], blockTypes: ['text'] }, match: { kind: 'regex', pattern: 'BEFORE' }, priority: 0,
+      actions: [{ id: 'replace', kind: 'replace', stage: 'request.assemble', enabledDefault: true, template: 'AFTER' }] }],
+    entries: [{ id: 'entry', revision: 1, title: 'Entry', enabledDefault: true, template: 'Keep {{vars.label}}.', activation: { kind: 'constant' },
+      select: { view: 'model', roles: ['user'], blockTypes: ['text'] }, target: { view: 'model', role: 'user', anchor: 'end', position: 'after' } }],
+  } })
+  await completionTurn(ctx, agent, 'BEFORE is the original request.')
+  const sent = adapter.requests.find(request => request.purpose !== 'compaction')
+  assert.match(JSON.stringify(sent.messages), /AFTER is the original request/)
+  assert.match(JSON.stringify(sent.messages), /Keep literal \{\{unused\}\}\./)
+  const original = agent.session.snapshotEvents().find(event => event.type === 'user/message' && event.data.source.kind === 'user')
+  assert.match(JSON.stringify(original), /BEFORE/)
+  assert.doesNotMatch(JSON.stringify(original), /AFTER/)
+  const audit = agent.session.snapshotEvents().find(event => event.type === 'request/header' && event.data.contextCareWorkbench)
+  assert.ok(audit, JSON.stringify(agent.session.snapshotEvents().filter(event => event.type === 'turn/end')))
+  assert.match(JSON.stringify(audit.data.contextCareWorkbench.diff.after), /AFTER/)
+  assert.equal(audit.data.contextCareWorkbench.injectionBudget.kind, 'estimate')
+  assert.ok(audit.data.contextCareWorkbench.injectionBudget.tokens > 0)
+  assert.equal(audit.data.contextCareWorkbench.impact.providerSerialization, 'unknown')
+  assert.equal(audit.data.contextCareWorkbench.impact.cacheHitTokens, null)
+  assert.equal(ctx.contextCareControls.snapshot(agent.id).sources.find(source => source.sourceId === 'context-care:document:editable').rules.length, 2)
+})
+
+test('Workbench v2 records all-token-skipped request decisions in the real dispatch log without spending successful state', async t => {
+  const owned = await fixture(t, false); const ctx = await owned.open()
+  const previous = [...ctx.loader.entries()].find(entry => entry.options.name === 'dsh-context-care/requests')
+  await previous.fiber.dispose()
+  await ctx.loader.create({ name: 'dsh-context-care/requests', config: { maxInjectedTokens: 1 } })
+  await ctx.loader.await()
+  for (const entry of ctx.loader.entries()) if (entry.options.name === 'dsh-context-care/requests') await entry.fiber.await()
+  class RecordingAdapter extends CompletionAdapter {
+    requests = []
+    async *stream(request) { this.requests.push(request); yield* super.stream(request) }
+  }
+  const adapter = new RecordingAdapter([{ blocks: [{ type: 'text', text: 'Complete.' }] }]); ctx.llm.registerAdapter(['care-test'], adapter)
+  const agent = await ctx.agentLoop.create('budget-all-skipped', { provider: 'care-test', model: 'care-test' })
+  await ctx.contextCareWorkbench.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'budget-skipped', revision: 1, title: 'Skipped',
+    entries: [{ id: 'large', revision: 1, title: 'Large', enabledDefault: true, template: 'THIS INJECTION MUST BE SKIPPED', lifetime: 'session',
+      activation: { kind: 'constant' }, select: { view: 'model', roles: ['user'], blockTypes: ['text'] }, target: { view: 'model' } }] } })
+  await completionTurn(ctx, agent, 'Continue the requested work.')
+  assert.equal(adapter.requests.length, 1)
+  assert.doesNotMatch(JSON.stringify(adapter.requests[0].messages), /THIS INJECTION MUST BE SKIPPED/)
+  const audit = agent.session.snapshotEvents().find(event => event.type === 'request/header' && event.data.contextCareWorkbench)?.data.contextCareWorkbench
+  assert.ok(audit, JSON.stringify(agent.session.snapshotEvents().filter(event => event.type === 'turn/end')))
+  assert.equal(audit.records.find(record => record.ruleId === 'entry:large').reason, 'injection-token-budget-exceeded')
+  assert.equal(audit.injectionBudget.tokens, 0); assert.equal(audit.impact.cacheHitTokens, null)
+  assert.equal(ctx.contextCareWorkbench.store.read(agent.id).runtime.state[JSON.stringify(['context-care:document:budget-skipped', 'entry:large', 1, 'inject'])], undefined)
+})
+
+test('Workbench v2 cascades only explicit entries, previews without writes and rejects stale automatic variable snapshots', async t => {
+  const owned = await fixture(t, false); const ctx = await owned.open()
+  const adapter = new CompletionAdapter([{ blocks: [{ type: 'text', text: 'Complete.' }] }]); ctx.llm.registerAdapter(['care-test'], adapter)
+  const agent = await ctx.agentLoop.create('workbench-cascade', { provider: 'care-test', model: 'care-test' }); const service = ctx.contextCareWorkbench
+  const entry = (id, keyword, template, cascade) => ({ id, revision: 1, title: id, enabledDefault: true, template, cascade,
+    activation: { kind: 'keywords', keywords: [keyword] }, select: { view: 'model', roles: ['user'], blockTypes: ['text'] }, target: { view: 'model', role: 'user', anchor: 'end', position: 'after' } })
+  await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'cascade', revision: 1, title: 'Cascade',
+    variables: [{ name: 'value', scope: 'session', type: 'number', default: 1 }], entries: [entry('baseline', 'START_CHAIN', 'SECOND_LINK', false),
+      entry('second', 'SECOND_LINK', 'THIRD_LINK', true), entry('third', 'THIRD_LINK', 'START_CHAIN', true), entry('no-cascade', 'SECOND_LINK', 'MUST_NOT_APPEAR', false)] } })
+  const request = { messages: [{ role: 'user', content: [{ type: 'text', text: 'START_CHAIN' }] }] }
+  const before = service.store.read(agent.id); const planned = await service.preview(agent, request)
+  assert.deepEqual(service.store.read(agent.id), before)
+  const text = JSON.stringify(planned.request.messages)
+  assert.match(text, /SECOND_LINK/); assert.match(text, /THIRD_LINK/); assert.doesNotMatch(text, /MUST_NOT_APPEAR/)
+  assert.equal(planned.applied.length, 3)
+  assert.equal(planned.records.filter(record => record.cascadePass).length, 2)
+  assert.doesNotThrow(() => service.assertCurrent(agent, planned))
+  await service.store.automaticVariable(agent.id, before.documents[0].variables[0], 2, 'turn')
+  assert.throws(() => service.assertCurrent(agent, planned), { code: 'CONTROL_CHANGED' })
+})
+
+test('Workbench v2 shares token and cache budgets across real Host cascade passes without consuming skipped entries', async t => {
+  const owned = await fixture(t, false); const ctx = await owned.open()
+  ctx.llm.registerAdapter(['care-test'], new ScriptedAdapter())
+  const agent = await ctx.agentLoop.create('budget-cascade', { provider: 'care-test', model: 'care-test' })
+  await ctx.contextCareWorkbench.close()
+  const { openWorkbenchHost } = await pluginModule('workbench-host.js')
+  const { requestImpact } = await pluginModule('request-impact.js')
+  const price = text => Math.ceil(ctx.tokenMeter.estimateMessage({ role: 'user', content: [{ type: 'text', text }] }))
+  const limited = await openWorkbenchHost(ctx, ctx.contextCareControls, { maxInjectedTokens: price('SECOND_LINK') })
+  t.after(() => limited.close())
+  const entry = (id, keyword, template, cascade = false, priority = 0) => ({ id, revision: 1, title: id, enabledDefault: true, template, cascade, priority,
+    activation: { kind: 'keywords', keywords: [keyword] }, select: { view: 'model', roles: ['user'], blockTypes: ['text'] },
+    target: { view: 'model', role: 'user', anchor: 'end', position: 'after' } })
+  const unregister = limited.register({ plugin: 'budget-test', registrationId: 'budget-test', sessionId: agent.id, documents: [{ schemaVersion: 2, id: 'budget', revision: 1, title: 'Budget',
+    entries: [entry('first', 'START', 'SECOND_LINK', false, 10), entry('low', 'START', 'LOW'), entry('second', 'SECOND_LINK', 'THIRD_LINK', true)] }] })
+  t.after(unregister)
+  const request = { provider: 'care-test', model: 'care-test', messages: [{ id: 'start', role: 'user', content: [{ type: 'text', text: 'START' }] }] }
+  const before = limited.store.read(agent.id); const events = agent.session.snapshotEvents()
+  const planned = await limited.preview(agent, request)
+  assert.deepEqual(planned.applied.map(item => item.event.ruleId), ['entry:first'])
+  assert.deepEqual(planned.injectionBudget, { kind: 'estimate', tokens: price('SECOND_LINK'), limit: price('SECOND_LINK') })
+  assert.equal(planned.records.find(record => record.ruleId === 'entry:low').reason, 'injection-token-budget-exceeded')
+  assert.equal(planned.records.find(record => record.ruleId === 'entry:second').reason, 'injection-token-budget-exceeded')
+  assert.deepEqual(planned.impact, requestImpact(request, planned.request))
+  assert.deepEqual(limited.store.read(agent.id), before); assert.deepEqual(agent.session.snapshotEvents(), events)
+  assert.deepEqual((await limited.preview(agent, request)).request, planned.request)
+  await limited.close()
+  const cache = await openWorkbenchHost(ctx, ctx.contextCareControls, { maxCacheChangedBytes: planned.impact.changedSuffixBytes })
+  t.after(() => cache.close())
+  const dispose = cache.register({ plugin: 'budget-test', registrationId: 'budget-test', sessionId: agent.id, documents: [{ schemaVersion: 2, id: 'budget', revision: 1, title: 'Budget',
+    entries: [entry('first', 'START', 'SECOND_LINK', false, 10), entry('second', 'SECOND_LINK', 'THIRD_LINK', true)] }] })
+  t.after(dispose)
+  const capped = await cache.preview(agent, request)
+  assert.deepEqual(capped.request, planned.request)
+  assert.equal(capped.records.find(record => record.ruleId === 'entry:second').reason, 'request-cache-change-budget-exceeded')
+  assert.deepEqual(capped.impact, requestImpact(request, capped.request))
+})
+
+test('Workbench v2 character overflow remains an explicit Host planning failure with no dispatch or runtime write', async t => {
+  const owned = await fixture(t, false); const ctx = await owned.open()
+  ctx.llm.registerAdapter(['care-test'], new ScriptedAdapter())
+  const agent = await ctx.agentLoop.create('budget-characters', { provider: 'care-test', model: 'care-test' })
+  await ctx.contextCareWorkbench.close()
+  const { openWorkbenchHost } = await pluginModule('workbench-host.js')
+  const bounded = await openWorkbenchHost(ctx, ctx.contextCareControls, { maxInjectedChars: 5, maxCacheChangedBytes: 0 })
+  t.after(() => bounded.close())
+  const dispose = bounded.register({ plugin: 'budget-test', registrationId: 'character-test', sessionId: agent.id, documents: [{ schemaVersion: 2, id: 'characters', revision: 1, title: 'Characters',
+    entries: ['one', 'two'].map(id => ({ id, revision: 1, title: id, enabledDefault: true, template: '123', activation: { kind: 'constant' },
+      select: { view: 'model', roles: ['user'], blockTypes: ['text'] }, target: { view: 'model', role: 'user', anchor: 'end', position: 'after' } })) }] })
+  t.after(dispose)
+  const before = bounded.store.read(agent.id); const events = agent.session.snapshotEvents()
+  const request = { messages: [{ id: 'original', role: 'user', content: [{ type: 'text', text: 'START' }] }] }
+  await assert.rejects(bounded.preview(agent, request), /total-injection-budget-exceeded/)
+  await assert.rejects(bounded.assemble(agent, request), /total-injection-budget-exceeded/)
+  assert.deepEqual(bounded.store.read(agent.id), before); assert.deepEqual(agent.session.snapshotEvents(), events)
+})
+
+test('Workbench v2 isolates registered sources and rejects conflicts against local and pending document identities', async t => {
+  const owned = await fixture(t, false); const ctx = await owned.open()
+  const agent = await ctx.agentLoop.create('workbench-sources', { provider: 'care-test', model: 'care-test' }); const service = ctx.contextCareWorkbench
+  const doc = (id, variables = [], partials = []) => ({ schemaVersion: 2, id, revision: 1, title: id, variables, partials })
+  const variable = { name: 'localValue', scope: 'session', type: 'number', default: 0 }
+  await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: doc('local', [variable], [{ name: 'localPartial', revision: 1, template: 'local' }]) })
+  assert.throws(() => service.register({ plugin: 'fixture', registrationId: 'duplicate-id', documents: [doc('local')] }), /source-conflict/)
+  assert.throws(() => service.register({ plugin: 'fixture', registrationId: 'duplicate-var', documents: [doc('external', [variable])] }), /variables-conflict/)
+  assert.throws(() => service.register({ plugin: 'fixture', registrationId: 'duplicate-partial', documents: [doc('external', [], [{ name: 'localPartial', revision: 1, template: 'other' }])] }), /partials-conflict/)
+  assert.throws(() => service.registerPartial({ name: 'localPartial', revision: 1, template: 'override' }), /partial-conflict/)
+  const release = service.register({ plugin: 'fixture', registrationId: 'external', sessionId: agent.id, documents: [doc('external')] })
+  assert.equal(service.sources(agent.id).find(source => source.registration === 'external').readOnly, true)
+  assert.equal(service.sources(agent.id).find(source => source.registration === 'local').readOnly, false)
+  await assert.rejects(service.store.edit(agent.id, { revision: 1, operation: 'put-document', document: doc('external') }), /read-only/)
+  await assert.rejects(service.store.edit(agent.id, { revision: 1, operation: 'delete-document', documentId: 'external' }), /read-only/)
+  const other = await ctx.agentLoop.create('workbench-other-source', { provider: 'care-test', model: 'care-test' })
+  assert.equal(service.sources(other.id).length, 0)
+  await service.store.edit(other.id, { revision: 0, operation: 'put-document', document: doc('external') })
+  assert.equal(service.sources(other.id).find(source => source.registration === 'external').plugin, 'dsh-context-care')
+  assert.equal(service.sources(agent.id).find(source => source.registration === 'external').plugin, 'fixture')
+  release()
+  await service.store.edit(agent.id, { revision: 1, operation: 'put-document', document: doc('external') })
+  assert.equal(service.sources(agent.id).find(source => source.registration === 'external').readOnly, false)
+  await service.close()
+  assert.throws(() => service.registerExecutor({}), /workbench-closed/)
+  assert.throws(() => service.registerHelper({}), /workbench-closed/)
+})
+
+test('Workbench v2 preserves output history windows without replaying pre-registration or restored output', async t => {
+  const owned = await fixture(t, false); const ctx = await owned.open(); const service = ctx.contextCareWorkbench
+  const agent = await ctx.agentLoop.create('workbench-history', { provider: 'care-test', model: 'care-test' })
+  const appendOutput = text => agent.session.append('assistant/message', { turn: 1, step: 1, stream: [], usage: { inputTokens: 1, outputTokens: 1 },
+    message: createMessage({ role: 'assistant', source: { kind: 'model', provider: 'care-test', model: 'care-test' }, content: [{ type: 'text', text }] }) }, { surfaceOp: 'append' })
+  const makeRule = (id, pattern) => ({ schemaVersion: 2, sourceId: 'assigned-by-owner', id, revision: 1, title: id, on: ['output.complete'],
+    select: { view: 'original', roles: ['assistant'], blockTypes: ['text'], crossBlock: true, separator: '\n', depth: { unit: 'message', limit: 2 } }, match: { kind: 'regex', pattern },
+    actions: [{ id: 'notice', kind: 'notify', template: '{{captures.[0]}}', stage: 'output.complete', enabledDefault: true }] })
+  const before = appendOutput('PREFIX')
+  await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'history', revision: 1, title: 'History', rules: [makeRule('cross', 'PREFIX\\nNEW')] } })
+  const release = service.register({ plugin: 'fixture', registrationId: 'old-output', sessionId: agent.id,
+    documents: [{ schemaVersion: 2, id: 'old-output', revision: 1, title: 'Old', rules: [makeRule('old', '^PREFIX$')] }] })
+  await service.reconcile(agent)
+  assert.equal(service.store.read(agent.id).runtime.runs.length, 0)
+  const current = appendOutput('NEW')
+  // Re-enabling creates a new evidence seq cutoff; the old PREFIX is still valid context for this fresh trigger.
+  const controls = ctx.contextCareControls
+  await controls.patch(agent.id, { revision: controls.revision(agent.id), sourceId: 'context-care:document:history', ruleId: 'cross', actionId: 'notice', enabled: false })
+  await controls.patch(agent.id, { revision: controls.revision(agent.id), sourceId: 'context-care:document:history', ruleId: 'cross', actionId: 'notice', enabled: true })
+  await service.reconcile(agent)
+  assert.equal(service.store.read(agent.id).runtime.runs.length, 0, 'output committed before re-enable must not replay')
+  appendOutput('PREFIX'); const fresh = appendOutput('NEW')
+  await service.reconcile(agent)
+  const runs = service.store.read(agent.id).runtime.runs
+  assert.equal(runs.filter(run => run.ruleId === 'cross').length, 1, JSON.stringify(runs))
+  assert.equal(runs.find(run => run.ruleId === 'cross').triggerSeq, fresh.seq)
+  assert.ok(runs.find(run => run.ruleId === 'cross').sourceSeqs.some(seq => seq < fresh.seq))
+  assert.ok(before.seq < current.seq)
+  release(); await service.close()
+  const { openWorkbenchHost } = await pluginModule('workbench-host.js')
+  const reopened = await openWorkbenchHost(ctx, controls)
+  try {
+    await reopened.reconcile(agent)
+    const count = reopened.store.read(agent.id).runtime.runs.length
+    appendOutput('UNRELATED'); await reopened.reconcile(agent)
+    assert.equal(reopened.store.read(agent.id).runtime.runs.length, count)
+    appendOutput('PREFIX'); const afterRestart = appendOutput('NEW'); await reopened.reconcile(agent)
+    assert.equal(reopened.store.read(agent.id).runtime.runs.length, count + 1)
+    assert.equal(reopened.store.read(agent.id).runtime.runs.at(-1).triggerSeq, afterRestart.seq)
+  } finally { await reopened.close() }
+})
+
+test('Workbench v2 lets an eligible exclusive sibling run when a higher priority rule was enabled after the output', async t => {
+  const owned = await fixture(t, false); const ctx = await owned.open(); const service = ctx.contextCareWorkbench
+  const agent = await ctx.agentLoop.create('workbench-exclusive-cutoff', { provider: 'care-test', model: 'care-test' })
+  const makeRule = (id, priority) => ({ schemaVersion: 2, sourceId: 'owner', id, revision: 1, title: id, priority, exclusiveGroup: 'one', on: ['output.complete'],
+    select: { view: 'original', roles: ['assistant'], blockTypes: ['text'] }, match: { kind: 'keywords', values: ['CURRENT'] },
+    actions: [{ id: 'notice', kind: 'notify', template: 'Current occurrence', stage: 'output.complete', enabledDefault: true }] })
+  await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'exclusive', revision: 1, title: 'Exclusive', rules: [makeRule('high', 20), makeRule('low', 10)] } })
+  agent.session.append('assistant/message', { turn: 1, step: 1, stream: [], usage: { inputTokens: 1, outputTokens: 1 },
+    message: createMessage({ role: 'assistant', source: { kind: 'model', provider: 'care-test', model: 'care-test' }, content: [{ type: 'text', text: 'CURRENT' }] }) }, { surfaceOp: 'append' })
+  const control = ctx.contextCareControls
+  for (const enabled of [false, true]) await control.patch(agent.id, { revision: control.revision(agent.id), sourceId: 'context-care:document:exclusive', ruleId: 'high', actionId: 'notice', enabled })
+  await service.reconcile(agent)
+  assert.deepEqual(service.store.read(agent.id).runtime.runs.map(run => [run.ruleId, run.status]), [['low', 'queued']])
+})
+
+test('Workbench v2 renews variable snapshots only for explicit dependents and delivers their updated templates', async t => {
+  const owned = await fixture(t, false); const ctx = await owned.open(); const service = ctx.contextCareWorkbench
+  const adapter = new CompletionAdapter([{ blocks: [{ type: 'text', text: 'SET_COUNT' }] }, { blocks: [{ type: 'text', text: 'Done.' }] }]); ctx.llm.registerAdapter(['care-test'], adapter)
+  const agent = await ctx.agentLoop.create('workbench-variable-actions', { provider: 'care-test', model: 'care-test' })
+  await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'vars', revision: 1, title: 'Variables',
+    variables: [{ name: 'count', scope: 'session', type: 'number', default: 0 }],
+    rules: [{ schemaVersion: 2, sourceId: 'context-care:document:vars', id: 'set', revision: 1, title: 'Set and deliver', on: ['output.complete'],
+      select: { view: 'original', roles: ['assistant'], blockTypes: ['text'] }, match: { kind: 'regex', pattern: 'SET_COUNT' },
+      actions: [{ id: 'set', kind: 'set-variable', variable: 'count', value: 7, stage: 'output.complete', enabledDefault: true },
+        { id: 'dependent', kind: 'notify', dependsOn: ['set'], template: 'New count: {{vars.count}}, result: {{results.set}}', stage: 'output.complete', enabledDefault: true },
+        { id: 'unrelated', kind: 'notify', template: 'Stale count: {{vars.count}}', stage: 'output.complete', enabledDefault: true }] }] } })
+  await completionTurn(ctx, agent)
+  const runs = service.store.read(agent.id).runtime.runs
+  assert.deepEqual(runs.map(run => [run.actionId, run.status]), [['set', 'succeeded'], ['dependent', 'succeeded'], ['unrelated', 'skipped']], JSON.stringify(runs))
+  assert.match(JSON.stringify(agent.session.snapshotEvents()), /New count: 7, result: 7/)
+  assert.equal(runs[2].reason, 'workbench-changed')
+})
+
+test('Workbench v2 HTTP authenticates inspection, isolates cancellation and rejects rule editing', async t => {
+  const owned = await fixture(t, false); const ctx = await owned.open(); const service = ctx.contextCareWorkbench
+  ctx.llm.registerAdapter(['care-test'], new ScriptedAdapter())
+  const agent = await ctx.agentLoop.create('workbench-http', { provider: 'care-test', model: 'care-test' })
+  const other = await ctx.agentLoop.create('workbench-http-other', { provider: 'care-test', model: 'care-test' })
+  const path = `/context-care/workbench?sessionId=${agent.id}`
+  assert.equal((await fetch(`http://127.0.0.1:${ctx.webServer.port}${path}`)).status, 503)
+  const { base, cookie } = await controlCookie(ctx); const headers = { cookie, 'content-type': 'application/json' }
+  assert.equal((await fetch(`${base}${path}`)).status, 401)
+  assert.equal((await fetch(`${base}/context-care/workbench?sessionId=missing`, { headers })).status, 404)
+  assert.equal((await fetch(`${base}${path}`, { method: 'DELETE', headers })).status, 405)
+  const initial = await fetch(`${base}${path}`, { headers }); assert.equal(initial.status, 200)
+  assert.equal(initial.headers.get('cache-control'), 'no-store'); const state = await initial.json()
+  assert.equal(state.sessionId, agent.id); assert.equal(state.turnId, service.turnId(agent))
+  const post = (body, extra = {}, target = path) => fetch(`${base}${target}`, { method: 'POST', headers: { ...headers, ...extra }, body: typeof body === 'string' ? body : JSON.stringify(body) })
+  assert.equal((await post({ operation: 'preview' }, { origin: 'http://foreign.test' })).status, 403)
+  assert.equal((await post({ operation: 'preview' }, { origin: '%%%malformed' })).status, 403)
+  assert.equal((await post({ operation: 'preview' }, { 'content-type': 'text/plain' })).status, 415)
+  assert.equal((await post('{')).status, 400)
+  assert.equal((await post({ operation: 'preview', unexpected: true })).status, 400)
+  assert.equal((await post(' '.repeat(1048577))).status, 413)
+  const document = { schemaVersion: 2, id: 'http-doc', revision: 1, title: 'HTTP editable', variables: [{ name: 'count', scope: 'session', type: 'number', default: 0 }],
+    entries: [{ id: 'constant', revision: 1, title: 'Constant', enabledDefault: true, template: 'Saved injection', activation: { kind: 'constant' },
+      select: { view: 'model', roles: ['user'], blockTypes: ['text'] }, target: { view: 'model', role: 'user', anchor: 'end', position: 'after' } }] }
+  const put = { operation: 'edit', revision: 0, change: { operation: 'put-document', document } }
+  assert.equal((await post(put, { origin: base })).status, 400)
+  assert.equal((await post({ operation: 'edit', revision: 0, change: { operation: 'set-variable', variable: 'count', value: 7 } })).status, 400)
+  assert.equal((await post({ operation: 'import', document })).status, 400)
+  assert.equal(service.store.read(agent.id).revision, 0)
+  // Declarations are contributed by code; HTTP provides no document authoring path.
+  const unregister = service.register({ plugin: 'http-test', registrationId: 'http-declarations', sessionId: agent.id, documents: [document] })
+  t.after(unregister)
+  agent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Preview the saved state.' }] }), { surfaceOp: 'append' })
+  const before = service.store.read(agent.id); const eventsBefore = agent.session.snapshotEvents()
+  const preview = await post({ operation: 'preview' }); assert.equal(preview.status, 200)
+  assert.match(JSON.stringify((await preview.json()).diff.after), /Saved injection/)
+  assert.deepEqual(service.store.read(agent.id), before); assert.deepEqual(agent.session.snapshotEvents(), eventsBefore)
+  assert.equal(service.store.read(other.id).revision, 0)
+  await service.store.runtime(agent.id, runtime => runtime.runs.push({ id: 'http-queued', status: 'queued' }))
+  assert.equal((await post({ operation: 'cancel', runId: 'http-queued' }, {}, `/context-care/workbench?sessionId=${other.id}`)).status, 404)
+  assert.equal(service.store.read(agent.id).runtime.runs[0].status, 'queued')
+  const cancelled = await post({ operation: 'cancel', runId: 'http-queued' }); assert.equal(cancelled.status, 200)
+  assert.equal((await cancelled.json()).runtime.runs[0].status, 'cancelled')
+  assert.equal((await post({ operation: 'edit', revision: 0, change: { operation: 'delete-document', documentId: document.id } })).status, 400)
+  assert.equal(service.sources(agent.id).some(source => source.sourceId === 'context-care:document:http-doc'), true)
+})
+
+test('Workbench v2 compact actions use native context_rest admission and complete the summary before continuing', async t => {
+  // Fix the retained tail so this scenario tests a real summary rather than a valid no-prefix outcome.
+  const owned = await fixture(t, false, { retainTokens: 600 }); const ctx = await owned.open(); const service = ctx.contextCareWorkbench
+  class CompactAdapter extends CompletionAdapter {
+    requests = []
+    async *stream(request) {
+      this.requests.push(request)
+      if (request.purpose !== 'compaction') { yield* super.stream(request); return }
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'Verified earlier work has been summarized. Continue.' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+  }
+  const adapter = new CompactAdapter(['Earlier work accepted.', 'Current work accepted.', 'COMPACT_TRIGGER', 'Continued after the requested summary.']
+    .map(text => ({ blocks: [{ type: 'text', text }] })))
+  ctx.llm.registerAdapter(['care-test'], adapter)
+  const agent = await ctx.agentLoop.create('workbench-compact', { provider: 'care-test', model: 'care-test', toolMode: 'native' })
+  await completionTurn(ctx, agent, 'Earlier verified work. '.repeat(1200))
+  await completionTurn(ctx, agent, 'Current verified work. '.repeat(100))
+  const note = 'Keep the verified work, paths and remaining tasks; continue after the summary. '.padEnd(1200, '…')
+  let admitted = 0
+  ctx.on('tools/pre-execute', (exec, next) => {
+    if (exec.name === 'context_rest' && exec.callId.startsWith('context-care:')) { admitted++; assert.deepEqual(exec.arguments, { note }) }
+    return next()
+  })
+  await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'compact', revision: 1, title: 'Request summary',
+    rules: [{ schemaVersion: 2, sourceId: 'context-care:document:compact', id: 'trigger', revision: 1, on: ['output.complete'],
+      select: { view: 'original', roles: ['assistant'], blockTypes: ['text'] }, match: { kind: 'regex', pattern: 'COMPACT_TRIGGER' },
+      actions: [{ id: 'summary', kind: 'compact', stage: 'output.complete', enabledDefault: true, template: note }] }] } })
+  const action = ctx.contextCareControls.snapshot(agent.id).sources.find(source => source.sourceId === 'context-care:document:compact').rules[0].actions[0]
+  assert.equal(action.available, true)
+  await completionTurn(ctx, agent, 'Request the next work unit.')
+  assert.equal(admitted, 1, JSON.stringify(service.store.read(agent.id).runtime.runs))
+  const run = service.store.read(agent.id).runtime.runs[0]
+  assert.equal(run.status, 'succeeded'); assert.match(run.result.value, /排定/)
+  assert.equal(agent.session.snapshotEvents().filter(event => event.type === 'compaction/summary').length, 1,
+    JSON.stringify({ requests: adapter.requests.map(request => request.purpose),
+      reports: agent.session.snapshotEvents().filter(event => event.type === 'user/message' && producedBy(event.data.source, 'dsh-context-care:state')).map(event => event.data.content),
+      maintenance: ctx.contextCareRequests.list(agent.id).filter(record => record.kind === 'maintenance').map(record => record.data),
+      ends: agent.session.snapshotEvents().filter(event => event.type === 'turn/end').map(event => event.data) }))
+  assert.equal(adapter.outputs.length, 0)
+  assert.match(JSON.stringify(adapter.requests.at(-1).messages), /Keep the verified work/)
+})
+
+test('Workbench v2 action turn and session lifetimes are consumed by successful delivery and isolate later turns', async t => {
+  const owned = await fixture(t, false); const ctx = await owned.open(); const service = ctx.contextCareWorkbench
+  const adapter = new CompletionAdapter(Array.from({ length: 4 }, () => ({ blocks: [{ type: 'text', text: 'LIFETIME_TRIGGER' }] })))
+  ctx.llm.registerAdapter(['care-test'], adapter)
+  const agent = await ctx.agentLoop.create('workbench-lifetime', { provider: 'care-test', model: 'care-test' })
+  await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'lifetime', revision: 1, title: 'Lifetimes',
+    rules: [{ schemaVersion: 2, sourceId: 'context-care:document:lifetime', id: 'trigger', revision: 1, on: ['output.complete'],
+      select: { view: 'original', roles: ['assistant'], blockTypes: ['text'] }, match: { kind: 'regex', pattern: 'LIFETIME_TRIGGER' },
+      actions: ['turn', 'session'].map(lifetime => ({ id: lifetime, kind: 'notify', stage: 'output.complete', enabledDefault: true,
+        target: { view: 'model', lifetime }, template: `Delivered once per ${lifetime}.` })) }] } })
+  await completionTurn(ctx, agent)
+  let runs = service.store.read(agent.id).runtime.runs
+  assert.deepEqual(runs.map(run => run.actionId), ['turn', 'session'], JSON.stringify(runs))
+  assert.ok(runs.every(run => run.status === 'succeeded' && run.delivery === 'delivered'))
+  const firstTurn = runs[0].turnId
+  await completionTurn(ctx, agent)
+  runs = service.store.read(agent.id).runtime.runs
+  assert.deepEqual(runs.map(run => run.actionId), ['turn', 'session', 'turn'], JSON.stringify(runs))
+  assert.notEqual(runs[2].turnId, firstTurn); assert.equal(adapter.outputs.length, 0)
+})
+
+test('Workbench v2 materializes frozen entry slices on real tool steps, expires fixed turns and keeps ordinary turn consumption separate', async t => {
+  const owned = await fixture(t, false); const ctx = await owned.open(); const service = ctx.contextCareWorkbench
+  class RecordingAdapter extends CompletionAdapter {
+    requests = []
+    async *stream(request) { this.requests.push(request); yield* super.stream(request) }
+  }
+  const adapter = new RecordingAdapter([
+    { blocks: [{ type: 'tool-call', id: 'entry-change', name: 'entry_variable', arguments: '{}' }] },
+    ...Array.from({ length: 3 }, () => ({ blocks: [{ type: 'text', text: 'Continue verified work.' }] })),
+  ])
+  ctx.llm.registerAdapter(['care-test'], adapter)
+  const agent = await ctx.agentLoop.create('entry-materialization', { provider: 'care-test', model: 'care-test', toolMode: 'native' })
+  ctx.effect(() => ctx.tools.register({ name: 'entry_variable', description: 'Update the deterministic fixture variable',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+    output: { schema: { type: 'object' }, render: (_args, value) => [{ type: 'text', text: value.summary }] },
+    async execute() {
+      const current = service.store.read(agent.id)
+      await service.store.edit(agent.id, { revision: current.revision, operation: 'set-variable', variable: 'label', value: 'UPDATED' })
+      await service.store.edit(agent.id, { revision: service.store.read(agent.id).revision, operation: 'set-variable', variable: 'active', value: false })
+      return { summary: 'Variable changed.' }
+    } }))
+  const entry = lifetime => ({ id: lifetime, revision: 1, title: lifetime, enabledDefault: true, template: `${lifetime}:{{vars.label}}`,
+    activation: { kind: 'condition', condition: { kind: 'compare', field: 'vars.active', op: 'eq', value: true } }, lifetime, ...(lifetime === 'turns' ? { lifetimeTurns: 2 } : {}),
+    select: { view: 'model', roles: ['user', 'assistant', 'tool'], blockTypes: ['text'] }, target: { view: 'model' } })
+  await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'materialization', revision: 1, title: 'Materialization',
+    variables: [{ name: 'label', scope: 'session', type: 'string', default: 'literal {{unused}}' }, { name: 'active', scope: 'session', type: 'boolean', default: true }],
+    entries: ['turn', 'turns', 'session'].map(entry) } })
+  await completionTurn(ctx, agent, 'ACTIVATE the entries.')
+  assert.equal(adapter.requests.length, 2, JSON.stringify(agent.session.snapshotEvents().filter(event => event.type === 'turn/end')))
+  const injected = request => request.messages.filter(message => message.source?.contextCareWorkbench).map(message => message.content[0].text).sort()
+  assert.deepEqual(injected(adapter.requests[0]), ['session:literal {{unused}}', 'turn:literal {{unused}}', 'turns:literal {{unused}}'])
+  assert.deepEqual(injected(adapter.requests[1]), injected(adapter.requests[0]))
+  await completionTurn(ctx, agent, 'No matching word on the next turn.')
+  assert.deepEqual(injected(adapter.requests[2]), ['session:literal {{unused}}', 'turns:literal {{unused}}'])
+  await completionTurn(ctx, agent, 'No matching word on the third turn.')
+  assert.deepEqual(injected(adapter.requests[3]), ['session:literal {{unused}}'])
+  assert.equal(agent.session.snapshotEvents().filter(event => event.type === 'turn/start').length, 3)
+  assert.equal(agent.session.snapshotEvents().filter(event => event.type === 'user/message' && event.data.source.kind === 'plugin:dsh-context-care:workbench').length, 0)
+  const state = service.store.read(agent.id).runtime.state
+  assert.equal(state[JSON.stringify(['context-care:document:materialization', 'entry:turns', 1, 'inject'])].materialization, undefined)
+})
+
+test('Workbench v2 acknowledges inactive entry transitions, blocks reactivation during cooldown and leaves preview state untouched', async t => {
+  const owned = await fixture(t, false); const ctx = await owned.open(); const service = ctx.contextCareWorkbench
+  class RecordingAdapter extends CompletionAdapter { requests = []; async *stream(request) { this.requests.push(request); yield* super.stream(request) } }
+  const adapter = new RecordingAdapter(Array.from({ length: 3 }, () => ({ blocks: [{ type: 'text', text: 'Work continues.' }] })))
+  ctx.llm.registerAdapter(['care-test'], adapter)
+  const agent = await ctx.agentLoop.create('entry-inactive', { provider: 'care-test', model: 'care-test' })
+  await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'inactive', revision: 1, title: 'Inactive',
+    variables: [{ name: 'active', scope: 'session', type: 'boolean', default: true }], entries: [{ id: 'held', revision: 1, title: 'Held', enabledDefault: true,
+      template: 'UNTIL_INACTIVE_TEXT', lifetime: 'until-inactive', activationCooldownMs: 86400000,
+      activation: { kind: 'condition', condition: { kind: 'compare', field: 'vars.active', op: 'eq', value: true } },
+      select: { view: 'model', roles: ['user'], blockTypes: ['text'] }, target: { view: 'model' } }] } })
+  await completionTurn(ctx, agent)
+  assert.match(JSON.stringify(adapter.requests[0].messages), /UNTIL_INACTIVE_TEXT/)
+  const variable = async value => service.store.edit(agent.id, { revision: service.store.read(agent.id).revision, operation: 'set-variable', variable: 'active', value })
+  await variable(false)
+  const before = service.store.read(agent.id)
+  const request = { messages: [{ role: 'user', content: [{ type: 'text', text: 'Preview' }] }] }
+  const preview = await service.preview(agent, request)
+  assert.equal(preview.entryTransitions.length, 1)
+  assert.deepEqual(service.store.read(agent.id), before)
+  await completionTurn(ctx, agent)
+  assert.doesNotMatch(JSON.stringify(adapter.requests[1].messages), /UNTIL_INACTIVE_TEXT/)
+  const key = JSON.stringify(['context-care:document:inactive', 'entry:held', 1, 'inject'])
+  const inactive = service.store.read(agent.id).runtime.state[key]
+  assert.equal(inactive.materialization, undefined); assert.ok(inactive.lastInactiveAt > 0)
+  await variable(true)
+  await completionTurn(ctx, agent)
+  assert.doesNotMatch(JSON.stringify(adapter.requests[2].messages), /UNTIL_INACTIVE_TEXT/)
+  const audit = agent.session.snapshotEvents().findLast(event => event.type === 'request/header' && event.data.contextCareWorkbench).data.contextCareWorkbench
+  assert.equal(audit.records.find(record => record.ruleId === 'entry:held').reason, 'entry-inactive-cooldown')
+  assert.deepEqual(service.store.read(agent.id).runtime.state[key], inactive)
+})
+
+test('Workbench v2 surface replacement removes strict activation evidence without resetting the durable fixed-turn lifetime', async t => {
+  const owned = await fixture(t, false); const ctx = await owned.open(); const service = ctx.contextCareWorkbench
+  class RecordingAdapter extends CompletionAdapter { requests = []; async *stream(request) { this.requests.push(request); yield* super.stream(request) } }
+  const adapter = new RecordingAdapter(Array.from({ length: 3 }, () => ({ blocks: [{ type: 'text', text: 'Continue.' }] })))
+  ctx.llm.registerAdapter(['care-test'], adapter)
+  const agent = await ctx.agentLoop.create('entry-surface', { provider: 'care-test', model: 'care-test' })
+  await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'surface', revision: 1, title: 'Surface',
+    entries: ['request', 'turns'].map(lifetime => ({ id: lifetime, revision: 1, title: lifetime, enabledDefault: true, template: `${lifetime.toUpperCase()}_SURFACE_SLICE`,
+      lifetime, ...(lifetime === 'turns' ? { lifetimeTurns: 2 } : {}), activation: { kind: 'keywords', keywords: ['ACTIVATION_MARKER'] },
+      select: { view: 'original', roles: ['user'], blockTypes: ['text'] }, target: { view: 'model' } })) } })
+  await completionTurn(ctx, agent, 'ACTIVATION_MARKER')
+  assert.match(JSON.stringify(adapter.requests[0].messages), /REQUEST_SURFACE_SLICE/)
+  const source = agent.session.snapshotEvents().find(event => event.type === 'user/message' && event.data.content.some(block => block.text === 'ACTIVATION_MARKER'))
+  agent.session.append('user/message', createUserMessage({ source: { kind: 'plugin:entry-surface-fixture' }, content: [{ type: 'text', text: 'Replacement without activation evidence.' }] }),
+    { surfaceOp: { op: 'replace', startSeq: source.seq, endSeq: source.seq }, sourceEventSeqs: [source.seq] })
+  assert.equal(agent.session.surface.nodes.includes(source.seq), false)
+  assert.equal(agent.session.snapshotEvents().findLast(event => event.type === 'turn/start').data.turn, 1)
+  const sameTurn = await service.preview(agent, { messages: agent.session.deriveMessages() })
+  assert.match(JSON.stringify(sameTurn.request.messages), /TURNS_SURFACE_SLICE/)
+  assert.doesNotMatch(JSON.stringify(sameTurn.request.messages), /REQUEST_SURFACE_SLICE|ACTIVATION_MARKER/)
+  await completionTurn(ctx, agent)
+  assert.match(JSON.stringify(adapter.requests[1].messages), /TURNS_SURFACE_SLICE/)
+  await completionTurn(ctx, agent)
+  assert.doesNotMatch(JSON.stringify(adapter.requests[2].messages), /SURFACE_SLICE/)
+  assert.ok(agent.session.snapshotEvents().some(event => event.seq === source.seq), 'Replacement leaves the original facts in the log')
+})
+
+test('Workbench v2 cooling entries release their exclusive group while keeping the skip reason visible', async t => {
+  const owned = await fixture(t, false); const ctx = await owned.open(); const service = ctx.contextCareWorkbench
+  class RecordingAdapter extends CompletionAdapter { requests = []; async *stream(request) { this.requests.push(request); yield* super.stream(request) } }
+  const adapter = new RecordingAdapter(Array.from({ length: 2 }, () => ({ blocks: [{ type: 'text', text: 'Continue.' }] })))
+  ctx.llm.registerAdapter(['care-test'], adapter)
+  const agent = await ctx.agentLoop.create('entry-exclusive', { provider: 'care-test', model: 'care-test' })
+  await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'exclusive', revision: 1, title: 'Exclusive',
+    entries: ['high', 'low'].map(id => ({ id, revision: 1, title: id, enabledDefault: true, template: `${id.toUpperCase()}_SLICE`,
+      activation: { kind: 'constant' }, priority: id === 'high' ? 10 : 0, exclusiveGroup: 'slice', cooldownMs: id === 'high' ? 86400000 : 0,
+      select: { view: 'model', roles: ['user'], blockTypes: ['text'] }, target: { view: 'model' } })) } })
+  await completionTurn(ctx, agent); await completionTurn(ctx, agent)
+  assert.match(JSON.stringify(adapter.requests[0].messages), /HIGH_SLICE/)
+  assert.doesNotMatch(JSON.stringify(adapter.requests[0].messages), /LOW_SLICE/)
+  assert.match(JSON.stringify(adapter.requests[1].messages), /LOW_SLICE/)
+  assert.doesNotMatch(JSON.stringify(adapter.requests[1].messages), /HIGH_SLICE/)
+  const audit = agent.session.snapshotEvents().findLast(event => event.type === 'request/header' && event.data.contextCareWorkbench).data.contextCareWorkbench
+  assert.equal(audit.records.find(record => record.ruleId === 'entry:high').reason, 'entry-activation-interval')
+})
+
+test('Workbench v2 inactive reservations roll back, reject stale state and retain held text after a failed durable ACK', async t => {
+  const owned = await fixture(t, false); const ctx = await owned.open(); const service = ctx.contextCareWorkbench
+  const agent = await ctx.agentLoop.create('entry-reservations', { provider: 'care-test', model: 'care-test' })
+  const key = JSON.stringify(['context-care:document:reservation', 'entry:held', 1, 'inject'])
+  await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'reservation', revision: 1, title: 'Reservation',
+    variables: [{ name: 'active', scope: 'session', type: 'boolean', default: true }], entries: [{ id: 'held', revision: 1, title: 'Held', enabledDefault: true,
+      template: 'RESERVATION_TEXT', lifetime: 'until-inactive', activation: { kind: 'condition', condition: { kind: 'compare', field: 'vars.active', op: 'eq', value: true } },
+      select: { view: 'model', roles: ['user'], blockTypes: ['text'] }, target: { view: 'model' } }] } })
+  const request = { messages: [{ role: 'user', content: [{ type: 'text', text: 'Preview' }] }] }
+  const activate = await service.preview(agent, request)
+  const competing = await service.preview(agent, request)
+  await service.reserve(agent, activate, 'activate'); await service.dispatched(agent, activate, 'activate')
+  assert.equal(service.store.read(agent.id).runtime.state[key].materialization.turn, 0, 'Seed activation uses ordinal zero')
+  await assert.rejects(service.reserve(agent, competing, 'competing'), /entry-state-changed-before-dispatch/)
+  await service.store.edit(agent.id, { revision: 1, operation: 'set-variable', variable: 'active', value: false })
+  const inactive = await service.preview(agent, request)
+  const before = service.store.read(agent.id).runtime.state[key]
+  assert.equal(inactive.applied.length, 0); assert.equal(inactive.entryTransitions.length, 1)
+  await service.reserve(agent, inactive, 'rollback'); await service.rollback(agent, 'rollback')
+  assert.deepEqual(service.store.read(agent.id).runtime.state[key], before)
+  assert.equal(service.store.read(agent.id).runtime.state[`$dispatch:${key}`], undefined)
+  await service.reserve(agent, inactive, 'failed-ack')
+  const table = ctx.storageDomain.get('context_care_workbench').table('sessions'); const put = table.put
+  table.put = async () => { throw new Error('fixture-durable-ack-failed') }
+  try { await assert.rejects(service.dispatched(agent, inactive, 'failed-ack'), /workbench-storage-unavailable/) }
+  finally { table.put = put }
+  assert.deepEqual(service.store.read(agent.id).runtime.state[key], before, 'Unconfirmed deactivation leaves the held slice intact')
+  await service.unknown(agent, 'failed-ack')
+  assert.equal(service.store.read(agent.id).runtime.state[`$dispatch:${key}`].status, 'unknown')
+  assert.equal((await service.preview(agent, request)).entryTransitions.length, 0)
+  assert.deepEqual(service.store.read(agent.id).runtime.state[key], before)
+})
+
+test('Workbench v2 restores session slices, isolates real fork seeds and refuses plans from an earlier turn', async t => {
+  const owned = await fixture(t, false); let ctx = await owned.open(); let service = ctx.contextCareWorkbench
+  class RecordingAdapter extends CompletionAdapter { requests = []; async *stream(request) { this.requests.push(request); yield* super.stream(request) } }
+  const config = { provider: 'care-test', model: 'care-test' }
+  const first = new RecordingAdapter([{ blocks: [{ type: 'text', text: 'Continue.' }] }]); ctx.llm.registerAdapter(['care-test'], first)
+  let agent = await ctx.agentLoop.create('entry-restore', config)
+  const document = { schemaVersion: 2, id: 'restore', revision: 1, title: 'Restore', variables: [{ name: 'active', scope: 'session', type: 'boolean', default: true }],
+    entries: [{ id: 'held', revision: 1, title: 'Held', enabledDefault: true, template: 'RESTORED_SLICE', lifetime: 'session',
+      activation: { kind: 'condition', condition: { kind: 'compare', field: 'vars.active', op: 'eq', value: true } },
+      select: { view: 'model', roles: ['user'], blockTypes: ['text'] }, target: { view: 'model' } }] }
+  await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document })
+  await completionTurn(ctx, agent)
+  await service.store.edit(agent.id, { revision: 1, operation: 'set-variable', variable: 'active', value: false })
+  const log = agent.session.snapshotEvents(); const key = JSON.stringify(['context-care:document:restore', 'entry:held', 1, 'inject'])
+  const saved = service.store.read(agent.id).runtime.state[key].materialization
+  await owned.close(ctx); ctx = await owned.open(); service = ctx.contextCareWorkbench
+  const adapter = new RecordingAdapter(Array.from({ length: 3 }, () => ({ blocks: [{ type: 'text', text: 'Continue.' }] }))); ctx.llm.registerAdapter(['care-test'], adapter)
+  agent = (await ctx.agents.create({ sessionId: 'entry-restore', seed: log, agentOptions: config })).agent
+  assert.deepEqual(service.store.read(agent.id).runtime.state[key].materialization, saved)
+  const preview = await service.preview(agent, { messages: [{ role: 'user', content: [{ type: 'text', text: 'Next' }] }] })
+  await completionTurn(ctx, agent)
+  assert.match(JSON.stringify(adapter.requests[0].messages), /RESTORED_SLICE/)
+  await assert.rejects(service.reserve(agent, preview, 'earlier-turn'), /workbench-turn-changed-before-dispatch/)
+  const parentLog = agent.session.snapshotEvents()
+  const child = (await ctx.agents.create({ sessionId: 'entry-fork', seed: buildForkSeed(parentLog, parentLog.at(-1).seq),
+    inheritedEventCount: parentLog.length, meta: { isSeeded: true, parentSession: agent.id }, agentOptions: config })).agent
+  assert.equal(child.session.header.parentSession, agent.id)
+  await service.store.edit(child.id, { revision: 0, operation: 'put-document', document })
+  await service.store.edit(child.id, { revision: 1, operation: 'set-variable', variable: 'active', value: false })
+  await completionTurn(ctx, child)
+  assert.doesNotMatch(JSON.stringify(adapter.requests[1].messages), /RESTORED_SLICE/, 'Fork history does not copy producer-owned held state')
+  assert.equal(service.store.read(child.id).runtime.state[key], undefined)
+  await completionTurn(ctx, agent)
+  assert.match(JSON.stringify(adapter.requests[2].messages), /RESTORED_SLICE/)
+})
+
+test('Workbench v2 executes a final-output program through native tools before the turn closes and resolves dependent partial templates', async t => {
+  const owned = await fixture(t, false)
+  const ctx = await owned.open()
+  let invoked = 0
+  ctx.effect(() => ctx.tools.register({ name: 'workbench_fixture', description: 'Deterministic test program', parameters: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'], additionalProperties: false },
+    output: { schema: { type: 'object' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
+    async execute(args, exec) {
+      invoked++
+      assert.ok(exec.agent.session.snapshotEvents().findLast(event => event.type === 'turn/start').seq > (exec.agent.session.snapshotEvents().findLast(event => event.type === 'turn/end')?.seq ?? -1))
+      assert.equal(args.text, 'OUTPUT_TRIGGER')
+      return { summary: 'program result', answer: 7 }
+    } }))
+  const service = ctx.contextCareWorkbench
+  service.registerExecutor({ executorRef: 'fixture-program', plugin: 'test-fixture', toolName: 'workbench_fixture', inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'], additionalProperties: false }, requiresApproval: false })
+  const adapter = new CompletionAdapter([{ blocks: [{ type: 'text', text: 'OUTPUT_TRIGGER' }] }, { blocks: [{ type: 'text', text: 'Finished processing the result.' }] }])
+  ctx.llm.registerAdapter(['care-test'], adapter)
+  const agent = await ctx.agentLoop.create('workbench-output', { provider: 'care-test', model: 'care-test', toolMode: 'native' })
+  await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'output', revision: 1, title: 'Output actions',
+    partials: [{ name: 'delivered', revision: 1, template: 'Result: {{results.run.answer}}' }],
+    rules: [{ schemaVersion: 2, sourceId: 'context-care:document:output', id: 'trigger', revision: 1, title: 'Program on final output', on: ['output.complete'],
+      select: { view: 'original', roles: ['assistant'], blockTypes: ['text'] }, match: { kind: 'regex', pattern: 'OUTPUT_TRIGGER' },
+      actions: [{ id: 'run', kind: 'program', executorRef: 'fixture-program', inputs: { text: { bind: 'captures.0' } }, stage: 'output.complete', enabledDefault: true },
+        { id: 'deliver', kind: 'notify', dependsOn: ['run'], template: '{{> delivered}}', stage: 'output.complete', enabledDefault: true }] }] } })
+  await completionTurn(ctx, agent)
+  const runs = service.store.read(agent.id).runtime.runs
+  assert.equal(invoked, 1, JSON.stringify(runs))
+  assert.deepEqual(runs.map(run => run.status), ['succeeded', 'succeeded'], JSON.stringify(runs))
+  assert.equal(runs[1].delivery, 'delivered')
+  assert.match(JSON.stringify(agent.session.snapshotEvents()), /Result: 7/)
+  assert.equal(adapter.outputs.length, 0, 'Dependent result input runs in the same turn without a new human request')
+})
+
+test('Workbench v2 rule files publish validated revisions atomically, report failures and recover without an editor', async t => {
+  const owned = await fixture(t, false); const ctx = await owned.open()
+  ctx.llm.registerAdapter(['care-test'], new ScriptedAdapter())
+  const agent = await ctx.agentLoop.create('file-rules', { provider: 'care-test', model: 'care-test' })
+  const root = await mkdtemp(resolve(tmpdir(), 'care-rule-files-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const file = resolve(root, 'rules.json'); const second = resolve(root, 'second.json')
+  const document = { schemaVersion: 2, id: 'file', revision: 1, title: 'File declaration',
+    entries: [{ id: 'constant', revision: 1, title: 'File entry', enabledDefault: true, template: 'FILE_VERSION_ONE', activation: { kind: 'constant' },
+      select: { view: 'model', roles: ['user'], blockTypes: ['text'] }, target: { view: 'model', role: 'user', anchor: 'end', position: 'after' } }] }
+  await writeFile(file, JSON.stringify(document)); await writeFile(second, JSON.stringify({ schemaVersion: 2, id: 'second', revision: 1, title: 'Second file' }))
+  await ctx.contextCareWorkbench.close()
+  const { openWorkbenchHost } = await pluginModule('workbench-host.js')
+  const service = await openWorkbenchHost(ctx, ctx.contextCareControls, { ruleFiles: [file, second] })
+  t.after(() => service.close())
+  const request = { messages: [createUserMessage({ content: [{ type: 'text', text: 'Actual request' }], source: { kind: 'user' } })], purpose: 'conversation' }
+  const plan = await service.assemble(agent, request)
+  assert.match(JSON.stringify(plan.request), /FILE_VERSION_ONE/)
+  assert.equal(service.sources(agent.id).find(source => source.sourceId === 'context-care:document:file').registration, file)
+  const unchanged = service.token(agent); await service.reloadFiles(); assert.equal(service.token(agent), unchanged)
+  await writeFile(file, JSON.stringify(document, null, 2)); await service.reloadFiles(); assert.equal(service.token(agent), unchanged, 'Formatting preserves admission and running snapshots')
+  const changed = structuredClone(document); changed.revision = 2; changed.entries[0].revision = 2; changed.entries[0].template = 'FILE_VERSION_TWO'
+  await writeFile(file, JSON.stringify(changed)); await writeFile(second, '{')
+  await assert.rejects(service.reloadFiles(), /invalid-json/)
+  assert.match(service.sources(agent.id)[0].rules[0].actions[0].reason, /rule-file-load-failed/)
+  assert.match(service.sources(agent.id)[0].rules[0].definition.actions[0].template, /VERSION_ONE/)
+  assert.throws(() => service.assertCurrent(agent, plan), /changed-before-dispatch/)
+  await writeFile(second, JSON.stringify({ schemaVersion: 2, id: 'second', revision: 1, title: 'Second file' }))
+  await service.reloadFiles()
+  assert.match(JSON.stringify((await service.assemble(agent, request)).request), /FILE_VERSION_TWO/)
+  const illegal = structuredClone(changed); illegal.entries[0].template = 'WITHOUT_NEW_REVISION'
+  await writeFile(file, JSON.stringify(illegal))
+  await assert.rejects(service.reloadFiles(), /needs-new-revision/)
+  await writeFile(file, JSON.stringify(changed)); await service.reloadFiles()
+  assert.equal(service.sources(agent.id)[0].rules[0].actions[0].available, true)
+  await rm(file); await assert.rejects(service.reloadFiles(), /ENOENT/)
+  await writeFile(file, JSON.stringify(changed)); await service.reloadFiles()
+  await service.close()
+  assert.equal(ctx.contextCareControls.catalog(agent.id).some(source => source.sourceId === 'context-care:document:file'), false)
+})
+
+test('Workbench v2 management HTTP validates pages, projects external values, previews without writes and isolates cancellation', async t => {
+  const owned = await fixture(t, false); const ctx = await owned.open(); const service = ctx.contextCareWorkbench
+  ctx.llm.registerAdapter(['care-test'], new ScriptedAdapter())
+  const agent = await ctx.agentLoop.create('runtime-http', { provider: 'care-test', model: 'care-test' })
+  const other = await ctx.agentLoop.create('runtime-private', { provider: 'care-test', model: 'care-test' })
+  const path = `/context-care/rule-runtime?sessionId=${agent.id}`
+  const plainBase = `http://127.0.0.1:${ctx.webServer.port}`
+  assert.equal((await fetch(`${plainBase}${path}`)).status, 503)
+  const { base, cookie } = await controlCookie(ctx); const headers = { cookie, 'content-type': 'application/json' }
+  assert.equal((await fetch(`${base}${path}`)).status, 401)
+  const get = suffix => fetch(`${base}${path}${suffix ?? ''}`, { headers })
+  const post = (body, target = path, extra = {}) => fetch(`${base}${target}`, { method: 'POST', headers: { ...headers, ...extra }, body: JSON.stringify(body) })
+  for (const suffix of ['&limit=0', '&limit=101', '&offset=-1', '&offset=100001', '&status=invalid']) assert.equal((await get(suffix)).status, 400)
+  assert.equal((await post({ operation: 'preview' }, path, { origin: 'http://foreign.test' })).status, 403)
+  assert.equal((await post({ operation: 'edit', document: {} })).status, 400)
+  assert.equal((await post({ operation: 'import', document: {} })).status, 400)
+  const variable = { name: 'mood', scope: 'session', type: 'string', default: 'initial', description: 'External current value' }
+  const unregister = service.register({ plugin: 'memory-plugin', registrationId: 'memory/decl', sessionId: agent.id, documents: [{ schemaVersion: 2, id: 'foreign', revision: 1, title: 'Foreign declaration',
+    variables: [variable], partials: [{ name: 'greeting', revision: 1, template: 'Hello {{vars.mood}}' }],
+    rules: [{ schemaVersion: 2, id: 'entry:legal-prefix', revision: 1, title: 'Legal prefixed rule', on: ['request.assemble'],
+      select: { view: 'model', roles: ['user'], blockTypes: ['text'] }, match: { kind: 'always' }, actions: [{ id: 'notify', kind: 'notify', stage: 'request.assemble', enabledDefault: true, template: 'queued {{vars.mood}}' }] }],
+    entries: [{ id: 'constant', revision: 1, title: 'Constant entry', enabledDefault: true, template: '{{> greeting}}', activation: { kind: 'constant' },
+      select: { view: 'model', roles: ['user'], blockTypes: ['text'] }, target: { view: 'model', role: 'user', anchor: 'end', position: 'after' } }] }] })
+  t.after(unregister)
+  await service.store.automaticVariable(agent.id, variable, 'current', service.turnId(agent))
+  agent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Actual context' }] }), { surfaceOp: 'append' })
+  // Owned run records are data fixtures in the real durable store, not mock services.
+  const record = index => ({ id: `run-${index}`, sourceId: 'context-care:document:foreign', ruleId: 'rule', actionId: `action-${index}`, kind: 'notify', status: index % 2 ? 'failed' : 'queued', reason: index % 2 ? 'fixture-failure' : null,
+    delivery: 'not-delivered', createdAt: index + 1, updatedAt: index + 1, inputs: { index }, sourceSeqs: [0] })
+  await service.store.runtime(agent.id, runtime => runtime.runs.push(...Array.from({ length: 25 }, (_, index) => record(index))))
+  const response = await get('&limit=20'); assert.equal(response.status, 200)
+  assert.equal(response.headers.get('cache-control'), 'no-store')
+  const state = await response.json()
+  assert.equal(state.documents[0].registration, 'memory/decl'); assert.equal(state.documents[0].plugin, 'memory-plugin')
+  assert.equal(state.documents[0].variables[0].value, 'current'); assert.equal(state.documents[0].rules[0].id, 'entry:legal-prefix')
+  assert.equal(state.runs.length, 20); assert.equal(state.runs[0].id, 'run-24'); assert.equal(state.nextOffset, 20)
+  assert.deepEqual(state.counts, { queued: 13, failed: 12 })
+  const final = await (await get('&offset=20&limit=20')).json(); assert.equal(final.runs.length, 5); assert.equal(final.nextOffset, null)
+  const filtered = await (await get('&status=failed&search=action-1')).json()
+  assert.equal(filtered.total, 6); assert.ok(filtered.runs.every(run => run.status === 'failed'))
+  const foreign = await (await fetch(`${base}/context-care/rule-runtime?sessionId=${other.id}`, { headers })).json()
+  assert.equal(foreign.documents.length, 0); assert.equal(foreign.runs.length, 0)
+  const before = service.store.read(agent.id); const eventsBefore = agent.session.snapshotEvents()
+  const previewResponse = await post({ operation: 'preview' }); assert.equal(previewResponse.status, 200)
+  const planned = await previewResponse.json(); assert.equal(planned.snapshotId, state.snapshotId)
+  assert.match(JSON.stringify(planned.diff.after), /Hello current/); assert.equal(planned.scheduled.length, 1)
+  assert.equal(planned.injectionBudget.kind, 'estimate'); assert.ok(planned.injectionBudget.tokens > 0)
+  assert.equal(planned.injectionBudget.limit, 65536)
+  assert.equal(planned.impact.basis, 'public-request-json-estimate'); assert.equal(planned.impact.providerSerialization, 'unknown')
+  assert.equal(planned.impact.cacheHitTokens, null); assert.ok(planned.impact.changedSuffixBytes > 0)
+  assert.deepEqual(service.store.read(agent.id), before); assert.deepEqual(agent.session.snapshotEvents(), eventsBefore)
+  assert.equal((await post({ operation: 'cancel', runId: 'run-24' }, `/context-care/rule-runtime?sessionId=${other.id}`)).status, 404)
+  const cancelled = await post({ operation: 'cancel', runId: 'run-24' }); assert.equal(cancelled.status, 200)
+  assert.deepEqual(await cancelled.json(), { sessionId: agent.id, acknowledged: true })
+  const afterCancel = await (await get()).json(); assert.equal(afterCancel.runs[0].status, 'cancelled'); assert.notEqual(afterCancel.snapshotId, state.snapshotId)
+  await service.store.automaticVariable(agent.id, variable, 'updated', service.turnId(agent))
+  const afterVariable = await (await get()).json()
+  assert.notEqual(afterVariable.snapshotId, afterCancel.snapshotId); assert.equal(afterVariable.documents[0].variables[0].value, 'updated')
+  const controls = ctx.contextCareControls
+  await controls.patch(agent.id, { revision: controls.revision(agent.id), sourceId: 'context-care:document:foreign', ruleId: 'entry:legal-prefix', actionId: 'notify', enabled: false })
+  const afterControls = await (await get()).json(); assert.notEqual(afterControls.snapshotId, afterVariable.snapshotId)
+  const beforeContext = afterControls.snapshotId
+  agent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'New context' }] }), { surfaceOp: 'append' })
+  assert.notEqual((await (await get()).json()).snapshotId, beforeContext)
+  // A server-side response schema failure must not be blamed on request input.
+  const inspect = service.inspect
+  service.inspect = () => ({ ...inspect(agent), sessionId: '' })
+  assert.equal((await get()).status, 503); service.inspect = inspect
+  const previewMethod = service.preview
+  service.preview = async (...args) => {
+    const planned = await previewMethod(...args)
+    agent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Concurrent context' }] }), { surfaceOp: 'append' })
+    return planned
+  }
+  assert.equal((await post({ operation: 'preview' })).status, 409); service.preview = previewMethod
+  const row = [...ctx.loader.entries()].find(entry => entry.options.name === 'dsh-context-care/runtime')
+  await row.fiber.dispose(); assert.equal((await get()).status, 404)
+})
+
+test('Workbench v2 detects real streamed chunks across boundaries once and delivers a next-step notice without rewriting output', async t => {
+  const owned = await fixture(t, false); const ctx = await owned.open()
+  class DeltaAdapter extends CompletionAdapter {
+    calls = 0
+    async *stream() {
+      if (this.calls++ > 0) { yield* super.stream(); return }
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      for (const text of ['ARCH', 'IVE', ' more', ' more']) yield { type: 'text-delta', index: 0, text }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ARCHIVE more more' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+  }
+  ctx.llm.registerAdapter(['care-test'], new DeltaAdapter([{ blocks: [{ type: 'text', text: 'Ordinary next-step response.' }] }]))
+  const agent = await ctx.agentLoop.create('workbench-delta', { provider: 'care-test', model: 'care-test' })
+  const service = ctx.contextCareWorkbench
+  await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'delta', revision: 1, title: 'Delta',
+    rules: [{ schemaVersion: 2, sourceId: 'context-care:document:delta', id: 'archive', revision: 1, on: ['output.delta'],
+      select: { view: 'original', roles: ['assistant'], blockTypes: ['text'] }, match: { kind: 'regex', pattern: 'ARCHIVE.*' },
+      actions: [{ id: 'notice', kind: 'notify', stage: 'output.delta', enabledDefault: true, template: 'Observed archive marker.', dedupe: { mode: 'none' } }] }] } })
+  await completionTurn(ctx, agent)
+  const runs = service.store.read(agent.id).runtime.runs.filter(run => run.ruleId === 'archive')
+  assert.equal(runs.length, 1, JSON.stringify(runs)); assert.equal(runs[0].status, 'succeeded')
+  assert.equal(runs[0].delivery, 'delivered')
+  assert.match(runs[0].occurrenceId, /output.delta/)
+  const output = agent.session.snapshotEvents().find(event => event.type === 'assistant/message')
+  assert.equal(output.data.message.content[0].text, 'ARCHIVE more more')
+})
+
+test('Workbench v2 streamed abort stops provider consumption and dependent resume starts a fresh native turn', { timeout: 30000 }, async t => {
+  const owned = await fixture(t, false); const ctx = await owned.open()
+  class AbortAdapter extends CompletionAdapter {
+    calls = 0; afterMarker = false; cleaned = false
+    async *stream(options) {
+      if (this.calls++ > 0) { yield* super.stream(options); return }
+      try {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: 'HALT_STREAM' }
+        // The native turn signal must stop consumption before another chunk is requested.
+        this.afterMarker = true
+        yield { type: 'text-delta', index: 0, text: ' SHOULD_NOT_BE_READ' }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      } finally { this.cleaned = true }
+    }
+  }
+  const adapter = new AbortAdapter([{ blocks: [{ type: 'text', text: 'Resumed safely in a fresh attempt.' }] }])
+  ctx.llm.registerAdapter(['care-test'], adapter)
+  const agent = await ctx.agentLoop.create('workbench-delta-abort', { provider: 'care-test', model: 'care-test' })
+  const service = ctx.contextCareWorkbench
+  await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'delta-abort', revision: 1, title: 'Abort and resume',
+    rules: [{ schemaVersion: 2, id: 'halt', revision: 1, on: ['output.delta'],
+      select: { view: 'original', roles: ['assistant'], blockTypes: ['text'] }, match: { kind: 'regex', pattern: 'HALT_STREAM' },
+      actions: [{ id: 'abort', kind: 'abort', stage: 'output.delta', enabledDefault: true },
+        { id: 'resume', kind: 'resume', stage: 'output.delta', enabledDefault: true, dependsOn: ['abort'], template: 'Continue from the verified safe boundary.' }] }] } })
+  await completionTurn(ctx, agent)
+  const runs = service.store.read(agent.id).runtime.runs
+  assert.deepEqual(runs.map(run => [run.actionId, run.status, run.result?.value]), [['abort', 'succeeded', 'abort-requested'], ['resume', 'succeeded', 'resume-queued']], JSON.stringify(runs))
+  assert.equal(adapter.afterMarker, false); assert.equal(adapter.cleaned, true); assert.equal(adapter.calls, 2)
+  const events = agent.session.snapshotEvents()
+  assert.equal(events.filter(event => event.type === 'turn/start').length, 2)
+  assert.ok(events.some(event => event.type === 'user/message' && producedBy(event.data.source, 'dsh-context-care:workbench')))
+  assert.ok(events.some(event => event.type === 'assistant/message' && event.data.message.content.some(block => block.text === 'Resumed safely in a fresh attempt.')))
+})
+
+test('Workbench v2 streamed preferences start a fresh text boundary and auxiliary requests never trigger output rules', { timeout: 30000 }, async t => {
+  const owned = await fixture(t, false); const ctx = await owned.open(); const service = ctx.contextCareWorkbench
+  const agent = await ctx.agentLoop.create('workbench-delta-policy', { provider: 'care-test', model: 'care-test' })
+  const controls = ctx.contextCareControls
+  const change = enabled => controls.patch(agent.id, { revision: controls.revision(agent.id), sourceId: 'context-care:document:delta-policy', ruleId: 'marker', actionId: 'notice', enabled })
+  class PolicyAdapter extends CompletionAdapter {
+    async *stream(options) {
+      if (options.purpose === 'compaction') {
+        yield { type: 'text-delta', index: 0, text: 'ARCHIVE' }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ARCHIVE' } }
+        yield { type: 'finish', reason: { kind: 'stop' } }; return
+      }
+      // Off/on transitions are real durable preference ACKs between provider chunks.
+      yield { type: 'text-delta', index: 0, text: 'ARCH' }
+      await change(false)
+      yield { type: 'text-delta', index: 0, text: 'IVE' }
+      await change(true)
+      yield { type: 'text-delta', index: 0, text: 'IVE' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ARCHIVEIVE' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+  }
+  ctx.llm.registerAdapter(['care-test'], new PolicyAdapter([]))
+  await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'delta-policy', revision: 1, title: 'Preference boundary',
+    rules: [{ schemaVersion: 2, id: 'marker', revision: 1, on: ['output.delta'], select: { view: 'original', roles: ['assistant'], blockTypes: ['text'] },
+      match: { kind: 'regex', pattern: 'ARCHIVE' }, actions: [{ id: 'notice', kind: 'notify', stage: 'output.delta', enabledDefault: true, template: 'Marker observed.' }] }] } })
+  const prepared = await ctx.contextCareRequests.prepareCall({ provider: 'care-test', model: 'care-test' }, new AbortController().signal)
+  for await (const _chunk of prepared.stream({ ...prepared.config, sessionId: agent.id, purpose: 'compaction',
+    messages: [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Auxiliary summary.' }] })] })) { /* consume the actual middleware */ }
+  assert.equal(service.store.read(agent.id).runtime.runs.length, 0)
+  await completionTurn(ctx, agent)
+  assert.equal(service.store.read(agent.id).runtime.runs.length, 0, 'Closed-interval text cannot finish a marker after reopening')
+  assert.equal(agent.session.snapshotEvents().find(event => event.type === 'assistant/message').data.message.content[0].text, 'ARCHIVEIVE')
+})
+
+test('Workbench v2 streamed text budget stops and cleans the real request only while delta detection is enabled', { timeout: 30000 }, async t => {
+  const owned = await fixture(t, false); const ctx = await owned.open(); const service = ctx.contextCareWorkbench
+  class BudgetAdapter extends CompletionAdapter {
+    cleaned = 0; afterLimit = 0
+    async *stream() {
+      try {
+        yield { type: 'text-delta', index: 0, text: 'x'.repeat(32768) }
+        yield { type: 'text-delta', index: 0, text: 'x' }
+        this.afterLimit++
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: 'x'.repeat(32769) } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      } finally { this.cleaned++ }
+    }
+  }
+  const adapter = new BudgetAdapter([]); ctx.llm.registerAdapter(['care-test'], adapter)
+  const agent = await ctx.agentLoop.create('workbench-delta-budget', { provider: 'care-test', model: 'care-test' })
+  await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'delta-budget', revision: 1, title: 'Bounded stream',
+    rules: [{ schemaVersion: 2, id: 'missing', revision: 1, on: ['output.delta'], select: { view: 'original', roles: ['assistant'], blockTypes: ['text'] },
+      match: { kind: 'regex', pattern: 'NEVER_MATCH' }, actions: [{ id: 'notice', kind: 'notify', stage: 'output.delta', enabledDefault: true, template: 'Unused.' }] }] } })
+  await completionTurn(ctx, agent)
+  assert.equal(adapter.cleaned, 1); assert.equal(adapter.afterLimit, 0)
+  assert.match(JSON.stringify(agent.session.snapshotEvents().filter(event => ['assistant/attempt', 'turn/end'].includes(event.type))), /delta-text-budget-exceeded/)
+  const controls = ctx.contextCareControls
+  await controls.patch(agent.id, { revision: controls.revision(agent.id), sourceId: 'context-care:document:delta-budget', ruleId: 'missing', actionId: 'notice', enabled: false })
+  await completionTurn(ctx, agent)
+  assert.equal(adapter.cleaned, 2); assert.equal(adapter.afterLimit, 1)
+  const committed = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message' && !event.data.interrupted)
+  assert.equal(committed.at(-1).data.message.content[0].text.length, 32769)
+  assert.equal(service.store.read(agent.id).runtime.runs.length, 0)
+})
+
+test('Workbench v2 display compares pure copies and re-renders history with current preferences without consuming actions', async t => {
+  const owned = await fixture(t, false); const ctx = await owned.open(); const service = ctx.contextCareWorkbench
+  ctx.llm.registerAdapter(['care-test'], new ScriptedAdapter())
+  const agent = await ctx.agentLoop.create('display-copy', { provider: 'care-test', model: 'care-test' })
+  const event = agent.session.append('assistant/message', { turn: 1, step: 1, stream: [], usage: { inputTokens: 1, outputTokens: 1 },
+    message: createMessage({ role: 'assistant', source: { kind: 'model', provider: 'care-test', model: 'care-test' },
+      content: [{ type: 'text', text: 'ARCHIVE' }, { type: 'text', text: 'REMOVE' }] }) }, { surfaceOp: 'append' })
+  const action = (id, kind, extra = {}) => ({ id, kind, stage: 'display.render', enabledDefault: true, ...extra })
+  const rule = (id, pattern, actions, extra = {}) => ({ schemaVersion: 2, id, revision: 1, on: ['display.render'],
+    select: { view: 'display', roles: ['assistant'], blockTypes: ['text'] }, match: { kind: 'regex', pattern }, actions, ...extra })
+  await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'display', revision: 1, title: 'Display', rules: [
+    rule('high', '^ARCHIVE$', [action('replace', 'replace', { template: 'CLEAN' }), action('caption', 'inject', { dependsOn: ['replace'], template: 'Copy of {{captures.[0]}}', target: { view: 'display', anchor: 'matched', position: 'after' } })], { priority: 20, exclusiveGroup: 'caption' }),
+    rule('low', '^ARCHIVE$', [action('replace', 'replace', { template: 'FALLBACK' })], { priority: 10, exclusiveGroup: 'caption' }),
+    rule('hide', '^REMOVE$', [action('filter', 'filter')]),
+  ] } })
+  const before = structuredClone(agent.session.snapshotEvents()); const runtime = service.store.read(agent.id)
+  const request = { messages: agent.session.deriveMessages().filter(message => message.role !== 'system') }
+  const originalPlan = await service.preview(agent, request)
+  const copy = await service.display(agent, event.seq)
+  assert.equal(copy.changed, true)
+  assert.deepEqual(copy.before.map(block => block.text), ['ARCHIVE', 'REMOVE'])
+  assert.deepEqual(copy.after.map(block => block.text), ['CLEAN', 'Copy of ARCHIVE'])
+  assert.equal(copy.after[1].seq, undefined, 'Display insertions cannot impersonate committed evidence')
+  assert.deepEqual(await service.display(agent, event.seq), copy, 'Repeated renders cannot consume cooldown or lifetime')
+  assert.deepEqual(service.store.read(agent.id), runtime)
+  assert.deepEqual(agent.session.snapshotEvents(), before)
+  assert.deepEqual((await service.preview(agent, request)).request, originalPlan.request)
+  const controls = ctx.contextCareControls
+  await controls.patch(agent.id, { revision: controls.revision(agent.id), sourceId: 'context-care:document:display', ruleId: 'high', paused: true })
+  assert.deepEqual((await service.display(agent, event.seq)).after.map(block => block.text), ['FALLBACK'])
+  assert.deepEqual(agent.session.snapshotEvents(), before)
+  const plain = `http://127.0.0.1:${ctx.webServer.port}/context-care/display?sessionId=${agent.id}&seq=${event.seq}`
+  assert.equal((await fetch(plain)).status, 503)
+  const { base, cookie } = await controlCookie(ctx); const url = `${base}/context-care/display?sessionId=${agent.id}&seq=${event.seq}`
+  assert.equal((await fetch(url)).status, 401)
+  const headers = { cookie }
+  assert.equal((await fetch(url, { method: 'POST', headers })).status, 405)
+  assert.equal((await fetch(`${base}/context-care/display?sessionId=${agent.id}`, { headers })).status, 400)
+  assert.equal((await fetch(`${base}/context-care/display?sessionId=${agent.id}&seq=-1`, { headers })).status, 400)
+  assert.equal((await fetch(`${base}/context-care/display?sessionId=missing&seq=0`, { headers })).status, 404)
+  assert.equal((await fetch(url, { headers: { ...headers, origin: 'http://foreign.test' } })).status, 403)
+  const response = await fetch(url, { headers }); assert.equal(response.status, 200); assert.equal(response.headers.get('cache-control'), 'no-store')
+  assert.deepEqual((await response.json()).projections[0].after.map(block => block.text), ['FALLBACK'])
+  assert.deepEqual(agent.session.snapshotEvents(), before)
+})
+
+test('Workbench v2 display refuses signed text patches and cancels matching without a state write', async t => {
+  const owned = await fixture(t, false); const ctx = await owned.open(); const service = ctx.contextCareWorkbench
+  ctx.llm.registerAdapter(['care-test'], new ScriptedAdapter())
+  const agent = await ctx.agentLoop.create('display-signed', { provider: 'care-test', model: 'care-test' })
+  const event = agent.session.append('assistant/message', { turn: 1, step: 1, stream: [], usage: { inputTokens: 1, outputTokens: 1 },
+    message: createMessage({ role: 'assistant', source: { kind: 'model', provider: 'care-test', model: 'care-test' }, content: [{ type: 'reasoning', text: 'SEALED', signature: 'sig' }] }) }, { surfaceOp: 'append' })
+  await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'signed', revision: 1, title: 'Signed', rules: [
+    { schemaVersion: 2, id: 'patch', revision: 1, on: ['display.render'], select: { view: 'original', roles: ['assistant'], blockTypes: ['reasoning'] },
+      match: { kind: 'regex', pattern: 'SEALED' }, actions: [{ id: 'replace', kind: 'replace', stage: 'display.render', enabledDefault: true, template: 'OPEN' }] },
+  ] } })
+  const before = structuredClone(agent.session.snapshotEvents()); const runtime = service.store.read(agent.id)
+  await assert.rejects(service.display(agent, event.seq), /block cannot be text-patched/)
+  const controller = new AbortController(); controller.abort(new Error('test-display-abort'))
+  await assert.rejects(service.display(agent, event.seq, controller.signal), /test-display-abort/)
+  assert.deepEqual(agent.session.snapshotEvents(), before); assert.deepEqual(service.store.read(agent.id), runtime)
+})
+
+test('Workbench v2 display budgets the complete response and refuses a configuration race before publication', async t => {
+  const owned = await fixture(t, false); const ctx = await owned.open(); const service = ctx.contextCareWorkbench
+  ctx.llm.registerAdapter(['care-test'], new ScriptedAdapter())
+  const agent = await ctx.agentLoop.create('display-budget-race', { provider: 'care-test', model: 'care-test' })
+  const event = agent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'KEEP' }] }), { surfaceOp: 'append' })
+  await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'budget', revision: 1, title: 'Budget', rules: [
+    { schemaVersion: 2, id: 'patch', revision: 1, on: ['display.render'], select: { view: 'display', roles: ['user'], blockTypes: ['text'] },
+      match: { kind: 'regex', pattern: 'KEEP' }, actions: [{ id: 'replace', kind: 'replace', stage: 'display.render', enabledDefault: true, template: 'COPY' }] },
+  ] } })
+  const projection = await service.display(agent, event.seq)
+  const fullBytes = Buffer.byteLength(JSON.stringify({ projections: [projection] }))
+  const { seq, changed, ...inner } = projection
+  assert.ok(Buffer.byteLength(JSON.stringify(inner)) < fullBytes - 1)
+  const before = structuredClone(agent.session.snapshotEvents())
+  await service.close()
+  const { openWorkbenchHost } = await pluginModule('workbench-host.js')
+  const bounded = await openWorkbenchHost(ctx, ctx.contextCareControls, { maxRequestBytes: fullBytes - 1 })
+  t.after(() => bounded.close())
+  await assert.rejects(bounded.display(agent, event.seq), /display-result-budget-exceeded/)
+  assert.deepEqual(agent.session.snapshotEvents(), before)
+  await bounded.close()
+  // Race validation has its own sufficient budget and a warm worker. A synchronous
+  // template registration changes the captured token before any worker reply can publish;
+  // this does not depend on cold startup taking longer than a durable preference ACK.
+  const racing = await openWorkbenchHost(ctx, ctx.contextCareControls)
+  t.after(() => racing.close())
+  assert.equal((await racing.display(agent, event.seq)).changed, true)
+  const pending = assert.rejects(racing.display(agent, event.seq), /workbench-changed-during-display/)
+  const disposePartial = racing.registerPartial({ name: 'display-race-partial', revision: 1, template: 'RACE' })
+  await pending
+  disposePartial()
+  const controls = ctx.contextCareControls
+  await controls.patch(agent.id, { revision: controls.revision(agent.id), sourceId: 'context-care:document:budget', ruleId: 'patch', paused: true })
+  assert.equal((await racing.display(agent, event.seq)).changed, false)
+  assert.deepEqual(agent.session.snapshotEvents(), before)
+})
+
+test('Workbench v2 external detector finalizes a real stream once and exposes owned availability after disposal', { timeout: 30000 }, async t => {
+  const owned = await fixture(t, false); const ctx = await owned.open(); const service = ctx.contextCareWorkbench
+  class DetectorAdapter extends CompletionAdapter {
+    calls = 0
+    async *stream(options) {
+      if (this.calls++ > 0) { yield* super.stream(options); return }
+      yield { type: 'text-delta', index: 0, text: 'ARCH' }
+      yield { type: 'text-delta', index: 0, text: 'IVE' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ARCHIVE' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+  }
+  ctx.llm.registerAdapter(['care-test'], new DetectorAdapter([{ blocks: [{ type: 'text', text: 'Next step.' }] }]))
+  const agent = await ctx.agentLoop.create('external-detector', { provider: 'care-test', model: 'care-test' })
+  const dispose = service.registerDetector({ plugin: 'test-plugin', ref: 'test:final', revision: 1, sessionId: agent.id, on: ['output.delta'],
+    paramsSchema: {}, stateSchema: { type: 'string' }, resultSchema: {}, callbacks: {
+      initialize() { return '' },
+      feed({ state, delta }) { return { state: state + delta, result: { ok: false, ranges: [], captures: {} } } },
+      finalize({ state }) { return { state, result: { ok: state === 'ARCHIVE', ranges: [], captures: { text: state } } } },
+      reset() { return '' },
+    } })
+  await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'detector', revision: 1, title: 'External detector', rules: [
+    { schemaVersion: 2, id: 'final', revision: 1, on: ['output.delta'], select: { view: 'original', roles: ['assistant'], blockTypes: ['text'] },
+      match: { kind: 'detector', ref: 'test:final', revision: 1 }, actions: [{ id: 'notice', kind: 'notify', stage: 'output.delta', enabledDefault: true, template: 'Finalized {{captures.text}}.' }] },
+  ] } })
+  await completionTurn(ctx, agent)
+  const runs = service.store.read(agent.id).runtime.runs.filter(run => run.ruleId === 'final')
+  assert.equal(runs.length, 1); assert.equal(runs[0].status, 'succeeded')
+  assert.ok(agent.session.snapshotEvents().some(event => event.type === 'user/message' && JSON.stringify(event.data).includes('Finalized ARCHIVE.')))
+  assert.ok(agent.session.snapshotEvents().some(event => event.type === 'assistant/message' && event.data.message.content[0].text === 'ARCHIVE'))
+  assert.equal(service.sources(agent.id).find(source => source.sourceId === 'context-care:document:detector').rules[0].actions[0].available, true)
+  await dispose()
+  const missing = service.sources(agent.id).find(source => source.sourceId === 'context-care:document:detector').rules[0].actions[0]
+  assert.equal(missing.available, false); assert.equal(missing.reason, 'detector-unavailable')
+})
+
+test('Workbench v2 builtin incremental detector excludes closed-interval text in the real Host pipeline', { timeout: 30000 }, async t => {
+  const owned = await fixture(t, false); const ctx = await owned.open(); const service = ctx.contextCareWorkbench
+  const agent = await ctx.agentLoop.create('builtin-detector-policy', { provider: 'care-test', model: 'care-test' })
+  const controls = ctx.contextCareControls
+  const change = enabled => controls.patch(agent.id, { revision: controls.revision(agent.id), sourceId: 'context-care:document:builtin-policy', ruleId: 'marker', actionId: 'notice', enabled })
+  class DetectorPolicyAdapter extends CompletionAdapter {
+    async *stream() {
+      yield { type: 'text-delta', index: 0, text: 'ARCH' }
+      await change(false)
+      yield { type: 'text-delta', index: 0, text: 'IVE' }
+      await change(true)
+      yield { type: 'text-delta', index: 0, text: 'IVE' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ARCHIVEIVE' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+  }
+  ctx.llm.registerAdapter(['care-test'], new DetectorPolicyAdapter([]))
+  await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'builtin-policy', revision: 1, title: 'Builtin policy', rules: [
+    { schemaVersion: 2, id: 'marker', revision: 1, on: ['output.delta'], select: { view: 'original', roles: ['assistant'], blockTypes: ['text'] },
+      match: { kind: 'detector', ref: 'context-care:marker', revision: 1, params: { token: 'ARCHIVE' } },
+      actions: [{ id: 'notice', kind: 'notify', stage: 'output.delta', enabledDefault: true, template: 'Marker observed.' }] },
+  ] } })
+  await completionTurn(ctx, agent)
+  assert.equal(service.store.read(agent.id).runtime.runs.length, 0)
+  assert.equal(agent.session.snapshotEvents().find(event => event.type === 'assistant/message').data.message.content[0].text, 'ARCHIVEIVE')
 })

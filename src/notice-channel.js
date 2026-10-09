@@ -45,7 +45,7 @@ export function sharedNoticeChannel(options) {
  * @param {(message: string) => void} [options.warn] 记一条警告。
  * @returns {{register: Function, collect: Function}}
  */
-export function createNoticeChannel({ now = () => Date.now(), warn = () => {} } = {}) {
+export function createNoticeChannel({ now = () => Date.now(), warn = message => console.warn(message) } = {}) {
   /** 源:名字 → 函数。 */
   const sources = new Map()
   /** 「会话 + 通知 id」→ 上次注入的时间。 */
@@ -57,15 +57,19 @@ export function createNoticeChannel({ now = () => Date.now(), warn = () => {} } 
    * @param {(context: object) => (object[]|undefined|null|Promise<object[]|undefined|null>)} source
    *        拿到当前上下文,返回这一轮该注入的通知。
    */
-  function register(name, source) {
+  function register(name, source, registrant = {}) {
     if (typeof name !== 'string' || name.length === 0) {
       throw new Error('context-care: 通知源要有名字')
     }
     if (typeof source !== 'function') {
       throw new Error(`context-care: 通知源 "${name}" 要是一个函数`)
     }
-    sources.set(name, source)
-    return () => sources.delete(name)
+    if (sources.has(name)) throw new Error(`context-care: duplicate notice source ${name}`)
+    const entry = { source, descriptor: { sourceId: `contextNotices:${name}`, plugin: registrant.plugin ?? null,
+      registration: registrant.registration ?? name, executor: 'dsh-context-care',
+      rules: [{ id: 'notify', title: name, description: 'control_notice_evidence', actions: [{ id: 'notice', defaultEnabled: true, available: true, requires: [] }] }] } }
+    sources.set(name, entry)
+    return () => { if (sources.get(name) === entry) sources.delete(name) }
   }
 
   /** 一条通知的形状是不是说得清楚。说不清楚就抛错,不猜。 */
@@ -79,6 +83,10 @@ export function createNoticeChannel({ now = () => Date.now(), warn = () => {} } 
     if (typeof notice.text !== 'string' || notice.text.length === 0) {
       throw new Error(`context-care: 通知源 "${name}" 产出的通知 "${notice.id}" 没有 text`)
     }
+    if (notice.sourceSeqs !== undefined && (!Array.isArray(notice.sourceSeqs) || !notice.sourceSeqs.length
+      || notice.sourceSeqs.some(seq => !Number.isSafeInteger(seq) || seq < 0))) {
+      throw new Error(`context-care: 通知源 "${name}" 的 sourceSeqs 必须是非空事件序号数组`)
+    }
   }
 
   /**
@@ -90,17 +98,23 @@ export function createNoticeChannel({ now = () => Date.now(), warn = () => {} } 
    * @param {object} context `{ agentId, userText, assistantText, signal }`。
    * @returns {Promise<object[]>} 该注入的通知(已带上 source 字段)。
    */
-  async function collect(context) {
+  async function collect(context, { enabled = () => true, epoch = () => 'initial', sinceSeq = () => -1 } = {}) {
     const key = String(context.agentId)
-    const out = []
-    for (const [name, source] of sources) {
+    const proposals = []
+    for (const [name, entry] of sources) {
+      if (!enabled(entry.descriptor.sourceId, 'notify')) continue
+      const sourceId = entry.descriptor.sourceId
+      const capturedEpoch = epoch(sourceId, 'notify')
+      const boundary = sinceSeq(sourceId, 'notify')
       let produced
       try {
-        produced = await source({ ...context, agentId: key })
+        produced = await entry.source({ ...context, agentId: key, controlEpoch: capturedEpoch, sinceSeq: boundary })
       } catch (error) {
         warn(`context-care: 通知源 "${name}" 出错: ${error instanceof Error ? error.message : String(error)}`)
         continue
       }
+      if (context.signal?.aborted) context.signal.throwIfAborted()
+      if (sources.get(name) !== entry || !enabled(sourceId, 'notify') || epoch(sourceId, 'notify') !== capturedEpoch) continue
       if (produced === undefined || produced === null) continue
       if (!Array.isArray(produced)) {
         warn(`context-care: 通知源 "${name}" 返回的不是数组`)
@@ -108,7 +122,15 @@ export function createNoticeChannel({ now = () => Date.now(), warn = () => {} } 
       }
       for (const notice of produced) {
         check(notice, name)
-        const stamp = key + '\u0000' + notice.id
+        // A provider's pending queue may predate re-enabling. Only its original
+        // event evidence can prove freshness; do not stamp old content with the
+        // current request's sequence. Legacy sources remain usable before edits.
+        if (boundary >= 0 && notice.sourceSeqs === undefined) {
+          warn(`context-care: 通知源 "${name}" 缺少 sourceSeqs，切换后的通知已阻止`)
+          continue
+        }
+        if (notice.sourceSeqs !== undefined && !notice.sourceSeqs.every(seq => seq > boundary)) continue
+        const stamp = JSON.stringify([key, name, notice.id])
         const since = pushed.get(stamp)
         if (since !== undefined) {
           // oncePerSurface 默认开:同一条通知在一个会话里只注入一次。
@@ -117,12 +139,22 @@ export function createNoticeChannel({ now = () => Date.now(), warn = () => {} } 
           const cooldown = Number(notice.cooldownMinutes ?? 0)
           if (cooldown > 0 && now() - since < cooldown * 60000) continue
         }
-        pushed.set(stamp, now())
-        out.push({ ...notice, source: name })
+        proposals.push({ notice, name, entry, sourceId, capturedEpoch, stamp })
       }
+    }
+    // Later sources can await while an earlier source is disabled or unloaded.
+    // Commit deduplication only after rechecking every returned proposal.
+    const out = []
+    for (const { notice, name, entry, sourceId, capturedEpoch, stamp } of proposals) {
+      if (sources.get(name) !== entry || !enabled(sourceId, 'notify') || epoch(sourceId, 'notify') !== capturedEpoch) continue
+      const since = pushed.get(stamp)
+      if (since !== undefined && (notice.oncePerSurface !== false
+        || (Number(notice.cooldownMinutes ?? 0) > 0 && now() - since < Number(notice.cooldownMinutes) * 60000))) continue
+      pushed.set(stamp, now())
+      out.push({ ...notice, source: name })
     }
     return out
   }
 
-  return { register, collect }
+  return { register, collect, catalog: () => [...sources.values()].map(entry => entry.descriptor) }
 }

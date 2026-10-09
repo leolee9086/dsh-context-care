@@ -31,7 +31,7 @@ export const RULES_SERVICE = 'memoryNoticeRules'
  * @param {(record: object, where: {sessionId: string|undefined}) => void} [options.onHit] 每条命中的回调。
  * @returns {{collect: (input: {agent: object, messages: object[]}) => object[]}}
  */
-export function installNoticeRules(ctx, { plugin, onHit = () => {} }) {
+export function installNoticeRules(ctx, { plugin, onHit = () => {}, rulesFor }) {
   /** 每个会话一个引擎:冷却和 surface 去重都是按会话算的。 */
   const engines = new Map()
   /**
@@ -57,7 +57,7 @@ export function installNoticeRules(ctx, { plugin, onHit = () => {} }) {
       onRecord(record) {
         // The same stable identity is persisted and attached to the resulting prompt; never join by time.
         const captured = { ...record, evaluationId: randomUUID(), ...runEvidence,
-          rule: ctx.get(RULES_SERVICE)?.find(rule => rule.id === record.ruleId) }
+          rule: (rulesFor?.(agent.session?.id, runEvidence) ?? ctx.get(RULES_SERVICE))?.find(rule => rule.id === record.ruleId) }
         onHit(captured, { sessionId: agent.session?.id })
         hitSink?.push(captured)
         if (record.outcome === 'applied') return
@@ -74,7 +74,7 @@ export function installNoticeRules(ctx, { plugin, onHit = () => {} }) {
     })
     // 规则来源:索引插件声明的提示规则。取不到就是没有规则,不是错误。
     engine.provideRules(RULES_SERVICE, () => {
-      const rules = ctx.get(RULES_SERVICE)
+      const rules = rulesFor?.(agent.session?.id, runEvidence) ?? ctx.get(RULES_SERVICE)
       return rules === undefined || rules === null ? [] : rules
     })
     engines.set(key, engine)
@@ -120,7 +120,7 @@ export function installNoticeRules(ctx, { plugin, onHit = () => {} }) {
     const events = agent.session?.snapshotEvents?.() ?? []
     const userEvent = message.id === undefined ? undefined : events.findLast(event => event.type === 'user/message' && event.data.id === message.id)
     const assistantEvent = events.findLast(event => event.type === 'assistant/message')
-    runEvidence = { inputMessageId: message.id, userText: text, facts, sourceSeqs: [userEvent?.seq, assistantEvent?.seq].filter(seq => seq !== undefined) }
+    runEvidence = { inputMessageId: message.id, userText: text, facts, userSeq: userEvent?.seq, assistantSeq: assistantEvent?.seq, sourceSeqs: [userEvent?.seq, assistantEvent?.seq].filter(seq => seq !== undefined) }
     hitSink = hits
     sink = collected
     try {

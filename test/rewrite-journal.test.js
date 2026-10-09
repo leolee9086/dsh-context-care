@@ -60,6 +60,18 @@ test('Host-owned rewrite records survive reconstruction without an optional inde
   assert.deepEqual(await create().list({ sessionId: 'two' }), [])
   const failed = createRewriteJournal({ store: () => undefined, durable: { put: async () => { throw new Error('Host journal failure') }, list: durable.list } })
   await assert.rejects(failed.record({ sessionId: 'one', hash: 'fail' }), /Host journal failure/)
+  assert.doesNotMatch(JSON.stringify(await failed.list({ sessionId: 'one' })), /"fail"/)
+})
+
+test('pending rewrite ACKs are hidden and backend rows are constrained to the requested session', async () => {
+  let acknowledge
+  const mixed = [{ sessionId: 'one', hash: 'stored' }, { sessionId: 'two', hash: 'private' }]
+  const journal = createRewriteJournal({ store: () => undefined, durable: {
+    put: () => new Promise(resolve => { acknowledge = resolve }), list: async () => mixed } })
+  const writing = journal.record({ sessionId: 'one', hash: 'pending' })
+  assert.deepEqual((await journal.list({ sessionId: 'one' })).map(row => row.hash), ['stored'])
+  acknowledge(); await writing
+  assert.deepEqual(new Set((await journal.list({ sessionId: 'one' })).map(row => row.hash)), new Set(['stored', 'pending']))
 })
 
 test('进程内记录:写进去能读出来', async () => {
@@ -76,7 +88,7 @@ test('进程内记录:写进去能读出来', async () => {
   assert.equal(rows[0].removedLines, 12)
 })
 
-test('不带 sessionId 时列出所有会话 —— 客户端不知道自己在哪个会话里', async () => {
+test('内部诊断支持列出全部会话，指定 sessionId 时约束结果', async () => {
   const journal = createRewriteJournal({ store: () => undefined })
   await journal.record({ sessionId: 's1', hash: 'h1', pattern: 'p', removedLines: 1, charsBefore: 2, charsAfter: 1 })
   await journal.record({ sessionId: 's2', hash: 'h2', pattern: 'p', removedLines: 1, charsBefore: 2, charsAfter: 1 })

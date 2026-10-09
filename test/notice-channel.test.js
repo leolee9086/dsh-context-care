@@ -66,6 +66,48 @@ test('取消注册后不再被问', async () => {
   assert.deepEqual(await channel.collect({ agentId: 'a1' }), [])
 })
 
+test('re-enabling rejects stale or unproven queued notices without consuming their delivery', async () => {
+  const warnings = []
+  const channel = createNoticeChannel({ warn: text => warnings.push(text) })
+  let evidence
+  channel.register('queued', context => {
+    assert.equal(context.sinceSeq, 42)
+    return [{ id: 'same', text: 'pending', ...(evidence === undefined ? {} : { sourceSeqs: evidence }) }]
+  })
+  const policy = { sinceSeq: () => 42, epoch: () => 'reopened' }
+  assert.deepEqual(await channel.collect({ agentId: 'a' }, policy), [])
+  assert.match(warnings[0], /sourceSeqs/)
+  evidence = [40]
+  assert.deepEqual(await channel.collect({ agentId: 'a' }, policy), [])
+  evidence = [43]
+  assert.equal((await channel.collect({ agentId: 'a' }, policy)).length, 1)
+  evidence = [-1]
+  await assert.rejects(channel.collect({ agentId: 'a' }, policy), /事件序号/)
+})
+
+test('an awaited notification cannot cross an off-on transition', async () => {
+  let finish
+  let epoch = 0
+  const channel = createNoticeChannel()
+  channel.register('pending', () => new Promise(resolve => { finish = resolve }))
+  const pending = channel.collect({ agentId: 'a' }, { epoch: () => epoch })
+  epoch += 2
+  finish([{ id: 'same', text: 'old', sourceSeqs: [1] }])
+  assert.deepEqual(await pending, [])
+})
+
+test('later source waits cannot commit an earlier source after its control edit', async () => {
+  let epoch = 0
+  let edit = true
+  const channel = createNoticeChannel()
+  channel.register('first', () => [{ id: 'same', text: 'evidence' }])
+  channel.register('later', async () => { await Promise.resolve(); if (edit) epoch++; return [] })
+  const policy = { epoch: () => epoch }
+  assert.deepEqual(await channel.collect({ agentId: 'a' }, policy), [])
+  edit = false
+  assert.equal((await channel.collect({ agentId: 'a' }, policy)).length, 1)
+})
+
 test('注册参数不对就抛错', () => {
   const channel = createNoticeChannel()
   assert.throws(() => channel.register('', () => []), /要有名字/)

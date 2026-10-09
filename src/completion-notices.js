@@ -34,13 +34,26 @@ export async function openCompletionNotices(storageDomain) {
       text: `上一份输出使用了“${value.label}”等完成表述。它是输出措辞的观察结果。请依据实际请求、交付内容和验证记录核对完成范围；若仍有已授权工作，继续完成。`,
     }))
   }
+  const reservations = new Map()
   async function reserve(session, segments, callId) {
     for (const segment of segments.filter(value => value.completionKey !== undefined)) {
       const old = values.get(segment.completionKey)
+      const previous = reservations.get(callId) ?? new Map()
+      previous.set(segment.completionKey, structuredClone(old))
+      reservations.set(callId, previous)
       await save(segment.completionKey, { ...old, deliveries: old.deliveries + 1, status: 'delivery-unknown', callId })
     }
   }
+  async function rollback(session, callId) {
+    // Restore only a known unstarted handoff, never a crash's unknown delivery.
+    for (const [key, previous] of reservations.get(callId) ?? []) {
+      const current = values.get(key)
+      if (current?.callId === callId && current.status === 'delivery-unknown') await save(key, previous)
+    }
+    reservations.delete(callId)
+  }
   async function dispatched(session, segments, callId, request) {
+    reservations.delete(callId)
     if ((request.purpose ?? 'conversation') !== 'conversation') return
     const sent = new Set(segments.map(segment => segment.completionKey))
     for (const [key, old] of values) {
@@ -51,7 +64,7 @@ export async function openCompletionNotices(storageDomain) {
     }
   }
   const processed = handle.table('processed')
-  return { publish, collect, reserve, dispatched,
+  return { publish, collect, reserve, rollback, dispatched,
     seen: (session, seq) => (processed.get(requestFingerprint(String(session.id))) ?? -1) >= seq,
     async mark(session, seq) { await processed.put(requestFingerprint(String(session.id)), seq) },
     list: () => [...values.values()], close: () => handle.close() }

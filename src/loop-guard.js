@@ -47,12 +47,13 @@ import { describeHit, detectDegradation } from './loop-patterns.js'
  * @param {object} session 当前会话
  * @returns {string|undefined} 最近的助手文本；没有助手消息时返回 undefined
  */
-function latestAssistantText(session) {
+function latestAssistantText(session, afterSeq = -1) {
   const nodes = session?.surface?.nodes
   if (!Array.isArray(nodes)) return undefined
   for (let index = nodes.length - 1; index >= 0; index--) {
     const event = session.eventAt(nodes[index])
     if (event?.type !== 'assistant/message') continue
+    if (event.seq <= afterSeq) return undefined
     const content = event.data?.message?.content
     if (!Array.isArray(content)) return undefined
     const parts = []
@@ -75,10 +76,10 @@ function latestAssistantText(session) {
  * @param {object} session 当前会话
  * @returns {object|undefined} 命中信息（形状见 loop-patterns.js）；没命中返回 undefined
  */
-export function detectLoop(session) {
-  const text = latestAssistantText(session)
+export function detectLoop(session, only, afterSeq = -1) {
+  const text = latestAssistantText(session, afterSeq)
   if (text === undefined) return undefined
-  return detectDegradation(text)
+  return detectDegradation(text, only)
 }
 
 /**

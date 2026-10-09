@@ -9,7 +9,7 @@ if (!process.env.DSH_TEST_CHECKOUT) throw new Error('test:integration:source req
 const checkout = resolve(process.env.DSH_TEST_CHECKOUT)
 const hostRequire = createRequire(pathToFileURL(resolve(checkout, 'package.json')))
 const hook = pathToFileURL(hostRequire.resolve('tsx/esm')).href
-const child = spawnSync(process.execPath, ['--import', hook, '--test', ...process.argv.slice(2), 'test/integration.test.js'], {
+const child = spawnSync(process.execPath, ['--import', hook, '--import', pathToFileURL(resolve('test/shared-packages.js')).href, '--test', ...process.argv.slice(2), 'test/integration.test.js'], {
   stdio: 'inherit',
   env: { ...process.env, DSH_TEST_SOURCE: '1', TSX_TSCONFIG_PATH: resolve(checkout, 'tsconfig.base.json') },
 })

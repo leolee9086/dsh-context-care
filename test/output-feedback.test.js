@@ -40,6 +40,24 @@ test('duplicate committed seq does not retrigger, cooldown and healthy rearm nee
   await feedback.close()
 })
 
+test('known unstarted feedback handoff restores the prior allowance without undoing delivery', async () => {
+  const feedback = await openOutputFeedback(storage())
+  await feedback.observe(session, event(2), route, rules)
+  const segments = feedback.collect(session, route, rules)
+  await feedback.reserve(session, segments, 'older-unknown')
+  const previous = structuredClone(feedback.list())
+  await feedback.reserve(session, segments, 'known-unstarted')
+  await feedback.rollback(session, 'known-unstarted')
+  await feedback.rollback(session, 'known-unstarted')
+  assert.deepEqual(feedback.list(), previous)
+  await feedback.reserve(session, segments, 'sent')
+  await feedback.dispatched(session, segments, 'sent', route)
+  await feedback.rollback(session, 'sent')
+  assert.equal(feedback.list()[0].lastDelivery.status, 'dispatched')
+  assert.equal(feedback.list()[0].pending, undefined)
+  await feedback.close()
+})
+
 test('cold restore retains pending and bounds replay of a reserved but unknown delivery', async () => {
   const store = storage()
   let feedback = await openOutputFeedback(store)

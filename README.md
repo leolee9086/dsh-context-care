@@ -6,13 +6,13 @@
 
 参考 S-forge MAGI 的指标曲线和 Codex 的上下文生命周期设计，以独立 Cordis 插件接入，不修改 Harness、S-forge 或 Codex 源码。本文档以中文为主。
 
-> 修复版本：`v0.7.5`，面向官方 DSH `0.2.0-rc.2`。安装 GitHub 版本前确认对应标签已经发布；本地修复包可使用下文的 tgz 装法。源码组合验收使用显式外部 Host 的 `pnpm test:integration:source`，不依赖残留构建产物；桌面产物验收由 Electron 从其封装目录只读加载官方模块。
+> 发行版本：`v0.8.0`，面向官方 DSH `0.2.0-rc.2`。安装 GitHub 版本前确认对应标签已经发布；本地修复包可使用下文的 tgz 装法。源码组合验收使用显式外部 Host 的 `pnpm test:integration:source`，不依赖残留构建产物；桌面产物验收由 Electron 从其封装目录只读加载官方模块。
 
 ## 指标与行为
 
 疲劳度采用 `min(100, 100 × (上下文估算量 / 策略预算)^1.5)`；唤醒值采用 `min(100, 100 × sqrt(保留历史估算量 / (模型容量 / 3)))`。默认按 30、60、85 分段；界面显示 0–100% 数值（最多一位小数）和等级，模型正文仍只报告等级，不显示剩余 token 倒计时。疲劳度四段依次为绿、蓝、橙、红；唤醒值依次为橙、蓝、青绿、绿。未校准使用灰色。容量取最近记录请求的真实路由模型；尚无容量时显示“未校准”。疲劳度以完整请求压力为基础，唤醒值以保留消息量为基础，因此工具定义和系统提示不会被当成丰富的历史经验。状态与自动维护使用插件自己的输入计价：公开 `tokenMeter.estimateMessage` 提供固定文本估算，保留 surface、工具定义和本轮待进入的输入共用冻结的计价依据，输出计费量不参与下一次输入预算。插件请求日志从符合条件且 header 匹配的成功 prompt 样本校准文本、schema 和 framing；没有样本时文本倍率为 1。图片视觉价格不重复乘倍率，有效大倍率不截断。旧 `providerUsageRatio` 配置只保留迁移提示。此版本使用官方 0.2.0-rc.2 已有接口，不要求新增 `measureInput` / `priceMessages` 方法或修改宿主。
 
-`context_status` 查询状态。`context_rest` 默认接收 1000–10000 个 UTF-16 字符的续接笔记，排入持久化收件箱；当前工具批次完成后，在下一次请求准备边界执行一次压缩。笔记、近期历史、工具调用与结果配对均保留。它读取预设 compaction provider 的公开摘要配置，在插件内执行摘要事务；自定义提供方未声明 LLM 摘要配置时仍调用其执行接口。摘要保留原记录并让任务继续。容量未知时，主动请求仍选择历史前缀，按显式 `retainTokens` 保留尾部；未设置时保留最近完整单元，再交给摘要路由或自定义 provider 处理实际输入。自动维护在可算出压力阈值时启动。摘要指令分别记录原始明确要求、执行者的实现选择、推测和完成状态，并依据最新纠正更新来源归属。
+`context_status` 查询状态。`context_rest` 提示建议续接笔记为 1000–8000 个 UTF-16 字符，内部默认保留 10000 字符的宽限；笔记排入持久化收件箱；当前工具批次完成后，在下一次请求准备边界执行一次压缩。笔记、近期历史、工具调用与结果配对均保留。它读取预设 compaction provider 的公开摘要配置，在插件内执行摘要事务；自定义提供方未声明 LLM 摘要配置时仍调用其执行接口。摘要保留原记录并让任务继续。容量未知时，主动请求仍选择历史前缀，按显式 `retainTokens` 保留尾部；未设置时保留最近完整单元，再交给摘要路由或自定义 provider 处理实际输入。自动维护在可算出压力阈值时启动。摘要指令分别记录原始明确要求、执行者的实现选择、推测和完成状态，并依据最新纠正更新来源归属。
 
 组合中 basic 设置 `auto: false`，保留摘要执行服务；context-care 按会话分别维护迟滞状态，选择普通维护动作。工具结果 pruner 按会话在边界现取，裁剪完成后重测，再决定摘要。普通主动休息在同一边界已被自动维护改写时不重复执行；显式深度休息仍执行自己的交接与找回路径；旧摘要和状态不计为 fresh，系统提示也不能让状态前缀通过 fresh 门槛。维护从 `budgetRatio × 有效容量` 的软阈值开始，直到输入严格低于释放目标或动作次数耗尽。通知通道、提示规则与循环提醒先收集，再参与维护计价；预计状态消息也纳入输入。一次维护先等待上一轮请求结算的存储 ACK，再在入口捕获文本倍率、图片定价与文件 handle 投影，裁剪后、摘要后和深度替换前后均用这份价格重算。成功用量或 adapter 定价在维护期间改变，只影响后续操作；图片视觉价格保持独立，不乘文本倍率。最终请求检查使用 ready 捕获的实际图片定价，明确未提供图片投影时保留固定估算。
 
@@ -137,11 +137,109 @@ N 是有效正文语句数，K 是命中语句数，H 是合并重叠后的命�
 已经在 `src/index.js` 里写好，但整段注释着 —— 需要先验证 `agent/request` waterfall 返回的
 `reasoningEffort` 会不会被后面的解析覆盖，而且改档位会让请求头快照变化、缓存复用断一次。
 
+## 会话规则控制（未发布开发版）
+
+输入框工具栏的“打开会话规则控制”进入当前会话的右侧栏。规则可以搜索、暂停、恢复声明默认值；同一条规则的提醒、中止、续接、清理、自动维护等动作分别控制。续接依赖同次成功中止，关闭提醒不会自动关闭保护，关闭保护也不会自动关闭提醒。暂停保留动作选择，恢复默认值只清除该条规则的覆盖。
+
+每条规则显示注册插件、注册入口和执行插件。注册插件是来源显式声明的身份，**不是平台认证**；旧 `memoryNoticeRules` 或未声明身份的通知源显示“未声明（旧接口）”，不会从服务名推断注册插件。请求改写执行者缺失、依赖关闭、来源卸载及存储失败都有可用性说明。
+
+偏好按 `(sessionId, sourceId, ruleId, actionId)` 隔离，持久化由唯一 `/requests` Host 的 `context_care_controls` 域负责。界面只在持久写入 ACK 后显示“已保存”，串行 CAS 拒绝旧 revision。保存失败保留旧已确认值并暂停该会话的自动执行；错误保留到成功重试，后台轮询不会悄悄清掉保存错误。右栏不直接操作 Harness 或预设。
+
+保存影响后续执行，历史消息、已派发请求及已经开始的外部操作保留。请求在投递预留 ACK 后、启动准备好的流之前复查偏好与来源生命周期；此期间切换会明确返回 `CONTROL_CHANGED` 并记录“未派发”。明确未启动的通知预留会归还本次投递次数；崩溃后的未知投递仍保留原有重放上限。禁用的动作不接收新检测证据，也不消耗该期间命中的冷却或去重；重开不回放关闭期间的旧证据。状态报告和附带建议独立控制，关闭报告后界面的请求边界数值采样继续更新，主动 `context_status` 和维护工具的实际结果仍可读取。硬输入预算校验继续约束请求。
+
+公开 `contextCareControls` 服务允许其它插件贡献目录，注册和卸载应绑定 Cordis effect：
+
+```js
+// 本插件的 inject 声明需包含 contextCareControls。
+ctx.effect(() => ctx.contextCareControls.register({
+  sourceId: 'example-memory:rules',
+  plugin: 'example-memory',
+  registration: 'memory/rules',
+  executor: 'dsh-context-care',
+  rules: [{
+    id: 'remember', title: '保存已验证记忆',
+    actions: [{ id: 'notify', defaultEnabled: true }],
+    definition: {
+      order: 10, placement: ['user'], when: { said: '/MEMORIZE/' },
+      action: { kind: 'notify', by: 'context-care', say: '保存已经验证的记忆，再继续工作。' },
+      cooldownMinutes: 10, oncePerSurface: true,
+    },
+  }],
+}))
+```
+
+规则和动作 ID 必须稳定；同来源 ID、重复动作、缺失或循环依赖及交给本执行器的非法引擎定义会明确拒绝。`definition.action.by: 'context-care'` 的动作 `kind` 必须对应目录动作 ID；声明目录本身不会创建其它插件的执行器。自行执行动作的插件应在实际操作前调用 `controls.enabled(sessionId, sourceId, ruleId, actionId)`，并在异步等待后复查。可用性由动作 `available/reason` 声明。
+
+`contextNotices.register(name, source, { plugin, registration })` 贡献一条通知源规则。拉取上下文含 `controlEpoch`、`sinceSeq`；源应返回通知的原始 `sourceSeqs` 事件依据。发生控制编辑后，只有全部依据序号晚于边界的通知可投递。旧接口未提供 `sourceSeqs` 时，切换后的通知被阻止并记录警告，面板也说明此限制；不能把当前请求序号补给旧积压内容。等待中的回调跨过开关切换或来源卸载时，结果被丢弃且不记投递账。
+
+同源 GET/PATCH `/context-care/rules?sessionId=...` 使用公开 Connection 鉴权；未挂载 Connection 返回 503，未鉴权返回 401/403。PATCH 接受 revision 与一个动作切换、暂停或 reset；拒绝非法 Origin、媒体类型、超限正文和坏 JSON，响应 no-store。客户端在发布响应给视图之前校验嵌套规则与动作，坏响应和写失败明确显示。
+
+v2 规则由 AI 编写为声明，或由外部插件通过 `contextCareWorkbench.register` 贡献文档；本插件负责校验、匹配、执行、会话开关与来源状态。DSH 内不提供规则 JSON、文档、变量或模板的编辑器，代码编辑能力由独立插件承担。后端已支持严格 Handlebars 模板、类型化 JSON 输入绑定、条目注入、请求副本替换与过滤，以及通过正式工具策略和审批执行的输出触发程序。预览使用同一规划逻辑且不写入文档、动作队列或会话日志；实际派发记录请求差异并保留提交原文。来源按贡献对象和会话范围显示。原内部 `contextCareWorkbench` 名称保留，它不代表界面工作台。
+
+`output.delta` 在真实请求流的可等待 chunk 边界检测，仅使用当前流块的正文或思考文本；不扫描完整历史、不处理未完成工具参数。流身份包含会话、请求、attempt 和块索引，没有提交序号的流不伪造 `seq/path`。支持实时取消、依赖取消成功的续接和 next-step 提醒；同一规则在一个流块内只触发一次，即使匹配范围随文本增长或声明 `dedupe: none`。开关、来源或变量版本改变会重置未触发文本，结束和取消清理流状态。requests Host 配置 `maxDeltaChars`（默认 32768，每块 UTF-16 字符）和 `maxDeltaBlocks`（默认 16）限制保留量；超限明确报错并停止该请求，不静默裁切后改变正则锚点。没有开启的流式动作时不保留流文本。
+
+`display.render` 在独立“显示副本”节点中默认展开原文与变换后对照，支持已提交的 user/system/assistant 消息和工具结果里的文本、思考块替换、过滤及文本注入。原生消息、模型输入和会话日志保持原样；规则文本按普通文本转义，不执行 HTML。只读 GET `/context-care/display?sessionId=...&seq=...` 要求连接鉴权、返回 no-store，客户端卸载或切换消息会取消读取。历史副本采用当前开关、变量和声明，重复渲染不消耗自动动作的冷却、去重或寿命。匹配窗口止于该事件，原文与 display 块具有相同来源编号；所有动作对同一基线规划，不逐动作重新匹配。字符预算沿用 `maxInjectedChars`，副本结果受 `maxRequestBytes` 限制，正则仍由可终止 worker 执行。注入锚点局限当前消息（start/end/matched/当前块编号，depth 只接受 0 或 1）；不支持 model 选择、跨块写入、结构化工具参数改写及跨轮/会话显示寿命，目录明确标为不可用。签名或不透明思考块不允许替换、过滤；非文本块在对照卡标明类型，完整媒体继续由原生消息显示。
+
+完成输出与工具结果匹配保留截至当前事件的历史窗口。触发序号独立于窗口来源序号：只匹配到旧内容不会触发，也不会占据独占组；重新启用允许新输出使用历史作为上下文，但不回放开关之前的输出。规则版本与新增条目在文档保存事务中记录提交时已有的事件序号，未变更的版本保留原起始序号；外部注册取注册时的会话尾部。Host 重新打开与会话恢复、fork 后从已有尾部开始观察；基线扫描只读取当前会话视图，视图替换不会删除原始事件或重置轮数。来源注册和捕获的规划状态仍在执行前复查，异步匹配使用真实轮次取消信号。
+
+规则的 `actions[].template` 与注入条目的 `template` 直接声明提醒或上下文文本。模板可读取 `vars`、`captures`、`facts`、`block`、`tool` 与 `session.id` / `session.turnId`；有依赖的动作还可读取 `results`。例如以下文本可以直接写入模板字段：
+
+```handlebars
+请核对 {{vars.taskName}}：刚才匹配到「{{captures.[0]}}」。
+{{#if (eq vars.mode "continue")}}核对后继续工作。{{else}}先说明当前状态。{{/if}}
+{{#each vars.checks as |check|}}{{@index}}：{{check}}
+{{/each}}
+```
+
+`captures.[0]` 是正则完整匹配，`captures.[1]` 是第一个捕获组；命名组可用 `captures.groupName`。所用变量须在文档的 `variables` 中声明。命名模板通过 `partials: [{ name, revision, template }]` 声明，再以 `{{> reminder}}` 引用。提供 `if`、`unless`、`each`、`with`、`eq`、`json`、`regexEscape`；使用 `{{json vars.value}}` 输出 JSON，`regexEscape` 用于转义正则字面量。程序输入保持 JSON 类型，例如 `inputs: { count: { bind: 'vars.count' }, text: { bind: 'captures.0' } }`；数值不会先变成文本，也不会把捕获文字拼成 shell 指令。
+
+模板缺字段会明确报错；插值只做一次，捕获中的 `{{...}}` 保持字面文本。提示文本保留 `<`、`&` 和显式换行。快照仅接受 JSON 数据，拒绝函数、取值器、类实例和危险原型键。默认限制模板 16,384 字符、输出 65,536 字符、循环累计 256 次、命名模板深度 8 层；各动作还可声明更小的 `maxChars`。禁用动态 partial、partial block、decorator、`lookup`、`log` 和缺失 helper 的直接调用。自定义 helper 只由可信插件代码注册，文件声明不能注册 JavaScript；这些约束不等同于隔离不可信插件代码。
+
+model 条目的 `lifetime` 决定已激活文本参与哪些请求。首次成功派发持久化渲染后的文本；后续请求重新生成请求副本并重新计量，不向历史反复追加同一段文字，也不再次解释文本中的 `{{...}}`。
+
+| `lifetime` | 有效请求 |
+| --- | --- |
+| `request`（默认） | 当前请求；下一请求重新检测并渲染 |
+| `turn` | 激活所在真实轮次的全部请求，包括工具后的模型步骤 |
+| `turns` | 从激活轮起的固定 N 轮；必须且仅能附带整数 `lifetimeTurns`（1–10000） |
+| `until-inactive` | 严格激活条件仍成立的请求 |
+| `session` | 当前会话的后续请求 |
+
+`stickyTurns` 从最后一次严格条件命中的成功派发轮次起延长有效期；只靠已有片段持有的请求不会延长 sticky。轮数读取持久 `turn/start.data.turn`，压缩后的消息数量不参与计数；没有轮次事件的种子视图记为 0。寿命到期且条件仍成立时，可以重新激活。片段文本在有效期内固定，变量修改会影响新激活和严格条件检测。条目关闭、token/cache 排除或预览不会消费新激活，也不会提前删除已保存的片段；重新开启时按当前轮次和条件检查有效期。
+
+注入锚点按当前模型视图解析；旧块锚点被替换、移除，或深度超过当前消息范围时，整条注入跳过并记录 `injection-anchor-unavailable` / `injection-depth-anchor-unavailable`，依赖动作也跳过，文本不会自动移到末尾。无效角色、签名块改写与非法声明仍明确拒绝。
+
+`cooldownMs` 是新激活之间的最小毫秒间隔，已有片段的逐请求复用不受它拦截。`activationCooldownMs` 是确认失活后的重新激活冷却，两者默认 0。冷却中的条目保留明确跳过原因并让出互斥组。激活与失活都经过同一派发预约和持久 ACK；失败、回滚和交付不确定不会伪造成功，旧状态或旧轮次的规划不能覆盖新的片段。重开恢复同一会话的片段；fork 按新会话隔离，不继承父会话的条目运行状态。display 条目只支持 `request`，不接受持久激活、sticky 或失活冷却。
+
+升级 v2 开发声明时注意：条目 `turn` / `session` 表示每请求复用的片段；普通 `rules[].actions[].target.lifetime` 仍限制成功动作每轮或每会话执行一次。旧开发版本只保存 `lastStarted` 的运行记录不会被当作已渲染片段，新版本从下一次合格激活开始保存文本。
+
+请求装配的字符预算是硬错误：单动作 `maxChars` 或 requests Host 的总 `maxInjectedChars` 超限，会明确拒绝规划并保留错误，不静默跳过或截断文本。`maxInjectedTokens`（默认 65536）采用公开 token-meter 的整条注入消息估计，包含角色开销；估计超限按规则优先级跳过整个注入，并记录 `injection-token-budget-exceeded`，依赖动作不进入执行队列，被跳过的注入不消耗寿命、去重或冷却。级联使用同一份剩余额度。无计量时预览标明 unknown，有 token 上限的注入拒绝以未知值入账。最终公开请求 JSON 的完整 UTF-8 字节量受 `maxRequestBytes` 约束，包含调用配置、系统说明、工具定义与全部消息；字节超限同样明确报错。
+
+可选 `maxCacheChangedBytes` 限制完整请求 JSON 从第一个变动字节起的最大后缀字节量。规划对比相同 provider/model 下的原始请求与最终请求，包含所有级联变换；超限按优先级排除整个变换动作，重算依赖并记录 `request-cache-change-budget-exceeded`。若不可撤销的已有前缀变动仍超限，规划明确失败。请求副本的注入消息 ID 按稳定来源、动作、锚点与文本生成，相同规划不制造随机 ID 差异。预览显示估算注入 token、上限、未变动字节前缀和变动后缀，完整字节明细按需展开；**这些是公开请求 JSON 的估算，实际供应商序列化和 token 缓存命中数未知**，不将字节比值表述为缓存命中率。
+
+经鉴权的 `/context-care/workbench` 保留查看、无副作用预览与任务取消诊断，拒绝 HTTP 文档编辑、变量编辑和导入；纯导入转换仍供插件代码调用。`compact` 动作通过正式 `context_rest` 工具链执行，真实摘要完成和同轮继续已有联测；排定维护与摘要实际完成分别记录。
+
+现有“会话规则”侧栏包含四个视图：规则开关、声明与模板、运行任务、请求预览。声明视图显示文档版本、贡献插件与注册入口、规则及动作的阶段/依赖/模板/输入、条目、变量当前值、命名模板和执行者；完整声明与较大 JSON 只在主动展开时挂载。任务按状态和来源/规则/动作/原因检索，最新任务优先，每页 20 条，并显示请求预留或交付不确定的记录。取消成功响应表示请求已持久化，不证明正在执行的副作用被撤回。
+
+管理接口为同源、鉴权且 no-store 的 GET/POST `/context-care/rule-runtime?sessionId=...`。GET 接受 `offset`（0–100000）、`limit`（1–100）、`status` 和最长 1024 字符的 `search`；POST 仅接受 `{ operation: 'preview' }` 或 `{ operation: 'cancel', runId }`。客户端校验嵌套响应和会话身份，读错误与取消错误分别保留。预览只由按钮触发，比较规则、变量、开关、执行可用性、运行状态与会话事件尾部的指纹；规划中状态变化返回 409，后续刷新发现变化会清除旧预览并提示重算。五秒刷新在页面隐藏时暂停读取，切换视图/会话或卸载取消旧请求。
+
+规则声明也可通过 requests Host 行的 `config.ruleFiles` 指定绝对 JSON 文件路径，例如 `ruleFiles: ['D:/rules/session-rules.json']`。每个文件是一份 schemaVersion 2 文档，按 1 MiB 上限读取 UTF-8 JSON；不扫描目录、不导入代码。启动和请求装配/执行边界重新校验全部文件后原子发布。文档修改须增加文档版本，变更的规则、条目、partial 也须增加自身版本；纯格式变化保持原始触发边界。读取或校验失败保留上一版声明供查看并暂停 v2 自动动作，修复后恢复。
+
+外部可信插件通过 `ctx.contextCareWorkbench.registerDetector(specification)` 贡献检测器，返回的异步 disposer 应绑定到插件卸载。注册包含 `plugin/ref/revision/on`、可选 `sessionId`、`paramsSchema/stateSchema/resultSchema` 和四个自包含同步回调：`initialize({ params, block, snapshot })` 返回 JSON state；`feed({ state, delta, params, block, snapshot })` 与 `finalize(...)` 返回 `{ state, result }`；`reset({ state, params, reason })` 返回清理后的 JSON state。规则使用 `match: { kind: 'detector', ref, revision, params }`。result 的 `ok`、`ranges`、`captures` 与 `facts` 接入统一证据校验；区间是当前原文的 UTF-16 半开坐标。无文本区间的事实检测可返回空 ranges。回调不能依赖闭包、模块导入或 Promise；跨帧状态必须显式放在 JSON state。
+
+检测器与原生正则在可终止 worker 内运行，共用优先级与互斥决议。每次操作重建回调 VM realm；成功 worker 可复用，但全局变量不作为持久状态，schema 编译使用最多 16 项 LRU。state 按会话、请求、attempt、块、规则版本和 view 隔离，开关或版本改变、结束、取消与卸载会清理。每个 feed 的坏证据立即拒绝，不能由正常 finalize 掩盖；取消、超时和失败实际 terminate 并等待 worker。默认回调超时 50ms（可配 1–100ms）、单 state 256KiB、单 result 64KiB，另有聚合保留上限。**Node VM 不是防御恶意插件代码的安全沙箱；此接口只接受可信插件代码。**
+
+独立纯入口 `dsh-context-care/declarations` 导出 `validateDocument(document)` 与 `importDeclarations(input)`；转换不挂载服务、不写状态、不执行动作。可用 `const { document, report } = importDeclarations(source)` 检查原生 schemaVersion 2、world-info 或 Tavern 正则数据，再由插件代码通过 `contextCareWorkbench.register({ plugin, registrationId, sessionId, documents: [document] })` 贡献。保留 disposer 并在卸载时调用；文档 ID 和注册 ID 应在贡献范围内唯一。HTTP 管理入口不接受导入或文档编辑。
+
+Tavern 正则转换对照 [SillyTavern release 正则引擎](https://github.com/SillyTavern/SillyTavern/blob/release/public/scripts/extensions/regex/engine.js)：支持 user/assistant/reasoning placement 1/2/6、明确 display 或 prompt 副本、g/i/m/s/u、数字与命名捕获及 `{{match}}`。g 转为独立 occurrence，最多 1000 次，每次捕获属于自身；Unicode 零宽扫描按码点前进。所有规则对不可变基线规划，重叠区间按优先级决议，**不等同于酒馆逐条修改前一条结果或历史编辑**。宏执行、非空 trimStrings、不等价 depth、未支持 placement 与历史原地修改明确拒绝；`runOnEdit` 和副本模式的差异、每个已出现字段与未知字段逐项报告。有效邻居保留，拒绝项不会伪装成成功转换。world-info 同样逐字段报告：支持常驻、主/次关键词及 ANY/ALL/NOT 逻辑、大小写/词边界、扫描窗口、稳定优先级和显式有限级联；概率、原酒馆计时与不等价注入位置不猜语义。
+
+验证使用真实 Connection/Loader/storage-domain、官方客户端 Slot/Sidebar/Conversation 装配与独立包安装。真实供应商网络和模型效果不属于这些测试的证据；现场 GUI 安装版本按现有部署保留，发行开发树不会自动替换现场。
+
 ## 完成表述的持久观察
 
 宿主补丁还挂载 `dsh-context-care/completion`，独占 `context_care_completion` 存储域；会话预设不打开这个共享域。它只读取 `agent/assistant-stream` 的可见正文，排除思考、工具调用、代码围栏、引用和否定表述。块末尾与已到达的正文增量不会重复计入。同一会话的写入串行，按会话与生产者来源隔离 cooldown；attempt 是一次观察的 occurrence，不是新的来源。
 
-发现完成表述后，先等待 pending 的持久写入确认，再根据真实日志结算。正常 `assistant/message` 可进入 cooldown；`assistant/attempt`、中断消息和 abandoned 流恢复 pending，不算成功完成。结算说明的是输出观察的生命周期，不证明实际任务完成。默认 cooldown 为 300000 毫秒，可在该 Host 行的 `config.cooldownMs` 中修改。成功观察另写 `context_care_completion_notices` 出箱，提醒核对实际交付与验证范围，等待下一次自然对话请求。`notifications: false` 可关闭投递，`maxObservedChars` 默认 65536，超限正文不测量；`maxDeliveries` 默认 2，限制 delivery-unknown 重投。只扫描权威 block-end 与最终提交正文，不积累无限增量或每片重扫全文。正常正文的实时发布不等待存储 ACK。
+发现完成表述后，先等待 pending 的持久写入确认，再根据真实日志结算。正常 `assistant/message` 可进入 cooldown；`assistant/attempt`、中断消息和 abandoned 流恢复 pending，不算成功完成。结算说明的是输出观察的生命周期，不证明实际任务完成。默认 cooldown 为 300000 毫秒，可在该 Host 行的 `config.cooldownMs` 中修改。成功观察另写 `context_care_completion_notices` 出箱，提醒核对实际交付与验证范围，等待下一次自然对话请求。`notifications: false` 将完成提醒动作设为默认关闭，关闭期间不建立观察、不消耗新冷却；右栏可以覆盖这个默认值，`maxObservedChars` 默认 65536，超限正文不测量；`maxDeliveries` 默认 2，限制 delivery-unknown 重投。只扫描权威 block-end 与最终提交正文，不积累无限增量或每片重扫全文。正常正文的实时发布不等待存储 ACK。
 
 真实 storage-domain 服务是该 Host 行的必需依赖。打开或写入失败保留原始错误，不降级成内存写入；`contextCareCompletion.flush(sessionId?)` 等待观察写入并报告原始失败，单凭 Agent idle 不代表观察器已持久化。卸载观察器先移除监听、等待排队写入，再关闭 handle。状态由真实 JSON backend 保存并在重新打开后读取；恢复后首次自然请求用请求日志的实际派发与成功输出 seq 核对漏处理的完成通知，并记录已处理水位；结算后的 occurrence 标识补齐未写出的通知，其它 occurrence 继续遵守冷却。一次自然派发只使用最新符合路由的通知，其余旧通知被 superseded。过长会话/来源编码使用 SHA-256 存储键，保留原先可落盘的短键；已有 pending 保留，已消费 seq 不重复投递，失败记录不能被后续成功 attempt 改写。
 
@@ -151,26 +249,36 @@ N 是有效正文语句数，K 是命中语句数，H 是合并重叠后的命�
 
 提示明确区分指标与事实：它们不证明记忆丢失、幻觉或能力下降，不构成任务时限；继续工作，在任务边界自主选择压缩。唤醒值低时按需查阅摘要和文件，不编造缺失事实，也不为提升指标填充消息。此设计减少上下文焦虑的诱因，不能保证某个模型绝不产生此类输出；尚未进行真实 DeepSeek 模型的对照效果评估。
 
-UI 显示最近一次请求准备时的状态，与模型读取的同一条持久化消息对应。`contextCareNumeric` 投影支持会话重放；旧记录没有数值时显示“未校准”，不会根据等级反推百分比，下一次新版本采样后显示实值。它不是逐 token 更新的心理健康监测。
+UI 优先显示当前进程最近一次请求边界的独立数值采样，关闭模型状态报告后仍更新。`contextCareNumeric` 的持久消息投影用于会话重放和没有新采样时的历史回退；旧记录没有数值时显示“未校准”，不会根据等级反推百分比，下一次新版本采样后显示实值。界面数值无需每次都向模型追加消息，也不是逐 token 更新的心理健康监测。
 
 ## 安装
 
-### 安装本地修复包
+运行环境需要 Node.js 22.19.0 或更新版本。v0.8.0 的生产依赖固定到已发布的 rule-engine v0.3.0 与 better-session-query v0.1.1 GitHub 标签，安装需能访问 GitHub 和已有公开依赖的 registry；两依赖的 npm 上传返回 404，因此不提供这两个新版本的 registry 安装承诺。独立 tgz 和 GitHub 标签安装均使用这条真实依赖链。pnpm 12 默认开启 `blockExoticSubdeps`，会拒绝包内 GitHub 依赖；需要明确允许这两个固定标签的来源。独立验收在新项目的 `pnpm-workspace.yaml` 设置：
+
+```yaml
+blockExoticSubdeps: false
+```
+
+然后运行 `pnpm add /absolute/path/to/dsh-context-care-0.8.0.tgz`。此部署的 pnpm 12.6.0 未应用命令行同名配置，因此这里给出已实际验证的 workspace 配置。
+
+同样的政策若由 DSH 的安装后端启用，应通过其正式包管理配置处理。CLI/插件管理界面遵守部署自己的安装政策，不能承诺默认 pnpm 12 下直接安装成功；本发行的独立验收显式使用上述配置。
+
+### 安装发行包
 
 在插件管理界面的包来源填写 tgz 的完整路径，或使用官方 CLI（将路径替换为包的实际位置）：
 
 ```sh
-dsh plugin --profile desktop add "/absolute/path/to/dsh-context-care-0.7.5.tgz"
+dsh plugin --profile desktop add "/absolute/path/to/dsh-context-care-0.8.0.tgz"
 ```
 
 Host 代码更新后需要重启 DSH，再刷新页面；重新启用条目不会清除旧 Node 模块缓存。安装和重启通过官方管理流程完成。
 
 ### 从 GitHub 安装
 
-确认 `v0.7.5` 标签已发布后可使用：
+确认 `v0.8.0` 标签已发布后可使用：
 
 ```sh
-dsh plugin --profile web add "github:leolee9086/dsh-context-care#v0.7.5"
+dsh plugin --profile web add "github:leolee9086/dsh-context-care#v0.8.0"
 ```
 
 构建产物 `lib/` 已入库，装完即可用 —— 不需要额外构建，也不需要手工打包上传 tgz。带上标签安装，版本不会跟着分支漂。

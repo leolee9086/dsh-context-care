@@ -1,10 +1,14 @@
 import React, { useEffect } from 'react'
 import { CareStyles } from './care-styles.js'
 import { careCopy } from './care-copy.js'
+import { controlCopy } from './control-copy.js'
 
 export const dictionaries = {
   zh: {
-    ...careCopy.zh,
+    ...careCopy.zh, ...controlCopy.zh,
+    displayTitle: '显示副本', displayOriginal: '原文', displayTransformed: '变换后', displayEmpty: '副本中已过滤所有块',
+    displayExplanation: '按当前规则生成的对照副本；会话原文与模型输入保持原样。',
+    displayNontext: '此非文本块保留在原生消息中。', displayUnavailable: '显示副本暂不可用', displayError: '错误详情',
     fatigue: '疲劳度', wakefulness: '唤醒值', unknown: '未校准', low: '低', normal: '正常',
     elevated: '较高', high: '高', 'very-high': '很高',
     waiting: '等待首次状态', description: '最近一次请求准备时的负荷与保留信息量估算；不是记忆可靠性判断，也不是任务时限。',
@@ -46,7 +50,10 @@ export const dictionaries = {
     'rule_fresh-summary': '新内容摘要', 'rule_checkpoint-merge': '检查点合并', 'rule_basic-prefix': '压力前缀兜底',
   },
   en: {
-    ...careCopy.en,
+    ...careCopy.en, ...controlCopy.en,
+    displayTitle: 'Display copy', displayOriginal: 'Original', displayTransformed: 'Transformed', displayEmpty: 'All blocks filtered from the copy',
+    displayExplanation: 'Comparison generated with current rules; session originals and model input remain unchanged.',
+    displayNontext: 'This non-text block remains in the native message.', displayUnavailable: 'Display copy unavailable', displayError: 'Error details',
     fatigue: 'Fatigue', wakefulness: 'Wakefulness', unknown: 'Uncalibrated', low: 'Low', normal: 'Normal',
     elevated: 'Elevated', high: 'High', 'very-high': 'Very high',
     waiting: 'Awaiting first sample', description: 'Load and retained-information estimates at the latest request preparation; not a memory-quality diagnosis or a task deadline.',
@@ -105,11 +112,13 @@ function indicator(label, value, level, kind, t) {
 }
 
 /** Pure display receives the framework-owned projection hook. */
-export function ContextCareStatus({ useProjection, useCareActions, useRewriteHealth, watchActions, sessionId, t }) {
-  const state = useProjection('contextCareNumeric')
+export function ContextCareStatus({ useProjection, useCareActions, useRewriteHealth, watchActions, watchRewrites, sessionId, t }) {
+  const projection = useProjection('contextCareNumeric')
   const actions = useCareActions(table => table.get(`${sessionId}:0`))
-  const health = useRewriteHealth(value => value)
+  const state = actions?.currentState ?? projection
+  const health = useRewriteHealth(table => table.get(sessionId))
   useEffect(() => watchActions(sessionId, 0), [sessionId, watchActions])
+  useEffect(() => watchRewrites(sessionId), [sessionId, watchRewrites])
   const error = actions?.status === 'error' ? actions.error : health?.status === 'error' ? health.error : undefined
   return React.createElement('div', {
     'data-context-care': '', role: 'status', title: t('description'),

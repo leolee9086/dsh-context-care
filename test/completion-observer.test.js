@@ -61,6 +61,28 @@ test('settlement from an older occurrence cannot consume a newer pending observa
   assert.equal((await observer.settle(current)).state.completedOccurrenceId, 'current')
 })
 
+test('policy changes while reading prevent pending and cooldown writes', async () => {
+  const rows = new Map()
+  let release
+  let active = true
+  const observer = createCompletionObserver({
+    load: key => new Promise(resolve => { release = () => resolve(rows.get(key)) }),
+    save: async (key, value) => rows.set(key, value),
+  })
+  const input = { sessionId: 's', sourceId: 'assistant', occurrenceId: 'one', text: 'DONE' }
+  const observing = observer.observe(input, () => active)
+  active = false; release()
+  assert.equal((await observing).status, 'disabled')
+  assert.equal(rows.size, 0)
+  active = true
+  const fresh = observer.observe(input, () => active)
+  release(); await fresh
+  const settling = observer.settle(input, () => active)
+  active = false; release()
+  assert.equal((await settling).status, 'disabled')
+  assert.equal(rows.get(completionStateKey('s', 'assistant')).cooldownUntil, 0)
+})
+
 test('recovery clears an interrupted pending observation', async () => {
   const store = new Map()
   const observer = createCompletionObserver({ load: async key => store.get(key), save: async (key, value) => store.set(key, value) })

@@ -66,6 +66,10 @@ async function mounted(options = {}) {
   ctx.provide('agents', { get: () => agent })
   ctx.provide('sessionProjections', { register: () => () => {} })
   ctx.provide('sessions', {
+    // This unit fixture mounts no session registry; real session admission and restore
+    // are verified by integration.test.js with the Host's own sessions service.
+    list: () => [],
+    get: () => undefined,
     messageProjections: [],
     registerMessageProjection(projection) {
       this.messageProjections.push(projection)
@@ -207,6 +211,26 @@ test('tool queues a bounded note; next boundary compacts once and preserves deci
   assert.equal(decision.startsRequestSeries, true)
   assert.match(decision.messages.at(-1).content[0].text, /较早的历史已摘要/)
   assert.equal(decision.messages[0], h.inbox[0])
+})
+
+test('rest advertises 8000 characters, accepts the internal boundary and keeps tolerance out of model-facing text', async t => {
+  const h = await mounted(); t.after(() => h.ctx.fiber.dispose())
+  const tool = h.registered.get('context_rest')
+  const advertised = JSON.stringify(tool.parameters)
+  assert.match(advertised, /1000~8000 字符/)
+  assert.doesNotMatch(advertised, /10000|宽限|tolerance/)
+  for (const length of [8000, 8001, 10000]) {
+    const note = '字'.repeat(length)
+    await tool.execute({ note, deep: true, recovery: note }, { agent: h.agent, signal: signal() })
+    assert.equal(h.inbox.at(-1).content[0].text.includes(note), true)
+  }
+  for (const args of [{ note: '字'.repeat(10001) }, { note: longNote('handoff'), recovery: '字'.repeat(10001) }]) {
+    await assert.rejects(tool.execute(args, { agent: h.agent, signal: signal() }), error => {
+      assert.match(error.message, /1000-8000/)
+      assert.doesNotMatch(error.message, /10000|宽限/)
+      return true
+    })
+  }
 })
 
 test('explicit rest reaches the provider with unknown capacity or no prior routed header', async t => {

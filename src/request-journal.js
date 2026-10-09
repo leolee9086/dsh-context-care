@@ -20,12 +20,18 @@ export function requestFingerprint(value) { return createHash('sha256').update(J
 export async function openRequestJournal({ storageDomain, now = () => Date.now(), report = () => {} }) {
   const handle = await storageDomain.open(REQUEST_JOURNAL_DOMAIN)
   const table = handle.table('records')
+  // Storage tables may mutate their in-memory entries before the durable ACK.
+  // Readers see detached acknowledged records, never a pending or rejected put.
+  const acknowledged = new Map([...table.entries()].map(([key, value]) => [key, structuredClone(value)]))
   const chains = new Map()
   const errors = new Map()
   function put(key, sessionId, kind, data) {
     // Detach all records from mutable request callbacks before queuing an ACK.
     const value = JSON.parse(JSON.stringify({ version: 1, sessionId: String(sessionId), kind, at: now(), data }))
-    const task = (chains.get(value.sessionId) ?? Promise.resolve()).then(() => table.put(key, value))
+    const task = (chains.get(value.sessionId) ?? Promise.resolve()).then(async () => {
+      await table.put(key, structuredClone(value))
+      acknowledged.set(key, value)
+    })
     chains.set(value.sessionId, task)
     task.catch(error => { errors.set(value.sessionId, error); report(error) })
     return task
@@ -36,7 +42,7 @@ export async function openRequestJournal({ storageDomain, now = () => Date.now()
   }
   return {
     put, flush,
-    list: sessionId => [...table.entries()].filter(([, value]) => sessionId === undefined || value.sessionId === String(sessionId)).map(([key, value]) => ({ key, ...value }))
+    list: sessionId => [...acknowledged].filter(([, value]) => sessionId === undefined || value.sessionId === String(sessionId)).map(([key, value]) => ({ key, ...structuredClone(value) }))
       .sort((a, b) => a.at - b.at || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)),
     async close() { try { await flush() } finally { await handle.close() } },
   }

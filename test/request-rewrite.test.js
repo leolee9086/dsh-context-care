@@ -2,6 +2,18 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createRequestRewriter, REWRITER_NAME } from '../src/request-rewrite.js'
 
+test('request transform cooldown and surface memory belong to each session', async () => {
+  const records = []
+  const rewrite = createRequestRewriter({ rules: () => [requestRule({ cooldownMinutes: 60, oncePerSurface: true })],
+    onRecord: (record, where) => records.push({ ...record, ...where }) })
+  const request = { body: 'secret', url: 'https://example.test/v1/chat' }
+  assert.equal(await rewrite({ ...request, scope: { sessionId: 'session-one' } }), '[已隐藏]')
+  assert.equal(await rewrite({ ...request, scope: { sessionId: 'session-two' } }), '[已隐藏]')
+  assert.equal(await rewrite({ ...request, scope: { sessionId: 'session-one' } }), undefined)
+  assert.deepEqual(records.map(record => [record.sessionId, record.outcome]),
+    [['session-one', 'applied'], ['session-two', 'applied'], ['session-one', 'duplicate']])
+})
+
 /** 一条 request 级的 transform 规则。 */
 function requestRule(overrides = {}) {
   return {
@@ -121,6 +133,24 @@ test('循环清理:没有循环时不改 body', async () => {
   })
   assert.equal(await rewrite({ body, url: 'https://api.deepseek.com/chat/completions' }), undefined)
   assert.equal(records.length, 0)
+})
+
+test('control changes during rewrite audit refuse delivery without spending cooldown or surface deduplication', async () => {
+  let revision = 0
+  let edit = true
+  const records = []
+  const rewrite = createRequestRewriter({ rules: () => [requestRule({ cooldownMinutes: 60, oncePerSurface: true })],
+    onRecord: record => records.push(record), revision: () => revision,
+    journal: { async record() { if (edit) revision++ } } })
+  const body = JSON.stringify({ messages: [{ role: 'assistant', content: [{ type: 'text', text: 'secret' }] }] })
+  const request = { body, url: 'https://example.test/chat', scope: { sessionId: 's' } }
+  await assert.rejects(rewrite(request), { code: 'CONTROL_CHANGED' })
+  assert.deepEqual(records, [])
+  edit = false
+  assert.ok((await rewrite(request)).includes('[已隐藏]'))
+  assert.equal(records.at(-1).outcome, 'applied')
+  assert.equal(await rewrite(request), undefined)
+  assert.equal(records.at(-1).outcome, 'duplicate')
 })
 
 test('循环清理:body 不是 JSON 时不动', async () => {

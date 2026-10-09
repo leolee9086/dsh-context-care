@@ -75,10 +75,10 @@ for (const id of CLEANABLE_IDS) {
  * @param {string} text 原文。
  * @returns {{ text: string, removedLines: number, pattern: string|undefined }} 清理结果；没命中时原样返回。
  */
-export function cleanTail(text) {
+export function cleanTail(text, only) {
   const source = String(text)
   // 判定只看一次：全表第一个命中说了算。轻微档也认得出，但不在这里动手 —— 那是提醒的活。
-  const hit = detectDegradation(source)
+  const hit = detectDegradation(source, only)
   if (hit === undefined || hit.severity !== 'severe') {
     return { text: source, removedLines: 0, pattern: undefined }
   }
@@ -101,14 +101,14 @@ export function cleanTail(text) {
  * @param {object} message 消息（会被复制，不改原件）。
  * @returns {{ message: object, removedLines: number, pattern: string|undefined }} 清理后的消息与总行数变化。
  */
-export function cleanMessage(message) {
+export function cleanMessage(message, only) {
   if (!Array.isArray(message?.content)) return { message, removedLines: 0, pattern: undefined }
   let removedLines = 0
   let pattern
   const content = message.content.map(block => {
     if (typeof block?.text !== 'string') return block
     if (block.type !== 'reasoning' && block.type !== 'text') return block
-    const cleaned = cleanTail(block.text)
+    const cleaned = cleanTail(block.text, only)
     removedLines += cleaned.removedLines
     if (cleaned.pattern !== undefined) pattern = cleaned.pattern
     return cleaned.removedLines === 0 ? block : { ...block, text: cleaned.text }
@@ -126,10 +126,10 @@ export function cleanMessage(message) {
  * @returns {{ messages: object[], removedLines: number, index: number, pattern: string|undefined }}
  *   清理后的消息、去掉的行数、被清理的是第几条（-1 表示没找到助手消息）、哪个模式命中的。
  */
-export function cleanMessages(messages) {
+export function cleanMessages(messages, only) {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     if (messages[index]?.role !== 'assistant') continue
-    const cleaned = cleanMessage(messages[index])
+    const cleaned = cleanMessage(messages[index], only)
     if (cleaned.removedLines === 0) return { messages, removedLines: 0, index, pattern: undefined }
     const next = [...messages]
     next[index] = cleaned.message

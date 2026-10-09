@@ -104,7 +104,8 @@ function snippetRows(hit) {
 }
 
 /** 记录通过框架生成的 hook 到达，不要求重新折叠会话历史。 */
-export function RewriteNodeView({ node, sessionId, useRewriteRecords, t }) {
+export function RewriteNodeView({ node, sessionId, useRewriteRecords, watchRewrites, t }) {
+  React.useEffect(() => watchRewrites(sessionId), [sessionId, watchRewrites])
   // 选择器是必需参数：不传就等价于让 uSES 调用 undefined，渲染器会被判崩溃而退役。
   const table = useRewriteRecords(value => value)
   const hits = (node?.data?.hashes ?? [])
