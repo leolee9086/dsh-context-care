@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { importWorkbench } from '../src/workbench-import.js'
 import { createTemplates } from '../src/templates.js'
-import { detectRulesV2 } from '@leolee9086/dsh-rule-engine'
+import { detectRulesV2 } from '../src/vendor/rule-engine/index.js'
 import { entryRule } from '../src/workbench-store.js'
 const templates = createTemplates()
 const row = (uid, extra = {}) => ({ uid, key: ['dragon'], content: 'Retain the original facts.', ...extra })

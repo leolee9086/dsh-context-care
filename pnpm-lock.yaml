@@ -8,15 +8,9 @@ importers:
 
   .:
     dependencies:
-      '@leolee9086/dsh-rule-engine':
-        specifier: github:leolee9086/dsh-rule-engine#v0.3.0
-        version: https://codeload.github.com/leolee9086/dsh-rule-engine/tar.gz/1c67baa1692f2f9cfdf66a1925dfe54bf30a80b6
       ajv:
         specifier: ^8.20.0
         version: 8.20.0
-      dsh-better-session-query:
-        specifier: github:leolee9086/dsh-better-session-query#v0.1.1
-        version: https://codeload.github.com/leolee9086/dsh-better-session-query/tar.gz/3caf61b2d0432774cb19eff1ecdf3cf74004929b
       handlebars:
         specifier: ^4.7.10
         version: 4.7.10
@@ -56,10 +50,6 @@ packages:
 
   '@deepseek-ai/cosmokit@1.8.5':
     resolution: {integrity: sha512-LXsrlem9z8dq4sLflj2yuCuYX7KqhdzF5hZly3eZyuTo8d6oDSOXuEgC5DbQWKW+lksm6zmOutQLsP/ma6wR6A==}
-
-  '@leolee9086/dsh-rule-engine@https://codeload.github.com/leolee9086/dsh-rule-engine/tar.gz/1c67baa1692f2f9cfdf66a1925dfe54bf30a80b6':
-    resolution: {gitHosted: true, integrity: sha512-VwUbyMzm8B9r7j6Zcmkin6EthRwKkK99DZLX4l51Dlu4V2TM6ULeRHIQ9nUdnLbk00/UpMTx+5eb6mX1yVaPxw==, tarball: https://codeload.github.com/leolee9086/dsh-rule-engine/tar.gz/1c67baa1692f2f9cfdf66a1925dfe54bf30a80b6}
-    version: 0.3.0
 
   '@oxc-project/types@0.148.0':
     resolution: {integrity: sha512-Nm4s/jB+4FpFsPhWGEC4h7rzksesmtnMXomo6rCMcg/b8zLQuOziRgkCS1fxDCXOlJB/6Q8oABOZ/OP6RIPj9A==}
@@ -352,11 +342,6 @@ packages:
   devlop@1.1.0:
     resolution: {integrity: sha512-RWmIqhcFf1lRYBvNmr7qTNuyCt/7/ns2jbpp1+PalgE/rDQcBT0fioSMUpJ93irlUhC5hrg4cYqe6U+0ImW0rA==}
 
-  dsh-better-session-query@https://codeload.github.com/leolee9086/dsh-better-session-query/tar.gz/3caf61b2d0432774cb19eff1ecdf3cf74004929b:
-    resolution: {gitHosted: true, integrity: sha512-g51YzbXeQ/DnyxgV7gBVdZoqC1g64RVKSe0zzqkhO2tvLzD8W2OH1YgyvgieFKQ0fPKWCcogBcJY4JhIaFLzSA==, tarball: https://codeload.github.com/leolee9086/dsh-better-session-query/tar.gz/3caf61b2d0432774cb19eff1ecdf3cf74004929b}
-    version: 0.1.1
-    engines: {node: '>=22.19.0'}
-
   dts-resolver@3.0.0:
     resolution: {integrity: sha512-1T1f+z+4tl9XD+m+0HBgWoL/nm0bOIffyWaUuUSBlFg/86IWvfx+wjNaO/ybU0AJzG9/Mi5hBUgGV6zCmWEN7Q==}
     engines: {node: ^22.18.0 || >=24.0.0}
@@ -635,8 +620,6 @@ snapshots:
 
   '@deepseek-ai/cosmokit@1.8.5': {}
 
-  '@leolee9086/dsh-rule-engine@https://codeload.github.com/leolee9086/dsh-rule-engine/tar.gz/1c67baa1692f2f9cfdf66a1925dfe54bf30a80b6': {}
-
   '@oxc-project/types@0.148.0': {}
 
   '@quansync/fs@1.0.0':
@@ -806,8 +789,6 @@ snapshots:
   devlop@1.1.0:
     dependencies:
       dequal: 2.0.3
-
-  dsh-better-session-query@https://codeload.github.com/leolee9086/dsh-better-session-query/tar.gz/3caf61b2d0432774cb19eff1ecdf3cf74004929b: {}
 
   dts-resolver@3.0.0: {}
 

@@ -1,5 +1,11 @@
 # 更新记录
 
+## v0.8.1
+
+- 修复官方插件管理器在默认 pnpm 12 政策下的 `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`：去掉安装时会触发 Git 包构建许可的 `prepack`，改为作者显式执行 `release:check` / `release:pack`，发行标签保留已构建客户端。
+- 移除两个 GitHub 运行子依赖，随包携带固定的 rule-engine v0.3.0 纯模块及 better-session-query v0.1.1 块读取模块。主线程、worker 和单元测试使用同一份模块，保留上游 commit、逐文件 SHA-256 与实际许可证；规则引擎为 AGPL-3.0-only，块模块为 MIT，整体按 AGPL-3.0-only 发行。
+- 默认安装无需修改消费者 `allowBuilds` / `blockExoticSubdeps`，无需 `--ignore-scripts`；增加安装生命周期、依赖来源和固定模块哈希回归检查。v0.8.0 标签与历史记录保留。
+
 ## v0.8.0
 
 - 新增当前会话的规则控制右栏及输入框入口：搜索、暂停、恢复默认，提醒和保护动作分别开关，显示注册插件、注册入口、执行插件及不可用原因。来源身份为显式自报，旧接口保持未知。

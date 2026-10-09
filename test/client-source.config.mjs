@@ -27,12 +27,6 @@ const clientRequire = createRequire(pathToFileURL(resolve(checkout, 'packages/te
 for (const name of ['react', 'react/jsx-runtime', 'react/jsx-dev-runtime', 'react-dom', 'react-dom/client', 'react-dom/test-utils', '@testing-library/react']) {
   alias.unshift({ find: new RegExp(`^${escape(name)}$`), replacement: clientRequire.resolve(name) })
 }
-// Optional development package uses the same public entry as production; no Harness-private imports.
-if (process.env.DSH_TEST_RULE_ENGINE) {
-  const engineRoot = resolve(process.env.DSH_TEST_RULE_ENGINE)
-  const engineRequire = createRequire(pathToFileURL(resolve(engineRoot, 'package.json')))
-  alias.unshift({ find: /^@leolee9086\/dsh-rule-engine$/, replacement: engineRequire.resolve('@leolee9086/dsh-rule-engine') })
-}
 export default { resolve: { alias }, cacheDir: resolve('node_modules/.cache/context-care-client-test'),
   test: { environment: 'jsdom', include: ['test/client-assembly.spec.js', 'test/care-ui.spec.js', 'test/source-navigation.spec.js', 'test/rule-runtime.spec.js'], testTimeout: 10000,
     deps: { moduleDirectories: ['node_modules', resolve(checkout, 'node_modules')] } } }

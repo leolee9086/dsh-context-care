@@ -1,5 +1,5 @@
 import { parentPort } from 'node:worker_threads'
-import { detectRulesV2 } from '@leolee9086/dsh-rule-engine'
+import { detectRulesV2 } from './vendor/rule-engine/index.js'
 import { createWorkerDetectors } from './detector-worker.js'
 parentPort.on('message', input => {
   try {

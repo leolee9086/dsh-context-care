@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { normalizeRule, normalizeRuleV2 } from '@leolee9086/dsh-rule-engine'
+import { normalizeRule, normalizeRuleV2 } from './vendor/rule-engine/index.js'
 import { recordSecondaryFailure } from './secondary-failure.js'
 
 const Id = z.string().min(1).max(256)

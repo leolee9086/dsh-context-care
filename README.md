@@ -6,7 +6,7 @@
 
 参考 S-forge MAGI 的指标曲线和 Codex 的上下文生命周期设计，以独立 Cordis 插件接入，不修改 Harness、S-forge 或 Codex 源码。本文档以中文为主。
 
-> 发行版本：`v0.8.0`，面向官方 DSH `0.2.0-rc.2`。安装 GitHub 版本前确认对应标签已经发布；本地修复包可使用下文的 tgz 装法。源码组合验收使用显式外部 Host 的 `pnpm test:integration:source`，不依赖残留构建产物；桌面产物验收由 Electron 从其封装目录只读加载官方模块。
+> 发行版本：`v0.8.1`，面向官方 DSH `0.2.0-rc.2`。安装 GitHub 版本前确认对应标签已经发布；本地修复包可使用下文的 tgz 装法。源码组合验收使用显式外部 Host 的 `pnpm test:integration:source`，不依赖残留构建产物；桌面产物验收由 Electron 从其封装目录只读加载官方模块。
 
 ## 指标与行为
 
@@ -253,32 +253,26 @@ UI 优先显示当前进程最近一次请求边界的独立数值采样，关�
 
 ## 安装
 
-运行环境需要 Node.js 22.19.0 或更新版本。v0.8.0 的生产依赖固定到已发布的 rule-engine v0.3.0 与 better-session-query v0.1.1 GitHub 标签，安装需能访问 GitHub 和已有公开依赖的 registry；两依赖的 npm 上传返回 404，因此不提供这两个新版本的 registry 安装承诺。独立 tgz 和 GitHub 标签安装均使用这条真实依赖链。pnpm 12 默认开启 `blockExoticSubdeps`，会拒绝包内 GitHub 依赖；需要明确允许这两个固定标签的来源。独立验收在新项目的 `pnpm-workspace.yaml` 设置：
+运行环境需要 Node.js 22.19.0 或更新版本。v0.8.1 随包携带 rule-engine v0.3.0 的纯模块与 better-session-query v0.1.1 的块读取模块，保留固定 commit、文件哈希和各自许可证；详见 [模块来源](src/vendor/README.md)。其余运行依赖来自公开 registry，安装需能访问 GitHub 和 registry。
 
-```yaml
-blockExoticSubdeps: false
-```
-
-然后运行 `pnpm add /absolute/path/to/dsh-context-care-0.8.0.tgz`。从远端 GitHub 标签安装时，pnpm 12 还会因为 `prepack` 请求构建许可；标签已包含构建产物，可使用已验证的 `pnpm add github:leolee9086/dsh-context-care#v0.8.0 --ignore-scripts` 直接安装。若选择重建，应通过消费者自己的 `allowBuilds` 政策显式许可；不能承诺默认安装成功。此部署的 pnpm 12.6.0 未应用命令行同名 `blockExoticSubdeps` 配置，因此这里给出已实际验证的 workspace 配置。
-
-同样的政策若由 DSH 的安装后端启用，应通过其正式包管理配置处理。CLI/插件管理界面遵守部署自己的安装政策，不能承诺默认 pnpm 12 下直接安装成功；本发行的独立验收显式使用上述配置。
+GitHub 标签已包含客户端构建产物；包没有 `prepare`、`prepack` 或安装生命周期脚本。官方插件管理器的包来源可直接填写 `github:leolee9086/dsh-context-care#v0.8.1`。普通 pnpm 安装不需要 `allowBuilds`、`--ignore-scripts` 或 `blockExoticSubdeps` 例外。v0.8.0 的安装契约问题和历史验证限制保留在更新记录中。
 
 ### 安装发行包
 
 在插件管理界面的包来源填写 tgz 的完整路径，或使用官方 CLI（将路径替换为包的实际位置）：
 
 ```sh
-dsh plugin --profile desktop add "/absolute/path/to/dsh-context-care-0.8.0.tgz"
+dsh plugin --profile desktop add "/absolute/path/to/dsh-context-care-0.8.1.tgz"
 ```
 
 Host 代码更新后需要重启 DSH，再刷新页面；重新启用条目不会清除旧 Node 模块缓存。安装和重启通过官方管理流程完成。
 
 ### 从 GitHub 安装
 
-确认 `v0.8.0` 标签已发布后可使用：
+确认 `v0.8.1` 标签已发布后可使用：
 
 ```sh
-dsh plugin --profile web add "github:leolee9086/dsh-context-care#v0.8.0"
+dsh plugin --profile web add "github:leolee9086/dsh-context-care#v0.8.1"
 ```
 
 构建产物 `lib/` 已入库，装完即可用 —— 不需要额外构建，也不需要手工打包上传 tgz。带上标签安装，版本不会跟着分支漂。
@@ -329,7 +323,9 @@ dsh plugin --profile web add "github:leolee9086/dsh-context-care#v0.8.0"
 
 ### 从源码开发
 
-插件可以在任意目录独立安装、测试和构建，无需同级 DSH checkout，也没有 `link:../deepseek-harness` 依赖。运行时第三方库为 React、Zod、mdast-util-from-markdown 与规则引擎；Cordis 核心仅作为默认测试环境的 registry 开发依赖，不随插件运行时载入。
+插件可以在任意目录独立安装、测试和构建，无需同级 DSH checkout，也没有 `link:../deepseek-harness` 依赖。运行时 registry 依赖为 React、Zod、Ajv、Handlebars 与 mdast-util-from-markdown；规则引擎和块读取使用包内固定源码。Cordis 核心仅作为默认测试环境的 registry 开发依赖，不随插件运行时载入。
+
+作者发布时运行 `pnpm release:pack`，显式完成语法检查、单元测试和客户端构建后生成 `artifacts/` 中的 tgz，并将更新后的 `lib/` 提交到发行标签。消费者直接使用已发布产物；普通 `pnpm pack` 不承担作者发布校验。整体许可证为 AGPL-3.0-only，MIT 块读取模块保留原许可；完整对应源码与构建配置可从本仓库发行标签获取。
 
 ```sh
 git clone https://github.com/leolee9086/dsh-context-care.git

@@ -1,0 +1,3 @@
+# Fixed upstream modules and license files must retain their recorded bytes.
+src/vendor/** -text whitespace=cr-at-eol
+LICENSE -text whitespace=cr-at-eol

@@ -1,5 +1,5 @@
 import Handlebars from 'handlebars'
-import { bindInputs, sanitizeRegexMacro } from '@leolee9086/dsh-rule-engine'
+import { bindInputs, sanitizeRegexMacro } from './vendor/rule-engine/index.js'
 
 const unsafe = new Set(['__proto__', 'prototype', 'constructor'])
 const allowed = new Set(['if', 'unless', 'each', 'with', 'eq', 'json', 'regexEscape'])

@@ -1,6 +1,7 @@
 {
   "name": "dsh-context-care",
-  "version": "0.8.0",
+  "version": "0.8.1",
+  "license": "AGPL-3.0-only",
   "type": "module",
   "description": "为 DeepSeek Harness 提供疲劳度、唤醒值、分段彩色数值显示与自主上下文压缩的独立 Cordis 插件",
   "repository": {
@@ -62,11 +63,10 @@
     "test:integration:source": "node test/run-source-integration.js",
     "test:client:source": "node test/run-client-source.js",
     "check": "node test/check-source.js",
-    "prepack": "pnpm check && pnpm test && pnpm build"
+    "release:check": "pnpm check && pnpm test && pnpm build",
+    "release:pack": "pnpm release:check && pnpm pack --pack-destination artifacts"
   },
   "dependencies": {
-    "@leolee9086/dsh-rule-engine": "github:leolee9086/dsh-rule-engine#v0.3.0",
-    "dsh-better-session-query": "github:leolee9086/dsh-better-session-query#v0.1.1",
     "ajv": "^8.20.0",
     "handlebars": "^4.7.10",
     "mdast-util-from-markdown": "^2.1.0",

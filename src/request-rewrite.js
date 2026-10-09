@@ -16,7 +16,7 @@
 // Resolve the public fetch-router scope before evaluation. Each session owns its
 // engine cooldown and surface deduplication; cache comparisons also include the session.
 
-import { createEngine, applyRules } from '@leolee9086/dsh-rule-engine'
+import { createEngine, applyRules } from './vendor/rule-engine/index.js'
 import { cleanMessages } from './loop-clean.js'
 import { changedBlocks } from './rewrite-journal.js'
 
