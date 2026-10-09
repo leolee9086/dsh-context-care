@@ -259,7 +259,7 @@ UI 优先显示当前进程最近一次请求边界的独立数值采样，关�
 blockExoticSubdeps: false
 ```
 
-然后运行 `pnpm add /absolute/path/to/dsh-context-care-0.8.0.tgz`。此部署的 pnpm 12.6.0 未应用命令行同名配置，因此这里给出已实际验证的 workspace 配置。
+然后运行 `pnpm add /absolute/path/to/dsh-context-care-0.8.0.tgz`。从远端 GitHub 标签安装时，pnpm 12 还会因为 `prepack` 请求构建许可；标签已包含构建产物，可使用已验证的 `pnpm add github:leolee9086/dsh-context-care#v0.8.0 --ignore-scripts` 直接安装。若选择重建，应通过消费者自己的 `allowBuilds` 政策显式许可；不能承诺默认安装成功。此部署的 pnpm 12.6.0 未应用命令行同名 `blockExoticSubdeps` 配置，因此这里给出已实际验证的 workspace 配置。
 
 同样的政策若由 DSH 的安装后端启用，应通过其正式包管理配置处理。CLI/插件管理界面遵守部署自己的安装政策，不能承诺默认 pnpm 12 下直接安装成功；本发行的独立验收显式使用上述配置。
 
