@@ -1,37 +1,36 @@
 # dsh-context-care 0.8.2 修复候选
 
-当前未发布、未部署。v0.8.0 与 v0.8.1 旧标签保持原位。
+主包候选未发布、未部署；代码修复已提交推送，v0.8.0 与 v0.8.1 旧标签保持原位。以下公开消费验收对应提交 `6b37fa1b97e6b32e71fb2a98a993c213afc49838`。
 
-修复遍布消息的显示对照卡和两秒详情轮询：消息区只为内容实际改变的消息显示轻量处理标记，点击在右栏查看；未命中、同文替换无标记，规则状态变化使旧标记失效。匹配故障不再默认终止整个会话：可选处理保留完整输入并记录 failed；显式必需请求处理失败不派发；工具判定失败拒绝对应操作并返回明确错误，后续对话继续。显示模板与预算规划失败独立记录，取消不伪造新失败。
+消息区只为内容实际改变的消息显示轻量处理标记，点击后在右栏按需读取详情。逐消息显示对照卡和两秒详情轮询已移除；未命中、同文替换无标记，规则状态变化使旧标记失效。
 
-撤销未获依据支持的源码内嵌，恢复标准依赖：
+可选匹配失败保留完整输入并持久化 failed 记录；显式必需请求匹配失败不派发；工具判定失败只拒绝对应操作并返回明确错误，后续对话继续。显示模板与预算规划失败独立记录，取消不伪造新失败。独立显示匹配池避免占用请求接纳容量。
 
-| 包 | 版本 | 来源 |
+## 已发布的标准依赖
+
+| npm 包 | 精确版本 | 公开元数据 |
 | --- | --- | --- |
 | @leolee9086/dsh-rule-engine | 0.3.0 | https://registry.npmjs.org/@leolee9086/dsh-rule-engine |
 | dsh-better-session-query | 0.1.1 | https://registry.npmjs.org/dsh-better-session-query |
-| dsh-context-care | 0.8.2 候选 | 本仓库 main 的固定提交，客户端构建产物已入库 |
 
-12:44 阶段的主包 SHA-256 为 `AA19631FC6EE90FB4CD5111FFBF55ADDE8AF3F711CE4938B6C04B008501AB0F6`，它不含此后修正的 worker 启动参数，不能当作当前源码的发行产物。无需额外准备 tgz 才能进行公开 Git 消费验证。
+两依赖由哥哥完成 npm 发布。公开 registry 已返回精确版本及对应 latest，实际下载归档的 SHA-512 与本仓库锁文件完全一致。所有生产导入均解析普通 npm 包，内嵌副本已撤销；Host 与 worker 使用同一组已安装依赖，没有 Harness checkout 别名或开发链接。
 
-验证：
+发布时间分别为 `2026-10-10T07:00:10.101Z` 与 `2026-10-10T07:01:25.519Z`。本机 pnpm 11.7.0 与 12.6.0 的无豁免 frozen-lockfile 安装均因未满足24小时 minimumReleaseAge 而被拒绝。实际部署工具链 pnpm 11.7.0 的普通 add 在新空消费目录和新 store 中安装53包成功，同时自动写入两个精确版本的 minimumReleaseAgeExclude；该结果不能表述为无豁免安装。本仓库不提供这两个豁免，项目与全局政策未修改。
 
-- 当前代码完整真实 Host 套件 74/74，通过实际 worker 病态正则超时、真实工具链、真实鉴权 HTTP、持久化重启、三会话并发与显示/请求池隔离、实际缺字段模板、预算和取消。
-- 生产标记/右栏组件在真实 msedge 浏览器中读取真实 Host，再关闭 Host 点击刷新，真实 Failed to fetch 可见。无 page.route、固定成功 fetch 或伪造服务响应。
-- 独立单元套件 310/310；官方客户端装配 25/25。首个候选独立安装后关键 Host 5/5、实际 Client 2/2；最终候选在新空目录独立安装、公开入口烟雾与关键真实 Host 故障 6/6 通过，源码全套 74/74 通过（final-candidate-independent-install.log、final-candidate-consumer-smoke.log、final-candidate-installed-host.log、repair-host-final-reasons.log）。
-- 两依赖实际 tgz 按标准版本号通过隔离 test registry 使用 pnpm 12 默认政策安装；不使用 allowBuilds、ignore-scripts、blockExoticSubdeps 例外。测试 registry 不证明公开 npm 分发已完成。
-- 生产运行时无 Harness checkout 导入或开发 node_modules 链接。测试明确指定外部只读 Harness，LLM 使用测试适配器，未测试真实供应商/模型行为。
+公开固定提交安装结果见 [public-fixed-install.log](public-fixed-install.log)。12:44 阶段的旧主包归档不含此后修复的 worker 启动参数，不能作为当前代码的发行产物；本轮验证直接消费公开 Git 提交，没有额外准备发布 tgz。
 
-公开分发尚未解决。2026-10-10 12:56 Asia/Shanghai 只读查询 public registry：rule-engine latest 为 0.2.0，0.3.0 不存在，公开 maintainer 为 leolee9086；query 包返回 404。这些元数据不能证明本会话拥有发布权限。
+## 运行验证
 
-此前把 whoami 401 推断成“只差登录”，并建议登录后直接发布，没有查询当前政策，是没有依据的判断，现撤回该建议与发布命令。whoami 只检查传统身份，既不验证包写权限，也不验证 OIDC trusted publishing 权限。
+- 在实际部署所带 Node 24.21.0 下，真实子进程先复现 ERR_WORKER_INVALID_EXEC_ARGV：父进程的 V8/process 参数被传给 worker。纯 JavaScript worker 改为显式空 execArgv，不继承父进程 loader、inline-entry、test 或 V8 参数。Node 22.19.0 与 24.21.0 的 worker 回归均4/4通过，覆盖进程专用参数、病态正则超时后的恢复和真实并发超载。
+- 公开下载依赖下独立单元套件311/311通过，见 [public-dependencies-unit-fixed.log](public-dependencies-unit-fixed.log)。Node22完整真实 Host 套件74/74通过，见 [public-dependencies-host.log](public-dependencies-host.log)，包括鉴权 HTTP、持久化重启、工具链、三会话并发与显示/请求池隔离。
+- 从公开提交独立安装后，在 Node24 下检查公开 Host 入口、纯声明、已构建 Client factory、依赖精确版本、原始块读取和实际 worker 匹配，全部通过，见 [public-fixed-consumer.log](public-fixed-consumer.log)。
+- 同一独立安装包在 Node24 下的8项真实 Host 检查通过：显示模板失败后两轮继续、有效变化标记、外部和内建增量检测器、输出故障持久化、并发显示超时、工具判定超时、必需请求匹配失败不派发，见 [public-fixed-installed-host-node24.log](public-fixed-installed-host-node24.log)。
+- 生产标记、右栏组件与 reader 已在真实 msedge 浏览器中读取真实鉴权 Host；点击标记只读取一次，断开 Host 后显式刷新可见真实 Failed to fetch，原生正文保持原文。没有 page.route、固定成功 fetch 或伪造服务响应。官方客户端装配此前25/25通过；本轮没有改变客户端代码。
 
-本次实际读取的 npm 官方现行政策：
+测试明确指定外部只读 Harness；生产运行时不导入该 checkout。LLM 使用测试适配器，未验证真实模型供应商行为。主包声明 AGPL-3.0-only；引擎依赖声明 AGPL-3.0-or-later，查询依赖声明 MIT。
 
-- [发布所需 2FA 与包设置](https://docs.npmjs.com/requiring-2fa-for-package-publishing-and-settings-modification)：所有包创建/发布要求 2FA，或启用 bypass 2FA 的 granular token；包级 disallow tokens 可禁止 granular token 发布。包设置修改本身要求交互 2FA。
-- [公开 scoped 包发布](https://docs.npmjs.com/creating-and-publishing-scoped-public-packages/)：直接发布和 staged publishing 是不同路径；暂存不等于公开发布，必须由 maintainer 以 2FA 审批，bypass token 不能跳过暂存审批的 2FA。
-- [OIDC trusted publishing](https://docs.npmjs.com/trusted-publishers)：必须预先授权具体包与 CI workflow，支持指定的云 runner；最低 npm CLI 11.5.1、Node 22.14.0。当前新 trusted publisher 默认允许 stage publish，直接 publish 权限需另选。文档明确 whoami 不是 trusted publishing 权限检查。
+## 现场剩余工作
 
-这两个包的实际发布权限、2FA/包级设置、有效 granular token 或受信任 CI 发布配置均未验证。登录不会建立这些权限，不能承诺登录后可以发布。须先解决并实际验证可用的分发路径，再验收普通公开 registry 锁文件与空目录安装。此次没有发布、暂存或修改发布设置。
+只读检查确认桌面安装目录仍为0.8.1，实际安装代码仍有旧的逐消息读取和两秒轮询。读取实际部署的桌面主程序代码确认，非静态 app 路径会转发到 Host；没有证据将 dsh-app 自定义协议认定为原 fetch 失败的原因。
 
-完成公开 registry 消费验证后，再通过官方插件管理器安装并重启/刷新现有 GUI 做现场验收。当前没有修改现场 Harness、profile、preset 或部署。原现场 Failed to fetch 的具体网络根因仍无现场证据，隔离测试断开不可当作该根因。
+当前 Playwright 的19387页停在鉴权提示，没有 context-care 请求记录；桌面正在另一个会话，未取得原失败请求的网络结果。本轮未修改现场 Harness、profile、preset 或部署，也没有读取凭据。原现场 Failed to fetch 的具体网络原因仍未定位；隔离 Host 断开测试不代表该原因。整个修复目标保持 active。

@@ -1,0 +1,33 @@
+[WARN] The following settings cannot be set in the global config file ("C:\Users\al765\AppData\Local\pnpm\config\config.yaml") and were ignored: "_auth". Move them to a project-level pnpm-workspace.yaml. To share these settings across projects, use config dependencies: https://pnpm.io/11.x/config-dependencies
+
+   ╭──────────────────────────────────────────╮
+   │                                          │
+   │   Update available! 11.7.0 → 12.10.1.    │
+   │   Changelog: https://pnpm.io/v/12.10.1   │
+   │     To update, run: pnpm self-update     │
+   │                                          │
+   ╰──────────────────────────────────────────╯
+
+Packages are hard linked from the content-addressable store to the virtual store.
+  Content-addressable store is at: C:\Users\al765\AppData\Local\Temp\care-public-dependencies-4967e9aff45849448c36b3a06ccdbde5\consumer-fixed-store\v11
+  Virtual store is at:             node_modules/.pnpm
+Progress: resolved 0, reused 0, downloaded 1, added 0
+Packages: +53
++++++++++++++++++++++++++++++++++++++++++++++++++++++
+Progress: resolved 53, reused 0, downloaded 6, added 6
+Progress: resolved 53, reused 0, downloaded 42, added 42
+[WARN] Tarball download average speed 11 KiB/s (size 13 KiB) is below 50 KiB/s: https://registry.npmjs.org/debug/-/debug-4.4.3.tgz (GET)
+Progress: resolved 53, reused 0, downloaded 45, added 43
+Progress: resolved 53, reused 0, downloaded 50, added 50
+[WARN] Tarball download average speed 11 KiB/s (size 15 KiB) is below 50 KiB/s: https://registry.npmjs.org/minimist/-/minimist-1.2.8.tgz (GET)
+Progress: resolved 53, reused 0, downloaded 52, added 52
+Progress: resolved 53, reused 0, downloaded 53, added 52
+Progress: resolved 53, reused 0, downloaded 53, added 53, done
+
+dependencies:
++ dsh-context-care 0.8.2
+
+Added 2 entries to minimumReleaseAgeExclude in pnpm-workspace.yaml (set minimumReleaseAgeStrict to true to gate these updates with a prompt):
+  @leolee9086/dsh-rule-engine@0.3.0
+  dsh-better-session-query@0.1.1
+Done in 18.5s using pnpm v11.7.0

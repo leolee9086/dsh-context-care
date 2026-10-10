@@ -1,0 +1,16 @@
+✔ actual display template failure stays visible while two conversation turns complete (1037.7613ms)
+✔ real display markers exclude unmatched and same-text replacements (328.0971ms)
+✔ Workbench v2 external detector finalizes a real stream once and exposes owned availability after disposal (445.2131ms)
+✔ real output matcher failure is durable and visible over HTTP while two turns continue (768.5171ms)
+✔ real concurrent display timeouts cannot consume request matching admission (463.6984ms)
+✔ real tool matcher timeout rejects only that tool assessment and the conversation continues (418.7567ms)
+✔ explicit required request matching reports failure and does not dispatch the unresolved request (343.0866ms)
+✔ Workbench v2 builtin incremental detector excludes closed-interval text in the real Host pipeline (329.4086ms)
+ℹ tests 8
+ℹ suites 0
+ℹ pass 8
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 7921.4363

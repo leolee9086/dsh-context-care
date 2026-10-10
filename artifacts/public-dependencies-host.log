@@ -1,0 +1,467 @@
+TAP version 13
+# Subtest: exported Host rows mount together, serve the journal, and remove routes and tools on unload
+ok 1 - exported Host rows mount together, serve the journal, and remove routes and tools on unload
+  ---
+  duration_ms: 971.381
+  type: 'test'
+  ...
+# Subtest: disabling the display leaves runtime sampling, tools, request observation and queries active
+ok 2 - disabling the display leaves runtime sampling, tools, request observation and queries active
+  ---
+  duration_ms: 747.785
+  type: 'test'
+  ...
+# Subtest: real Loader/loop preserves request prefix and compacts after tool result, then continues
+ok 3 - real Loader/loop preserves request prefix and compacts after tool result, then continues
+  ---
+  duration_ms: 711.0072
+  type: 'test'
+  ...
+# Subtest: real loop honors explicit rest when conversation and summary capacities are unknown
+ok 4 - real loop honors explicit rest when conversation and summary capacities are unknown
+  ---
+  duration_ms: 692.1184
+  type: 'test'
+  ...
+# Subtest: unloading the contribution cancels a live summary and releases session occupancy without a replacement
+ok 5 - unloading the contribution cancels a live summary and releases session occupancy without a replacement
+  ---
+  duration_ms: 449.1214
+  type: 'test'
+  ...
+# Subtest: auxiliary prepared requests keep their registration across replacement and compose scoped text once
+ok 6 - auxiliary prepared requests keep their registration across replacement and compose scoped text once
+  ---
+  duration_ms: 296.5904
+  type: 'test'
+  ...
+# Subtest: request observation preserves native cancellation and prepares only model configuration
+ok 7 - request observation preserves native cancellation and prepares only model configuration
+  ---
+  duration_ms: 169.4431
+  type: 'test'
+  ...
+# Subtest: operation prices keep captured calibration and image projection across adapter and usage changes
+ok 8 - operation prices keep captured calibration and image projection across adapter and usage changes
+  ---
+  duration_ms: 180.3635
+  type: 'test'
+  ...
+# Subtest: structured summary image failure delegates then records selected oldest omissions through the real projection
+ok 9 - structured summary image failure delegates then records selected oldest omissions through the real projection
+  ---
+  duration_ms: 320.2228
+  type: 'test'
+  ...
+# Subtest: natural rest merges two old checkpoints, records recursive coverage and preserves the task fixture for continuation
+ok 10 - natural rest merges two old checkpoints, records recursive coverage and preserves the task fixture for continuation
+  ---
+  duration_ms: 384.7582
+  type: 'test'
+  ...
+# Subtest: summary planner fits the complete auxiliary request and preserves a balanced recent tail
+ok 11 - summary planner fits the complete auxiliary request and preserves a balanced recent tail
+  ---
+  duration_ms: 311.3555
+  type: 'test'
+  ...
+# Subtest: a custom summary provider is rechecked after its audit acknowledgement
+ok 12 - a custom summary provider is rechecked after its audit acknowledgement
+  ---
+  duration_ms: 275.4277
+  type: 'test'
+  ...
+# Subtest: summary overflow shrinks its candidate once and a changed surface closes without replacement
+ok 13 - summary overflow shrinks its candidate once and a changed surface closes without replacement
+  ---
+  duration_ms: 305.4123
+  type: 'test'
+  ...
+# Subtest: summary repair rebases replaced endpoints, preserves the original failure without progress, and obeys explicit caps
+ok 14 - summary repair rebases replaced endpoints, preserves the original failure without progress, and obeys explicit caps
+  ---
+  duration_ms: 1957.8296
+  type: 'test'
+  ...
+# Subtest: summary uses calibrated replacement cost and retains history when the framed text is larger
+ok 15 - summary uses calibrated replacement cost and retains history when the framed text is larger
+  ---
+  duration_ms: 159.9449
+  type: 'test'
+  ...
+# Subtest: disabled model state report retains numeric sampling and explicit status results
+ok 16 - disabled model state report retains numeric sampling and explicit status results
+  ---
+  duration_ms: 299.6983
+  type: 'test'
+  ...
+# Subtest: real stream persists pending before settlement, excludes reasoning and quotes, and scopes cooldown by session/source
+ok 17 - real stream persists pending before settlement, excludes reasoning and quotes, and scopes cooldown by session/source
+  ---
+  duration_ms: 795.7239
+  type: 'test'
+  ...
+# Subtest: disabled completion notices do not consume observation cooldown, and oversized text is unavailable
+ok 18 - disabled completion notices do not consume observation cooldown, and oversized text is unavailable
+  ---
+  duration_ms: 342.6768
+  type: 'test'
+  ...
+# Subtest: complete-input calibration shrinks once and does not repeat maintenance over ten small steps
+ok 19 - complete-input calibration shrinks once and does not repeat maintenance over ten small steps
+  ---
+  duration_ms: 757.1202
+  type: 'test'
+  ...
+# Subtest: real failed model attempt clears pending without marking successful completion
+ok 20 - real failed model attempt clears pending without marking successful completion
+  ---
+  duration_ms: 168.5176
+  type: 'test'
+  ...
+# Subtest: real first request enforces an exact route policy before adapter dispatch and preserves the local failure
+ok 21 - real first request enforces an exact route policy before adapter dispatch and preserves the local failure
+  ---
+  duration_ms: 156.1683
+  type: 'test'
+  ...
+# Subtest: real provider overflow below the estimated soft limit forces a prefix and retries once after durable shrink
+ok 22 - real provider overflow below the estimated soft limit forces a prefix and retries once after durable shrink
+  ---
+  duration_ms: 258.413
+  type: 'test'
+  ...
+# Subtest: disabled overflow actions retain the original provider failure without maintenance or retry
+ok 23 - disabled overflow actions retain the original provider failure without maintenance or retry
+  ---
+  duration_ms: 206.0551
+  type: 'test'
+  ...
+# Subtest: failed overflow summary leaves the original provider failure terminal and never retries without shrink
+ok 24 - failed overflow summary leaves the original provider failure terminal and never retries without shrink
+  ---
+  duration_ms: 222.4236
+  type: 'test'
+  ...
+# Subtest: a committed prune qualifies overflow recovery even when the following summary fails
+ok 25 - a committed prune qualifies overflow recovery even when the following summary fails
+  ---
+  duration_ms: 253.8905
+  type: 'test'
+  ...
+# Subtest: real deep rest commits one handoff, fixed shadow prices, and replayable completion
+ok 26 - real deep rest commits one handoff, fixed shadow prices, and replayable completion
+  ---
+  duration_ms: 314.0539
+  type: 'test'
+  ...
+# Subtest: real request journal retains dispatch calibration facts and summary actions across Loader restart
+ok 27 - real request journal retains dispatch calibration facts and summary actions across Loader restart
+  ---
+  duration_ms: 449.445
+  type: 'test'
+  ...
+# Subtest: exact model-switch prompts are request-only, logged, priced and absent from another summary route
+ok 28 - exact model-switch prompts are request-only, logged, priced and absent from another summary route
+  ---
+  duration_ms: 383.809
+  type: 'test'
+  ...
+# Subtest: actual request calibration includes a large one-shot reminder and does not distort the next prompt
+ok 29 - actual request calibration includes a large one-shot reminder and does not distort the next prompt
+  ---
+  duration_ms: 209.0748
+  type: 'test'
+  ...
+# Subtest: committed output feedback waits for a natural request, uses actual dispatch, and stays out of history
+ok 30 - committed output feedback waits for a natural request, uses actual dispatch, and stays out of history
+  ---
+  duration_ms: 234.7245
+  type: 'test'
+  ...
+# Subtest: a control edit during durable notice reservation refuses handoff and restores both delivery allowances
+ok 31 - a control edit during durable notice reservation refuses handoff and restores both delivery allowances
+  ---
+  duration_ms: 233.8047
+  type: 'test'
+  ...
+# Subtest: source disposal during preflight invalidates a request even without a preference revision change
+ok 32 - source disposal during preflight invalidates a request even without a preference revision change
+  ---
+  duration_ms: 146.2615
+  type: 'test'
+  ...
+# Subtest: completion outbox restores a bounded notice and delivers it on the next natural request
+ok 33 - completion outbox restores a bounded notice and delivers it on the next natural request
+  ---
+  duration_ms: 403.5257
+  type: 'test'
+  ...
+# Subtest: cold completion reconciliation finishes a missed outbox write without bypassing source cooldown
+ok 34 - cold completion reconciliation finishes a missed outbox write without bypassing source cooldown
+  ---
+  duration_ms: 396.8975
+  type: 'test'
+  ...
+# Subtest: real JSON storage acknowledges pending, restores it after restart, and retains source isolation
+ok 35 - real JSON storage acknowledges pending, restores it after restart, and retains source isolation
+  ---
+  duration_ms: 232.2679
+  type: 'test'
+  ...
+# Subtest: real Connection admits session controls, rejects malformed writes, and preserves CAS
+ok 36 - real Connection admits session controls, rejects malformed writes, and preserves CAS
+  ---
+  duration_ms: 184.2782
+  type: 'test'
+  ...
+# Subtest: Loader registrants execute declared rules, respect toggles, and unload without losing persisted choices
+ok 37 - Loader registrants execute declared rules, respect toggles, and unload without losing persisted choices
+  ---
+  duration_ms: 449.6814
+  type: 'test'
+  ...
+# Subtest: Workbench v2 edits request copies, renders strict entry templates, logs the diff and preserves committed source text
+ok 38 - Workbench v2 edits request copies, renders strict entry templates, logs the diff and preserves committed source text
+  ---
+  duration_ms: 521.3721
+  type: 'test'
+  ...
+# Subtest: Workbench v2 records all-token-skipped request decisions in the real dispatch log without spending successful state
+ok 39 - Workbench v2 records all-token-skipped request decisions in the real dispatch log without spending successful state
+  ---
+  duration_ms: 423.5242
+  type: 'test'
+  ...
+# Subtest: Workbench v2 cascades only explicit entries, previews without writes and rejects stale automatic variable snapshots
+ok 40 - Workbench v2 cascades only explicit entries, previews without writes and rejects stale automatic variable snapshots
+  ---
+  duration_ms: 484.9106
+  type: 'test'
+  ...
+# Subtest: Workbench v2 shares token and cache budgets across real Host cascade passes without consuming skipped entries
+ok 41 - Workbench v2 shares token and cache budgets across real Host cascade passes without consuming skipped entries
+  ---
+  duration_ms: 731.1759
+  type: 'test'
+  ...
+# Subtest: Workbench v2 character overflow remains an explicit Host planning failure with no dispatch or runtime write
+ok 42 - Workbench v2 character overflow remains an explicit Host planning failure with no dispatch or runtime write
+  ---
+  duration_ms: 382.1429
+  type: 'test'
+  ...
+# Subtest: Workbench v2 isolates registered sources and rejects conflicts against local and pending document identities
+ok 43 - Workbench v2 isolates registered sources and rejects conflicts against local and pending document identities
+  ---
+  duration_ms: 182.7346
+  type: 'test'
+  ...
+# Subtest: Workbench v2 preserves output history windows without replaying pre-registration or restored output
+ok 44 - Workbench v2 preserves output history windows without replaying pre-registration or restored output
+  ---
+  duration_ms: 583.515
+  type: 'test'
+  ...
+# Subtest: Workbench v2 lets an eligible exclusive sibling run when a higher priority rule was enabled after the output
+ok 45 - Workbench v2 lets an eligible exclusive sibling run when a higher priority rule was enabled after the output
+  ---
+  duration_ms: 355.9734
+  type: 'test'
+  ...
+# Subtest: Workbench v2 renews variable snapshots only for explicit dependents and delivers their updated templates
+ok 46 - Workbench v2 renews variable snapshots only for explicit dependents and delivers their updated templates
+  ---
+  duration_ms: 438.2276
+  type: 'test'
+  ...
+# Subtest: Workbench v2 HTTP authenticates inspection, isolates cancellation and rejects rule editing
+ok 47 - Workbench v2 HTTP authenticates inspection, isolates cancellation and rejects rule editing
+  ---
+  duration_ms: 303.3349
+  type: 'test'
+  ...
+# Subtest: Workbench v2 compact actions use native context_rest admission and complete the summary before continuing
+ok 48 - Workbench v2 compact actions use native context_rest admission and complete the summary before continuing
+  ---
+  duration_ms: 566.099
+  type: 'test'
+  ...
+# Subtest: Workbench v2 action turn and session lifetimes are consumed by successful delivery and isolate later turns
+ok 49 - Workbench v2 action turn and session lifetimes are consumed by successful delivery and isolate later turns
+  ---
+  duration_ms: 543.0968
+  type: 'test'
+  ...
+# Subtest: Workbench v2 materializes frozen entry slices on real tool steps, expires fixed turns and keeps ordinary turn consumption separate
+ok 50 - Workbench v2 materializes frozen entry slices on real tool steps, expires fixed turns and keeps ordinary turn consumption separate
+  ---
+  duration_ms: 641.9927
+  type: 'test'
+  ...
+# Subtest: Workbench v2 acknowledges inactive entry transitions, blocks reactivation during cooldown and leaves preview state untouched
+ok 51 - Workbench v2 acknowledges inactive entry transitions, blocks reactivation during cooldown and leaves preview state untouched
+  ---
+  duration_ms: 446.6711
+  type: 'test'
+  ...
+# Subtest: Workbench v2 surface replacement removes strict activation evidence without resetting the durable fixed-turn lifetime
+ok 52 - Workbench v2 surface replacement removes strict activation evidence without resetting the durable fixed-turn lifetime
+  ---
+  duration_ms: 559.9163
+  type: 'test'
+  ...
+# Subtest: Workbench v2 cooling entries release their exclusive group while keeping the skip reason visible
+ok 53 - Workbench v2 cooling entries release their exclusive group while keeping the skip reason visible
+  ---
+  duration_ms: 395.7239
+  type: 'test'
+  ...
+# Subtest: Workbench v2 inactive reservations roll back, reject stale state and retain held text after a failed durable ACK
+ok 54 - Workbench v2 inactive reservations roll back, reject stale state and retain held text after a failed durable ACK
+  ---
+  duration_ms: 316.7362
+  type: 'test'
+  ...
+# Subtest: Workbench v2 restores session slices, isolates real fork seeds and refuses plans from an earlier turn
+ok 55 - Workbench v2 restores session slices, isolates real fork seeds and refuses plans from an earlier turn
+  ---
+  duration_ms: 770.2831
+  type: 'test'
+  ...
+# Subtest: Workbench v2 executes a final-output program through native tools before the turn closes and resolves dependent partial templates
+ok 56 - Workbench v2 executes a final-output program through native tools before the turn closes and resolves dependent partial templates
+  ---
+  duration_ms: 417.3262
+  type: 'test'
+  ...
+# Subtest: Workbench v2 rule files publish validated revisions atomically, report failures and recover without an editor
+ok 57 - Workbench v2 rule files publish validated revisions atomically, report failures and recover without an editor
+  ---
+  duration_ms: 361.5787
+  type: 'test'
+  ...
+# Subtest: Workbench v2 management HTTP validates pages, projects external values, previews without writes and isolates cancellation
+ok 58 - Workbench v2 management HTTP validates pages, projects external values, previews without writes and isolates cancellation
+  ---
+  duration_ms: 388.0265
+  type: 'test'
+  ...
+# Subtest: Workbench v2 detects real streamed chunks across boundaries once and delivers a next-step notice without rewriting output
+ok 59 - Workbench v2 detects real streamed chunks across boundaries once and delivers a next-step notice without rewriting output
+  ---
+  duration_ms: 523.2199
+  type: 'test'
+  ...
+# Subtest: Workbench v2 streamed abort stops provider consumption and dependent resume starts a fresh native turn
+ok 60 - Workbench v2 streamed abort stops provider consumption and dependent resume starts a fresh native turn
+  ---
+  duration_ms: 558.3879
+  type: 'test'
+  ...
+# Subtest: Workbench v2 streamed preferences start a fresh text boundary and auxiliary requests never trigger output rules
+ok 61 - Workbench v2 streamed preferences start a fresh text boundary and auxiliary requests never trigger output rules
+  ---
+  duration_ms: 407.5607
+  type: 'test'
+  ...
+# Subtest: Workbench v2 streamed text budget stops and cleans the real request only while delta detection is enabled
+ok 62 - Workbench v2 streamed text budget stops and cleans the real request only while delta detection is enabled
+  ---
+  duration_ms: 320.2736
+  type: 'test'
+  ...
+# Subtest: Workbench v2 display compares pure copies and re-renders history with current preferences without consuming actions
+ok 63 - Workbench v2 display compares pure copies and re-renders history with current preferences without consuming actions
+  ---
+  duration_ms: 292.8602
+  type: 'test'
+  ...
+# ℹ entry: test/browser-display-entry.js
+# ℹ target: es2022
+# ℹ Build start
+# ℹ Cleaning 1 files
+# ℹ Hint: consider adding deps.onlyBundle option to avoid unintended bundling of dependencies, or set deps.onlyBundle: false to disable this hint.
+# See more at https://tsdown.dev/options/dependencies\#deps-onlybundle
+# Detected dependencies in bundle:
+# - react
+# - scheduler
+# - react-dom
+# ℹ ..\\..\\care-browser-production-ui-tht3qO\\fixture.js  261.58 kB │ gzip: 70.24 kB
+# ℹ 1 files, total: 261.58 kB
+# ✔ Build complete in 354ms
+# Subtest: browser on-demand reader reaches authenticated real Host and shows disconnect as failure
+ok 64 - browser on-demand reader reaches authenticated real Host and shows disconnect as failure
+  ---
+  duration_ms: 5254.6496
+  type: 'test'
+  ...
+# Subtest: actual display template failure stays visible while two conversation turns complete
+ok 65 - actual display template failure stays visible while two conversation turns complete
+  ---
+  duration_ms: 446.336
+  type: 'test'
+  ...
+# Subtest: real display markers exclude unmatched and same-text replacements
+ok 66 - real display markers exclude unmatched and same-text replacements
+  ---
+  duration_ms: 347.4941
+  type: 'test'
+  ...
+# Subtest: Workbench v2 display refuses signed text patches and cancels matching without a state write
+ok 67 - Workbench v2 display refuses signed text patches and cancels matching without a state write
+  ---
+  duration_ms: 336.8751
+  type: 'test'
+  ...
+# Subtest: Workbench v2 display budgets the complete response and refuses a configuration race before publication
+ok 68 - Workbench v2 display budgets the complete response and refuses a configuration race before publication
+  ---
+  duration_ms: 657.3318
+  type: 'test'
+  ...
+# Subtest: Workbench v2 external detector finalizes a real stream once and exposes owned availability after disposal
+ok 69 - Workbench v2 external detector finalizes a real stream once and exposes owned availability after disposal
+  ---
+  duration_ms: 449.4498
+  type: 'test'
+  ...
+# Subtest: real output matcher failure is durable and visible over HTTP while two turns continue
+ok 70 - real output matcher failure is durable and visible over HTTP while two turns continue
+  ---
+  duration_ms: 811.1455
+  type: 'test'
+  ...
+# Subtest: real concurrent display timeouts cannot consume request matching admission
+ok 71 - real concurrent display timeouts cannot consume request matching admission
+  ---
+  duration_ms: 495.0377
+  type: 'test'
+  ...
+# Subtest: real tool matcher timeout rejects only that tool assessment and the conversation continues
+ok 72 - real tool matcher timeout rejects only that tool assessment and the conversation continues
+  ---
+  duration_ms: 413.8628
+  type: 'test'
+  ...
+# Subtest: explicit required request matching reports failure and does not dispatch the unresolved request
+ok 73 - explicit required request matching reports failure and does not dispatch the unresolved request
+  ---
+  duration_ms: 364.7488
+  type: 'test'
+  ...
+# Subtest: Workbench v2 builtin incremental detector excludes closed-interval text in the real Host pipeline
+ok 74 - Workbench v2 builtin incremental detector excludes closed-interval text in the real Host pipeline
+  ---
+  duration_ms: 349.2792
+  type: 'test'
+  ...
+1..74
+# tests 74
+# suites 0
+# pass 74
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 40562.683
