@@ -1,0 +1,18 @@
+
+ RUN  v4.1.8 D:/dev/dsh-context-care
+
+ ✓ test/source-navigation.spec.js (6 tests) 130ms
+ ✓ test/care-ui.spec.js (6 tests) 1335ms
+   ✓ rule controls expose registrants, independent actions and acknowledged save failures  800ms
+   ✓ thousands of source references stay bounded and remain searchable and navigable  359ms
+ ✓ test/rule-runtime.spec.js (11 tests) 2739ms
+   ✓ declarations show foreign sources, templates and current variables without authoring controls; JSON mounts on demand  554ms
+   ✓ runs paginate and filter with no stale page controls; cancellation failure survives successful reads  609ms
+   ✓ manager retains control subscription across views, resets on session switch and ignores late requests  413ms
+ ✓ test/client-assembly.spec.js (3 tests) 6694ms
+   ✓ native slots show readable records, locate paged sources, isolate sessions and release navigation on unload  6515ms
+
+ Test Files  4 passed (4)
+      Tests  26 passed (26)
+   Start at  23:04:32
+   Duration  14.96s (transform 4.10s, setup 0ms, import 7.55s, tests 10.90s, environment 7.70s)

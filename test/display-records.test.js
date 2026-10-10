@@ -25,6 +25,8 @@ test('failed real HTTP reads retain status and route for empty, HTML and JSON re
     assert.equal(failure.status, 'error')
     assert.match(failure.error, new RegExp(`HTTP ${reply.status}`))
     assert.equal(failure.route, '/context-care/display?sessionId=s&seq=3')
+    assert.equal(failure.phase, 'http')
+    assert.equal(failure.httpStatus, reply.status)
     if (reply.type === 'application/json') assert.match(failure.error, /workbench-unavailable/)
   }
 })
@@ -63,5 +65,50 @@ test('on-demand detail reader uses real HTTP, rejects malformed results, and exp
   assert.equal(failure.status, 'error')
   assert.match(failure.error, /fetch failed/)
   assert.match(failure.route, /sessionId=s&seq=3/)
+  assert.equal(failure.phase, 'fetch')
+  assert.equal(failure.httpStatus, undefined)
   assert.equal(requests, count, 'A disconnected read cannot reach the server')
+})
+
+test('a real interrupted response body retains received status separately from a connection failure', async t => {
+  let status = 200
+  const server = createServer((_request, response) => {
+    response.writeHead(status, { 'content-type': 'application/json', 'content-length': 4096 })
+    response.flushHeaders()
+    response.write('{"projections":[')
+    setTimeout(() => response.destroy(), 50)
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  const base = `http://127.0.0.1:${server.address().port}`
+  const records = createDisplayRecords({ fetcher: (path, options) => fetch(new URL(path, base), options) })
+  t.after(() => { records.dispose(); server.closeAllConnections(); server.close() })
+  for (status of [200, 503]) {
+    await records.read('s', 3, { refresh: true })
+    const failure = records.source.getSnapshot().get('s:0:3')
+    assert.equal(failure.status, 'error')
+    assert.equal(failure.phase, 'body')
+    assert.equal(failure.httpStatus, status)
+    assert.match(failure.route, /sessionId=s&seq=3/)
+    assert.match(failure.error, /terminated/)
+  }
+})
+
+test('complete malformed JSON and mismatched message identity have distinct response diagnostics', async t => {
+  let body = '{'
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'application/json' })
+    response.end(body)
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  const base = `http://127.0.0.1:${server.address().port}`
+  const records = createDisplayRecords({ fetcher: (path, options) => fetch(new URL(path, base), options) })
+  t.after(() => { records.dispose(); server.closeAllConnections(); server.close() })
+  await records.read('s', 3)
+  assert.equal(records.source.getSnapshot().get('s:0:3').phase, 'json')
+  body = JSON.stringify({ projections: [{ seq: 4, before: [], after: [] }] })
+  await records.read('s', 3, { refresh: true })
+  const failure = records.source.getSnapshot().get('s:0:3')
+  assert.equal(failure.phase, 'validation')
+  assert.equal(failure.httpStatus, 200)
+  assert.match(failure.error, /Invalid display response/)
 })

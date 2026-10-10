@@ -13,6 +13,7 @@ import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { readFileSync } from 'node:fs'
 import { runInNewContext } from 'node:vm'
+import { createServer } from 'node:http'
 
 const TAB = 'dsh-context-care:actions'
 const PROMPTS = 'dsh-context-care:prompts'
@@ -212,6 +213,72 @@ test('native slots show readable records, locate paged sources, isolate sessions
     expect(tabs.get('dsh-context-care:workbench')).toBeUndefined()
     expect(dictionaries.has('dsh-context-care-workbench')).toBe(false)
   } finally { sidebar.controller.tabDomain.dispose(); await runtime.dispose(); vi.unstubAllGlobals(); vi.restoreAllMocks() }
+})
+
+test('built client shows response-read stage and received status in the native sidebar after a real disconnect', async () => {
+  const runtime = await SlotTestRuntime.create(); const dictionaries = new Map()
+  const bind = name => key => dictionaries.get(name)?.[key] ?? key
+  runtime.ctx.provide('locale', { bind, register(name, values) { dictionaries.set(name, values.zh); return () => dictionaries.delete(name) } })
+  runtime.slots.installLocale({ getSnapshot: () => 0, subscribe: () => () => {}, bind })
+  const conversation = new UiConversation(runtime.ctx, runtime.ctx.sessions)
+  runtime.ctx.effect(() => conversation.events.register(messageDefinition))
+  runtime.ctx.effect(() => conversation.views.register(chatViewDefinition))
+  const tabs = new SidebarRightTabRegistry(runtime.ctx)
+  const store = createSidebarRightStore(() => ({ kind: 'guide', title: 'seed' })).create()
+  const sidebar = createSidebarRightController(tabs, () => {}, { autoFullscreen: () => false,
+    openWithFocus: (_sessionId, open) => open(), closeWithFocus: (_sessionId, _paneId, close) => close() })
+  const id = 'display-diagnostic'
+  sidebar.adopt(id, store); sidebar.show(id)
+  runtime.ctx.provide('sidebarRightTabs', tabs)
+  runtime.ctx.provide('sidebarRight', sidebar.controller)
+  runtime.ctx.provide('layout', { openRightbar: () => store.actions.setExpanded(id, true) })
+  await runtime.sessions.add({ id, events: [event(24)] })
+  const session = runtime.sessions.retainFor(runtime.ctx, id)
+  let detailReads = 0
+  const server = createServer((request, response) => {
+    const pathname = new URL(request.url, 'http://test').pathname
+    if (pathname === '/context-care/display') {
+      detailReads++
+      response.writeHead(200, { 'content-type': 'application/json', 'content-length': 4096 })
+      response.flushHeaders(); response.write('{"projections":[')
+      setTimeout(() => response.destroy(), 50)
+      return
+    }
+    response.setHeader('content-type', 'application/json')
+    response.end(JSON.stringify(pathname === '/context-care/actions'
+      ? { actions: [], displayMarkers: [24], matchingFailures: [] } : { records: [] }))
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  const base = `http://127.0.0.1:${server.address().port}`
+  const nativeFetch = globalThis.fetch
+  vi.stubGlobal('fetch', (path, options) => nativeFetch(new URL(path, base), options))
+  await runtime.root.declare({ 'conversation.composer.dock': { kind: 'list', scope: 'session' },
+    'conversation.chat.node': { kind: 'keyed', scope: 'session' }, 'sidebar.right.pane.tab': { kind: 'keyed', scope: 'session' } }, ({ SessionProvider, renderSlot }) => {
+    const state = useSyncExternalStore(store.subscribe, store.getSnapshot).bySession[id]
+    const tab = state?.layout.tabs[state.layout.nodes[state.layout.activePaneId]?.activeTabId]
+    const assembly = conversation.binding(id); assembly.activate('chat')
+    const chat = useSyncExternalStore(assembly.snapshot.subscribe, assembly.snapshot.getSnapshot).views.get('chat')
+    return h(SessionProvider, { session }, renderSlot('conversation.composer.dock', {}),
+      h('main', null, ...chat.nodes.values().map(node => h('div', { key: node.key }, node.kind === 'context-care-display-copy'
+        ? renderSlot('conversation.chat.node', { node }, { entryKey: node.kind }) : h('pre', { 'data-native-message': '' }, 'Source 24')))),
+      state?.layout.expanded && tab ? h('aside', null, renderSlot('sidebar.right.pane.tab', {}, { entryKey: tabs.get(tab.kind)?.id })) : null)
+  })
+  try {
+    await runtime.mount(plugin.exports)
+    const view = runtime.renderRoot()
+    await waitFor(() => expect(view.getByRole('button', { name: '显示已处理 →' })).toBeTruthy())
+    expect(detailReads).toBe(0)
+    fireEvent.click(view.getByRole('button', { name: '显示已处理 →' }))
+    await waitFor(() => expect(view.container.querySelector('aside [role="alert"]')?.textContent).toContain('响应读取失败 · HTTP 200'))
+    expect(view.container.querySelector('aside').textContent).toContain('/context-care/display?sessionId=display-diagnostic&seq=24')
+    expect(view.container.querySelector('[data-native-message]').textContent).toBe('Source 24')
+    expect(detailReads).toBe(1)
+    expect(snapshotView(view.container)).toMatchSnapshot('received response interrupted in official sidebar')
+  } finally {
+    sidebar.controller.tabDomain.dispose(); await runtime.dispose()
+    vi.unstubAllGlobals(); vi.restoreAllMocks()
+    server.closeAllConnections(); await new Promise(resolve => server.close(resolve))
+  }
 })
 
 test('built client leaves unchanged native messages without markers or display HTTP reads', async () => {

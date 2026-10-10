@@ -1,6 +1,6 @@
 # dsh-context-care 0.8.2 修复候选
 
-主包候选未发布、未部署；代码修复已提交推送，v0.8.0 与 v0.8.1 旧标签保持原位。初次公开消费验收对应提交 `6b37fa1b97e6b32e71fb2a98a993c213afc49838`；最新包含详情诊断修正的公开消费验收对应 `0c18c2981ee398ec59339b208de6aeae3ad51cb0`。
+主包候选未发布、未部署；v0.8.0 与 v0.8.1 旧标签保持原位。此前公开消费验收对应提交 `6b37fa1b97e6b32e71fb2a98a993c213afc49838` 和包含请求路由诊断的 `0c18c2981ee398ec59339b208de6aeae3ad51cb0`。此后新增响应读取阶段诊断和Client构建，下面将此前公开包结果与本轮开发树结果分开记录。
 
 消息区只为内容实际改变的消息显示轻量处理标记，点击后在右栏按需读取详情。逐消息显示对照卡和两秒详情轮询已移除；未命中、同文替换无标记，规则状态变化使旧标记失效。
 
@@ -32,6 +32,14 @@
 实际运行的桌面 Host 引擎为 Electron 内置 Node24.18.1，启动带 `--expose-internals`；此前的 Node24.21.0 是部署随带的独立 Node。最新公开消费包在实际引擎及同一启动参数下的入口、Client factory、原块和 worker smoke通过，见 [desktop-engine-public-consumer-0c18c29.log](desktop-engine-public-consumer-0c18c29.log)。真实已部署 ASAR 模块（DSH0.2.0-rc.2、Cordis4.0.4、Loader1.0.5）的8项故障及多会话检查全部通过，见 [desktop-runtime-public-host-fixed-0c18c29.log](desktop-runtime-public-host-fixed-0c18c29.log)。首次检查在测试解析包名处失败，已修正目录叶推断为显式公开包名；未修改生产解析。生产标记与右栏reader通过真实msedge→该ASAR Host的按需读取及断开检查1/1，见 [desktop-runtime-browser-diagnostics-0c18c29.log](desktop-runtime-browser-diagnostics-0c18c29.log)。浏览器入口从相同生产源码构建，源码与公开安装文件一致；这不是将插件安装进现场GUI。
 
 测试明确指定外部只读 Harness；生产运行时不导入该 checkout。LLM 使用测试适配器，未验证真实模型供应商行为。主包声明 AGPL-3.0-only；引擎依赖声明 AGPL-3.0-or-later，查询依赖声明 MIT。
+
+## 桌面协议与响应阶段
+
+原0.8.1 reader已在真实Electron44/Node24.18.1中经`dsh-app://app`读取部署ASAR Host：64卡片、三轮两秒轮询收到192个200和192个matcher故障503，均无传输失败，见[legacy-desktop-protocol-load64.log](legacy-desktop-protocol-load64.log)。测试自有TCP故障证明响应头前断连（UND_ERR_SOCKET）、连接拒绝（ECONNREFUSED）和HTTP200后的响应体中断均可被旧reader显示为同一个TypeError: Failed to fetch。前两者renderer网络码为ERR_UNEXPECTED，后者为ERR_FAILED；此前“该字符串说明未拿到Response”的推断已撤回。
+
+候选reader保留fetch/body/http/json/validation阶段、具体route和收到的httpStatus，右栏显示本地化阶段说明。完整单元314/314、完整Client26/26及新增已构建Client真实HTTP中断快照通过，见[display-phase-unit.log](display-phase-unit.log)、[display-phase-client.log](display-phase-client.log)。95源文件syntax与直接执行已安装构建器通过，Client已重新生成。实际部署ASAR主程序的scheme和转发函数下，64消息在相同观察期只读64次，三个故障正确区分fetch或body+HTTP200，见[candidate-deployed-asar-protocol-load64.log](candidate-deployed-asar-protocol-load64.log)。历史Host使用原0.8.1，reader为候选，测试不声称旧Host故障策略已经改变。
+
+诊断脚本可明确选定部署main的ASAR路径；Electron引擎复制到测试临时目录，不复制生产app.asar或profile。隐藏renderer与独立socket通信，记录protocol异常、renderer网络码和原reader结果。故障由真实TCP端点产生，无fetch mock。合成负载与受控断连定位错误传播机制，不证明10:29的原始触发。目标保持active；不以缺旧日志标受阻。
 
 ## 现场剩余工作
 

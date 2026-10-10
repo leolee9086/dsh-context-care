@@ -1,0 +1,1903 @@
+TAP version 13
+# Subtest: action polling preserves the Host storage diagnostic in its visible error state
+ok 1 - action polling preserves the Host storage diagnostic in its visible error state
+  ---
+  duration_ms: 42.3387
+  type: 'test'
+  ...
+# Subtest: historical compaction exposes stored facts without fabricating before/after or audit failure
+ok 2 - historical compaction exposes stored facts without fabricating before/after or audit failure
+  ---
+  duration_ms: 79.455
+  type: 'test'
+  ...
+# Subtest: multiple summary transactions retain one failed operation and enrich already settled audits
+ok 3 - multiple summary transactions retain one failed operation and enrich already settled audits
+  ---
+  duration_ms: 0.6466
+  type: 'test'
+  ...
+# Subtest: action display groups transactions, separates pricing units and reports missing audit after a durable commit
+ok 4 - action display groups transactions, separates pricing units and reports missing audit after a durable commit
+  ---
+  duration_ms: 8.5936
+  type: 'test'
+  ...
+# Subtest: settled deep handoffs and partial durable failures retain one audited action
+ok 5 - settled deep handoffs and partial durable failures retain one audited action
+  ---
+  duration_ms: 0.8704
+  type: 'test'
+  ...
+# Subtest: session polling reserves one fetch, releases retained pages, and aborts in-flight work on unload
+ok 6 - session polling reserves one fetch, releases retained pages, and aborts in-flight work on unload
+  ---
+  duration_ms: 1.4428
+  type: 'test'
+  ...
+# Subtest: existing-session numeric upgrade preserves outcomes, admission fields and cleanup
+ok 7 - existing-session numeric upgrade preserves outcomes, admission fields and cleanup
+  ---
+  duration_ms: 8.3856
+  type: 'test'
+  ...
+# Subtest: legacy output pressure does not change an uncalibrated input observation
+ok 8 - legacy output pressure does not change an uncalibrated input observation
+  ---
+  duration_ms: 0.9331
+  type: 'test'
+  ...
+# Subtest: eligible fivefold text calibration supplied by the plugin journal is never clipped by the consumer
+ok 9 - eligible fivefold text calibration supplied by the plugin journal is never clipped by the consumer
+  ---
+  duration_ms: 0.8038
+  type: 'test'
+  ...
+# Subtest: provider 上报的数字变化不触发通知
+ok 10 - provider 上报的数字变化不触发通知
+  ---
+  duration_ms: 1.3403
+  type: 'test'
+  ...
+# Subtest: numeric-only changes do not notify until the model-visible grade changes
+ok 11 - numeric-only changes do not notify until the model-visible grade changes
+  ---
+  duration_ms: 2.1058
+  type: 'test'
+  ...
+# Subtest: 工具定义计入请求内容量
+ok 12 - 工具定义计入请求内容量
+  ---
+  duration_ms: 1.2028
+  type: 'test'
+  ...
+# Subtest: existing-session numeric upgrade samples when old grade is unchanged and respects rejection
+ok 13 - existing-session numeric upgrade samples when old grade is unchanged and respects rejection
+  ---
+  duration_ms: 0.7044
+  type: 'test'
+  ...
+# Subtest: Chinese UI displays numeric percentages, levels and independent colors
+ok 14 - Chinese UI displays numeric percentages, levels and independent colors
+  ---
+  duration_ms: 8.1317
+  type: 'test'
+  ...
+# Subtest: all four ranges have distinct colors with exact thresholds
+ok 15 - all four ranges have distinct colors with exact thresholds
+  ---
+  duration_ms: 0.5218
+  type: 'test'
+  ...
+# Subtest: UI does not invent numeric samples for old or uncalibrated observations
+ok 16 - UI does not invent numeric samples for old or uncalibrated observations
+  ---
+  duration_ms: 2.8834
+  type: 'test'
+  ...
+# Subtest: UI replays numeric metadata while model text retains only grades
+ok 17 - UI replays numeric metadata while model text retains only grades
+  ---
+  duration_ms: 2.2459
+  type: 'test'
+  ...
+# Subtest: notice definition keys on form only: every notice in, plain user messages untouched
+ok 18 - notice definition keys on form only: every notice in, plain user messages untouched
+  ---
+  duration_ms: 1.3077
+  type: 'test'
+  ...
+# Subtest: notice node keeps the durable position and unwraps the message text
+ok 19 - notice node keeps the durable position and unwraps the message text
+  ---
+  duration_ms: 0.4336
+  type: 'test'
+  ...
+# Subtest: notice card speaks human: source label, sampled values, unwrapped body
+ok 20 - notice card speaks human: source label, sampled values, unwrapped body
+  ---
+  duration_ms: 1.9262
+  type: 'test'
+  ...
+# Subtest: unwrapping drops model-facing wrapper lines and keeps real content
+ok 21 - unwrapping drops model-facing wrapper lines and keeps real content
+  ---
+  duration_ms: 0.3226
+  type: 'test'
+  ...
+# Subtest: values come only from real samples; a placeholder summary yields to them
+ok 22 - values come only from real samples; a placeholder summary yields to them
+  ---
+  duration_ms: 1.2208
+  type: 'test'
+  ...
+# Subtest: source labels speak for this plugin and keep foreign producers verbatim
+ok 23 - source labels speak for this plugin and keep foreign producers verbatim
+  ---
+  duration_ms: 0.7469
+  type: 'test'
+  ...
+# Subtest: producer name reads both source generations; empty text makes no node
+ok 24 - producer name reads both source generations; empty text makes no node
+  ---
+  duration_ms: 0.4057
+  type: 'test'
+  ...
+# Subtest: a natural dispatch consumes the newest completion notice and supersedes older ones
+ok 25 - a natural dispatch consumes the newest completion notice and supersedes older ones
+  ---
+  duration_ms: 4.4029
+  type: 'test'
+  ...
+# Subtest: known unstarted completion handoff restores the prior unknown allowance and cannot undo a sent notice
+ok 26 - known unstarted completion handoff restores the prior unknown allowance and cannot undo a sent notice
+  ---
+  duration_ms: 0.7788
+  type: 'test'
+  ...
+# Subtest: an unknown completion delivery retains its id after restart, with a bounded allowance
+ok 27 - an unknown completion delivery retains its id after restart, with a bounded allowance
+  ---
+  duration_ms: 0.9169
+  type: 'test'
+  ...
+# Subtest: completion state keys stay safe for the JSON per-record backend
+ok 28 - completion state keys stay safe for the JSON per-record backend
+  ---
+  duration_ms: 1.8767
+  type: 'test'
+  ...
+# Subtest: parser accepts English and Chinese labels but ignores quotes, fences, and negation
+ok 29 - parser accepts English and Chinese labels but ignores quotes, fences, and negation
+  ---
+  duration_ms: 38.5886
+  type: 'test'
+  ...
+# Subtest: observer persists pending before completion and applies source cooldown
+ok 30 - observer persists pending before completion and applies source cooldown
+  ---
+  duration_ms: 6.7872
+  type: 'test'
+  ...
+# Subtest: configured storage failures retain their original error and never acknowledge a memory write
+ok 31 - configured storage failures retain their original error and never acknowledge a memory write
+  ---
+  duration_ms: 1.549
+  type: 'test'
+  ...
+# Subtest: settlement from an older occurrence cannot consume a newer pending observation
+ok 32 - settlement from an older occurrence cannot consume a newer pending observation
+  ---
+  duration_ms: 1.6278
+  type: 'test'
+  ...
+# Subtest: policy changes while reading prevent pending and cooldown writes
+ok 33 - policy changes while reading prevent pending and cooldown writes
+  ---
+  duration_ms: 1.066
+  type: 'test'
+  ...
+# Subtest: recovery clears an interrupted pending observation
+ok 34 - recovery clears an interrupted pending observation
+  ---
+  duration_ms: 0.9096
+  type: 'test'
+  ...
+# Subtest: combined policy limits preserve actual capacity and reserve output once
+ok 35 - combined policy limits preserve actual capacity and reserve output once
+  ---
+  duration_ms: 1.6543
+  type: 'test'
+  ...
+# Subtest: billing ceiling applies safety once and unknown capacity still allows dispatch
+ok 36 - billing ceiling applies safety once and unknown capacity still allows dispatch
+  ---
+  duration_ms: 1.3411
+  type: 'test'
+  ...
+# Subtest: maintenance starts at soft and continues below soft until strictly below release
+ok 37 - maintenance starts at soft and continues below soft until strictly below release
+  ---
+  duration_ms: 0.9967
+  type: 'test'
+  ...
+# Subtest: exact route and purpose policies reject duplicate declarations
+ok 38 - exact route and purpose policies reject duplicate declarations
+  ---
+  duration_ms: 0.7838
+  type: 'test'
+  ...
+# Subtest: recovery requires a retained replacement after the failed revision, source coverage and a frozen-price decrease
+ok 39 - recovery requires a retained replacement after the failed revision, source coverage and a frozen-price decrease
+  ---
+  duration_ms: 0.7599
+  type: 'test'
+  ...
+# Subtest: S-forge curves distinguish retained information from relative pressure
+ok 40 - S-forge curves distinguish retained information from relative pressure
+  ---
+  duration_ms: 5.3771
+  type: 'test'
+  ...
+# Subtest: range keeps a complete tool call/result batch
+ok 41 - range keeps a complete tool call/result batch
+  ---
+  duration_ms: 1.0387
+  type: 'test'
+  ...
+# Subtest: clear range keeps the system prompt at node 0 and stops on a balanced tool edge
+ok 42 - clear range keeps the system prompt at node 0 and stops on a balanced tool edge
+  ---
+  duration_ms: 0.6091
+  type: 'test'
+  ...
+# Subtest: clear range declines when only the system prompt would be left
+ok 43 - clear range declines when only the system prompt would be left
+  ---
+  duration_ms: 0.2589
+  type: 'test'
+  ...
+# Subtest: summary-only and plugin statuses are not fresh work
+ok 44 - summary-only and plugin statuses are not fresh work
+  ---
+  duration_ms: 0.2931
+  type: 'test'
+  ...
+# Subtest: system tokens never make a status-only prefix fresh
+ok 45 - system tokens never make a status-only prefix fresh
+  ---
+  duration_ms: 0.4088
+  type: 'test'
+  ...
+# Subtest: one session arming maintenance cannot cause another session below the soft budget to compact
+ok 46 - one session arming maintenance cannot cause another session below the soft budget to compact
+  ---
+  duration_ms: 314.522
+  type: 'test'
+  ...
+# Subtest: deep rest rejects a larger complete handoff before opening a transaction and preserves fixed shadow prices
+ok 47 - deep rest rejects a larger complete handoff before opening a transaction and preserves fixed shadow prices
+  ---
+  duration_ms: 3.3322
+  type: 'test'
+  ...
+# Subtest: deep rest refuses a selected span changed while awaiting the maintenance ACK
+ok 48 - deep rest refuses a selected span changed while awaiting the maintenance ACK
+  ---
+  duration_ms: 0.767
+  type: 'test'
+  ...
+# Subtest: tool queues a bounded note; next boundary compacts once and preserves decision fields
+ok 49 - tool queues a bounded note; next boundary compacts once and preserves decision fields
+  ---
+  duration_ms: 195.0561
+  type: 'test'
+  ...
+# Subtest: rest advertises 8000 characters, accepts the internal boundary and keeps tolerance out of model-facing text
+ok 50 - rest advertises 8000 characters, accepts the internal boundary and keeps tolerance out of model-facing text
+  ---
+  duration_ms: 151.4218
+  type: 'test'
+  ...
+# Subtest: explicit rest reaches the provider with unknown capacity or no prior routed header
+    # Subtest: unknown capacity
+    ok 1 - unknown capacity
+      ---
+      duration_ms: 169.7025
+      type: 'test'
+      ...
+    # Subtest: unknown capacity with an explicit retained tail
+    ok 2 - unknown capacity with an explicit retained tail
+      ---
+      duration_ms: 151.9116
+      type: 'test'
+      ...
+    # Subtest: no routed header
+    ok 3 - no routed header
+      ---
+      duration_ms: 140.858
+      type: 'test'
+      ...
+    1..3
+ok 51 - explicit rest reaches the provider with unknown capacity or no prior routed header
+  ---
+  duration_ms: 463.5546
+  type: 'test'
+  ...
+# Subtest: deep rest clears the history to the handoff and never calls the compaction provider
+ok 52 - deep rest clears the history to the handoff and never calls the compaction provider
+  ---
+  duration_ms: 127.1262
+  type: 'test'
+  ...
+# Subtest: automatic reduction avoids a second compaction in the same boundary
+ok 53 - automatic reduction avoids a second compaction in the same boundary
+  ---
+  duration_ms: 172.4139
+  type: 'test'
+  ...
+# Subtest: delegated ordinary maintenance does not consume an explicit deep handoff
+ok 54 - delegated ordinary maintenance does not consume an explicit deep handoff
+  ---
+  duration_ms: 164.3846
+  type: 'test'
+  ...
+# Subtest: failure is reported without pretending that history was compressed
+ok 55 - failure is reported without pretending that history was compressed
+  ---
+  duration_ms: 168.0153
+  type: 'test'
+  ...
+# Subtest: cancellation and rejected admission do not start compaction
+ok 56 - cancellation and rejected admission do not start compaction
+  ---
+  duration_ms: 174.1423
+  type: 'test'
+  ...
+# Subtest: cancellation during summarization propagates without a completion message
+ok 57 - cancellation during summarization propagates without a completion message
+  ---
+  duration_ms: 183.9286
+  type: 'test'
+  ...
+# Subtest: unchanged status is deduplicated from durable retained history
+ok 58 - unchanged status is deduplicated from durable retained history
+  ---
+  duration_ms: 149.7545
+  type: 'test'
+  ...
+# Subtest: Cordis unload removes tool and prompt contributions and listener
+ok 59 - Cordis unload removes tool and prompt contributions and listener
+  ---
+  duration_ms: 128.7905
+  type: 'test'
+  ...
+# Subtest: status snapshot contains no countdown or unsupported memory diagnosis
+ok 60 - status snapshot contains no countdown or unsupported memory diagnosis
+  ---
+  duration_ms: 0.1975
+  type: 'test'
+  ...
+# Subtest: 建议强度跟着疲劳等级走，very-high 明确指向深度休息
+ok 61 - 建议强度跟着疲劳等级走，very-high 明确指向深度休息
+  ---
+  duration_ms: 0.4227
+  type: 'test'
+  ...
+# Subtest: 常驻指引不再无条件踩刹车
+ok 62 - 常驻指引不再无条件踩刹车
+  ---
+  duration_ms: 0.1318
+  type: 'test'
+  ...
+# Subtest: 规划提醒保留真实期限与当前计量，并注明本插件的提醒来源
+ok 63 - 规划提醒保留真实期限与当前计量，并注明本插件的提醒来源
+  ---
+  duration_ms: 0.4062
+  type: 'test'
+  ...
+# Subtest: 拿不到数值时退回不带数字的说法，不编造百分比
+ok 64 - 拿不到数值时退回不带数字的说法，不编造百分比
+  ---
+  duration_ms: 0.3353
+  type: 'test'
+  ...
+# Subtest: 循环文案仍然说明本轮是被中止的
+ok 65 - 循环文案仍然说明本轮是被中止的
+  ---
+  duration_ms: 0.4857
+  type: 'test'
+  ...
+# Subtest: 代码围栏不算循环：写文档时围栏天然成对出现
+ok 66 - 代码围栏不算循环：写文档时围栏天然成对出现
+  ---
+  duration_ms: 2.5739
+  type: 'test'
+  ...
+# Subtest: 真实循环仍然认得出：同一行反复出现
+ok 67 - 真实循环仍然认得出：同一行反复出现
+  ---
+  duration_ms: 0.3271
+  type: 'test'
+  ...
+# Subtest: 提示规则接线：索引插件声明的规则命中后，进这一轮的 messages
+ok 68 - 提示规则接线：索引插件声明的规则命中后，进这一轮的 messages
+  ---
+  duration_ms: 146.1434
+  type: 'test'
+  ...
+# Subtest: 通知通道接线：别的插件注册的源会被问一遍，并进这一轮的 messages
+ok 69 - 通知通道接线：别的插件注册的源会被问一遍，并进这一轮的 messages
+  ---
+  duration_ms: 182.5767
+  type: 'test'
+  ...
+# Subtest: 规则引擎炸了不该毁掉整个请求：记 warn 后照常返回
+ok 70 - 规则引擎炸了不该毁掉整个请求：记 warn 后照常返回
+  ---
+  duration_ms: 218.1006
+  type: 'test'
+  ...
+# Subtest: 事实值接线：规则能用 numbers 读到这一轮的 token 量
+ok 71 - 事实值接线：规则能用 numbers 读到这一轮的 token 量
+  ---
+  duration_ms: 160.3453
+  type: 'test'
+  ...
+# Subtest: 事实值接线：算不出来的指标给 null，判不命中，且不连累同一批里别的规则
+ok 72 - 事实值接线：算不出来的指标给 null，判不命中，且不连累同一批里别的规则
+  ---
+  duration_ms: 158.3131
+  type: 'test'
+  ...
+# Subtest: saving retains acknowledged preferences and failures stay visible across polling until successful retry
+ok 73 - saving retains acknowledged preferences and failures stay visible across polling until successful retry
+  ---
+  duration_ms: 14.4256
+  type: 'test'
+  ...
+# Subtest: malformed nested rule responses remain visible errors before reaching the view
+ok 74 - malformed nested rule responses remain visible errors before reaching the view
+  ---
+  duration_ms: 6.0544
+  type: 'test'
+  ...
+# Subtest: a departed session cannot publish its delayed save into a new watch of the same session
+ok 75 - a departed session cannot publish its delayed save into a new watch of the same session
+  ---
+  duration_ms: 2.3933
+  type: 'test'
+  ...
+# Subtest: Delta evidence spans chunks, separates reasoning/blocks/attempts and has no invented committed seq
+ok 76 - Delta evidence spans chunks, separates reasoning/blocks/attempts and has no invented committed seq
+  ---
+  duration_ms: 2.9106
+  type: 'test'
+  ...
+# Subtest: Changed preferences discard disabled text and a growing match is acknowledged once per block
+ok 77 - Changed preferences discard disabled text and a growing match is acknowledged once per block
+  ---
+  duration_ms: 0.661
+  type: 'test'
+  ...
+# Subtest: Delta projection rejects over-budget input before retaining it and finishes deterministically
+ok 78 - Delta projection rejects over-budget input before retaining it and finishes deterministically
+  ---
+  duration_ms: 1.4523
+  type: 'test'
+  ...
+# Subtest: manifest and runtime source have no DSH dependency or checkout path
+ok 79 - manifest and runtime source have no DSH dependency or checkout path
+  ---
+  duration_ms: 47.7434
+  type: 'test'
+  ...
+# Subtest: release has no install-time preparation or exotic dependency
+ok 80 - release has no install-time preparation or exotic dependency
+  ---
+  duration_ms: 4.1247
+  type: 'test'
+  ...
+# Subtest: Detector streams isolate sessions, attempts, blocks and views; epoch reset excludes earlier text
+ok 81 - Detector streams isolate sessions, attempts, blocks and views; epoch reset excludes earlier text
+  ---
+  duration_ms: 610.969
+  type: 'test'
+  ...
+# Subtest: Detector finalization and reset validate state, while display/preview reads retain no incremental state
+ok 82 - Detector finalization and reset validate state, while display/preview reads retain no incremental state
+  ---
+  duration_ms: 470.1
+  type: 'test'
+  ...
+# Subtest: Owned detector scope and revision drive availability; registration collisions and async callbacks reject
+ok 83 - Owned detector scope and revision drive availability; registration collisions and async callbacks reject
+  ---
+  duration_ms: 218.3012
+  type: 'test'
+  ...
+# Subtest: External detectors and native regex share one priority/exclusive pass with validated UTF16 evidence
+ok 84 - External detectors and native regex share one priority/exclusive pass with validated UTF16 evidence
+  ---
+  duration_ms: 518.1831
+  type: 'test'
+  ...
+# Subtest: Detector cancellation and disposal stop workers before returning; synchronous loops time out
+ok 85 - Detector cancellation and disposal stop workers before returning; synchronous loops time out
+  ---
+  duration_ms: 605.6416
+  type: 'test'
+  ...
+# Subtest: Malformed params, state, evidence, promises and closure references cannot publish results
+ok 86 - Malformed params, state, evidence, promises and closure references cannot publish results
+  ---
+  duration_ms: 2197.1916
+  type: 'test'
+  ...
+# Subtest: Builtin marker/phrase/line-repeat/degradation reuse shared facts and pattern IDs
+ok 87 - Builtin marker/phrase/line-repeat/degradation reuse shared facts and pattern IDs
+  ---
+  duration_ms: 543.3065
+  type: 'test'
+  ...
+# Subtest: Detector schemas with catastrophic regex run inside the terminable worker
+ok 88 - Detector schemas with catastrophic regex run inside the terminable worker
+  ---
+  duration_ms: 902.1273
+  type: 'test'
+  ...
+# Subtest: Detector policy races, concurrent feeds and reused session scopes cannot commit state
+ok 89 - Detector policy races, concurrent feeds and reused session scopes cannot commit state
+  ---
+  duration_ms: 567.3454
+  type: 'test'
+  ...
+# Subtest: Detector budgets reject oversized state and aggregate retention across streams
+ok 90 - Detector budgets reject oversized state and aggregate retention across streams
+  ---
+  duration_ms: 518.5302
+  type: 'test'
+  ...
+# Subtest: Epoch reset holds the stream lock; explicit close during reset prevents a new state ACK
+ok 91 - Epoch reset holds the stream lock; explicit close during reset prevents a new state ACK
+  ---
+  duration_ms: 290.6642
+  type: 'test'
+  ...
+# Subtest: Reused workers preserve explicit state but recreate callback globals and honor changed schemas
+ok 92 - Reused workers preserve explicit state but recreate callback globals and honor changed schemas
+  ---
+  duration_ms: 498.9613
+  type: 'test'
+  ...
+# Subtest: Invalid feed evidence fails before a valid finalize can hide it; method-local arrows transfer correctly
+ok 93 - Invalid feed evidence fails before a valid finalize can hide it; method-local arrows transfer correctly
+  ---
+  duration_ms: 480.9526
+  type: 'test'
+  ...
+# Subtest: failed real HTTP reads retain status and route for empty, HTML and JSON responses
+ok 94 - failed real HTTP reads retain status and route for empty, HTML and JSON responses
+  ---
+  duration_ms: 75.5703
+  type: 'test'
+  ...
+# Subtest: on-demand detail reader uses real HTTP, rejects malformed results, and exposes a real disconnected server
+ok 95 - on-demand detail reader uses real HTTP, rejects malformed results, and exposes a real disconnected server
+  ---
+  duration_ms: 47.505
+  type: 'test'
+  ...
+# Subtest: a real interrupted response body retains received status separately from a connection failure
+ok 96 - a real interrupted response body retains received status separately from a connection failure
+  ---
+  duration_ms: 120.6648
+  type: 'test'
+  ...
+# Subtest: complete malformed JSON and mismatched message identity have distinct response diagnostics
+ok 97 - complete malformed JSON and mismatched message identity have distinct response diagnostics
+  ---
+  duration_ms: 15.1479
+  type: 'test'
+  ...
+# Subtest: held slices materialize on each request within a turn, a fixed number of real turns, or the complete session
+ok 98 - held slices materialize on each request within a turn, a fixed number of real turns, or the complete session
+  ---
+  duration_ms: 5.7411
+  type: 'test'
+  ...
+# Subtest: until-inactive slices release only at deactivation and respect an independent reactivation cooldown
+ok 99 - until-inactive slices release only at deactivation and respect an independent reactivation cooldown
+  ---
+  duration_ms: 0.4393
+  type: 'test'
+  ...
+# Subtest: sticky requests retain the last strictly matched turn without extending it on held-only delivery
+ok 100 - sticky requests retain the last strictly matched turn without extending it on held-only delivery
+  ---
+  duration_ms: 0.3572
+  type: 'test'
+  ...
+# Subtest: entry declarations reject missing turn durations and persistent display lifetimes at the document parser
+ok 101 - entry declarations reject missing turn durations and persistent display lifetimes at the document parser
+  ---
+  duration_ms: 20.4616
+  type: 'test'
+  ...
+# Subtest: complete actual text, schemas and one-shot segments calibrate without scaling image visual prices
+ok 102 - complete actual text, schemas and one-shot segments calibrate without scaling image visual prices
+  ---
+  duration_ms: 1.7394
+  type: 'test'
+  ...
+# Subtest: failed, undispatched, auxiliary, smaller and different actual route samples are ineligible
+ok 103 - failed, undispatched, auxiliary, smaller and different actual route samples are ineligible
+  ---
+  duration_ms: 0.7642
+  type: 'test'
+  ...
+# Subtest: 正常文本原样返回
+ok 104 - 正常文本原样返回
+  ---
+  duration_ms: 4.2446
+  type: 'test'
+  ...
+# Subtest: 行数太少不判（拿不构成填充行的内容试）
+ok 105 - 行数太少不判（拿不构成填充行的内容试）
+  ---
+  duration_ms: 1.3295
+  type: 'test'
+  ...
+# Subtest: 十条短填充行就该判 —— filler-lines 的门槛比 line-repeat 低
+ok 106 - 十条短填充行就该判 —— filler-lines 的门槛比 line-repeat 低
+  ---
+  duration_ms: 1.3436
+  type: 'test'
+  ...
+# Subtest: 循环文本被截断,不再留"已清理"标记
+ok 107 - 循环文本被截断,不再留"已清理"标记
+  ---
+  duration_ms: 1.4384
+  type: 'test'
+  ...
+# Subtest: 同样的输入产出同样的结果 —— 缓存要的就是这个
+ok 108 - 同样的输入产出同样的结果 —— 缓存要的就是这个
+  ---
+  duration_ms: 0.6505
+  type: 'test'
+  ...
+# Subtest: 代码围栏行不参与统计
+ok 109 - 代码围栏行不参与统计
+  ---
+  duration_ms: 0.4553
+  type: 'test'
+  ...
+# Subtest: cleanMessage 只碰 reasoning 和 text 块，且不改原件
+ok 110 - cleanMessage 只碰 reasoning 和 text 块，且不改原件
+  ---
+  duration_ms: 0.6595
+  type: 'test'
+  ...
+# Subtest: cleanMessages 只清最后一条助手消息
+ok 111 - cleanMessages 只清最后一条助手消息
+  ---
+  duration_ms: 0.4627
+  type: 'test'
+  ...
+# Subtest: 没有助手消息时原样返回
+ok 112 - 没有助手消息时原样返回
+  ---
+  duration_ms: 0.4402
+  type: 'test'
+  ...
+# Subtest: 跟 loop-guard 串起来:检测到就清得掉
+ok 113 - 跟 loop-guard 串起来:检测到就清得掉
+  ---
+  duration_ms: 1.9567
+  type: 'test'
+  ...
+# Subtest: 模式表是加模式的唯一入口
+ok 114 - 模式表是加模式的唯一入口
+  ---
+  duration_ms: 0.4068
+  type: 'test'
+  ...
+# Subtest: 第二个真实样本:填充行成片出现，靠行的性质认出来
+ok 115 - 第二个真实样本:填充行成片出现，靠行的性质认出来
+  ---
+  duration_ms: 0.3407
+  type: 'test'
+  ...
+# Subtest: 填充行清理后幂等
+ok 116 - 填充行清理后幂等
+  ---
+  duration_ms: 0.2269
+  type: 'test'
+  ...
+# Subtest: 正常的短句不会被当成填充行
+ok 117 - 正常的短句不会被当成填充行
+  ---
+  duration_ms: 0.206
+  type: 'test'
+  ...
+# Subtest: 长句即使含「做」也不算填充行
+ok 118 - 长句即使含「做」也不算填充行
+  ---
+  duration_ms: 0.1425
+  type: 'test'
+  ...
+# Subtest: 代码块里的短行不会被误清
+ok 119 - 代码块里的短行不会被误清
+  ---
+  duration_ms: 0.1468
+  type: 'test'
+  ...
+# Subtest: 围栏内的重复长块也不参与 line-repeat
+ok 120 - 围栏内的重复长块也不参与 line-repeat
+  ---
+  duration_ms: 0.3528
+  type: 'test'
+  ...
+# Subtest: 围栏外的填充行照清,围栏内的留着
+ok 121 - 围栏外的填充行照清,围栏内的留着
+  ---
+  duration_ms: 0.2688
+  type: 'test'
+  ...
+# Subtest: 这次真的踩到的坑:第二轮循环的样本，旧判据抓不到、新判据抓得到
+ok 122 - 这次真的踩到的坑:第二轮循环的样本，旧判据抓不到、新判据抓得到
+  ---
+  duration_ms: 1.8485
+  type: 'test'
+  ...
+# Subtest: 行重复占满尾巴 → 严重档（硬清理的对象）
+ok 123 - 行重复占满尾巴 → 严重档（硬清理的对象）
+  ---
+  duration_ms: 4.6296
+  type: 'test'
+  ...
+# Subtest: 三行短句稀疏轮转 → 轻微档（认得出，但只提醒）
+ok 124 - 三行短句稀疏轮转 → 轻微档（认得出，但只提醒）
+  ---
+  duration_ms: 1.3693
+  type: 'test'
+  ...
+# Subtest: 真机那次「好。/做。/输出。」也算轻微档 —— 短句轮转不该被硬清掉
+ok 125 - 真机那次「好。/做。/输出。」也算轻微档 —— 短句轮转不该被硬清掉
+  ---
+  duration_ms: 1.1339
+  type: 'test'
+  ...
+# Subtest: 混合型刷屏（单行占一半）也是轻微档 —— 真机那批就长这样
+ok 126 - 混合型刷屏（单行占一半）也是轻微档 —— 真机那批就长这样
+  ---
+  duration_ms: 0.579
+  type: 'test'
+  ...
+# Subtest: 行首单调（每行都以「嗯，」开头）单独成一类，也是轻微档
+ok 127 - 行首单调（每行都以「嗯，」开头）单独成一类，也是轻微档
+  ---
+  duration_ms: 0.464
+  type: 'test'
+  ...
+# Subtest: 填充行成片 → 严重档
+ok 128 - 填充行成片 → 严重档
+  ---
+  duration_ms: 0.3279
+  type: 'test'
+  ...
+# Subtest: 正常散文一条都不命中
+ok 129 - 正常散文一条都不命中
+  ---
+  duration_ms: 0.4261
+  type: 'test'
+  ...
+# Subtest: 代码块里的重复短行不算循环
+ok 130 - 代码块里的重复短行不算循环
+  ---
+  duration_ms: 2.6056
+  type: 'test'
+  ...
+# Subtest: 轻微档一律提醒 —— 清不掉它，也就没有"房间里的大象"
+ok 131 - 轻微档一律提醒 —— 清不掉它，也就没有"房间里的大象"
+  ---
+  duration_ms: 1.4123
+  type: 'test'
+  ...
+# Subtest: 严重档：有清理执行者就不提醒，没有才兜底提醒
+ok 132 - 严重档：有清理执行者就不提醒，没有才兜底提醒
+  ---
+  duration_ms: 0.9864
+  type: 'test'
+  ...
+# Subtest: 没命中就不提醒
+ok 133 - 没命中就不提醒
+  ---
+  duration_ms: 0.3485
+  type: 'test'
+  ...
+# Subtest: 提醒正文说出命中的是哪一种形状
+ok 134 - 提醒正文说出命中的是哪一种形状
+  ---
+  duration_ms: 0.8454
+  type: 'test'
+  ...
+# Subtest: a failed audit reports its own error while keeping the primary maintenance failure
+ok 135 - a failed audit reports its own error while keeping the primary maintenance failure
+  ---
+  duration_ms: 7.0124
+  type: 'test'
+  ...
+# Subtest: failed maintenance records its committed reduction while returning the original error
+ok 136 - failed maintenance records its committed reduction while returning the original error
+  ---
+  duration_ms: 0.763
+  type: 'test'
+  ...
+# Subtest: deep rest records completion after its synchronous replacement commit
+ok 137 - deep rest records completion after its synchronous replacement commit
+  ---
+  duration_ms: 0.5248
+  type: 'test'
+  ...
+# Subtest: a complete maintenance operation serializes by Session while other sessions keep progressing
+ok 138 - a complete maintenance operation serializes by Session while other sessions keep progressing
+  ---
+  duration_ms: 3.1089
+  type: 'test'
+  ...
+# Subtest: unload cancels active work, prevents queued execution and waits for cancellation cleanup
+ok 139 - unload cancels active work, prevents queued execution and waits for cancellation cleanup
+  ---
+  duration_ms: 1.0511
+  type: 'test'
+  ...
+# Subtest: hard pressure arms once and hysteresis clears below recovery
+ok 140 - hard pressure arms once and hysteresis clears below recovery
+  ---
+  duration_ms: 2.0753
+  type: 'test'
+  ...
+# Subtest: unknown capacity never triggers maintenance
+ok 141 - unknown capacity never triggers maintenance
+  ---
+  duration_ms: 1.3753
+  type: 'test'
+  ...
+# Subtest: configuration rejects inverted budgets and non-positive pass counts
+ok 142 - configuration rejects inverted budgets and non-positive pass counts
+  ---
+  duration_ms: 0.909
+  type: 'test'
+  ...
+# Subtest: pruneThenMeasure always measures after a committed prune
+ok 143 - pruneThenMeasure always measures after a committed prune
+  ---
+  duration_ms: 0.8215
+  type: 'test'
+  ...
+# Subtest: prune failure remains visible and skips the compaction decision
+ok 144 - prune failure remains visible and skips the compaction decision
+  ---
+  duration_ms: 0.7835
+  type: 'test'
+  ...
+# Subtest: matching starts from a parent with process-only flags and an inline module entry
+ok 145 - matching starts from a parent with process-only flags and an inline module entry
+  ---
+  duration_ms: 289.2879
+  type: 'test'
+  ...
+# Subtest: an empty or unrelated stage performs no worker work, even with oversized history
+ok 146 - an empty or unrelated stage performs no worker work, even with oversized history
+  ---
+  duration_ms: 2.8237
+  type: 'test'
+  ...
+# Subtest: a real pathological regex times out with identity and timing, terminates, then independent matching works
+ok 147 - a real pathological regex times out with identity and timing, terminates, then independent matching works
+  ---
+  duration_ms: 533.3015
+  type: 'test'
+  ...
+# Subtest: real concurrent overload reports admission failure without cancelling admitted workers
+ok 148 - real concurrent overload reports admission failure without cancelling admitted workers
+  ---
+  duration_ms: 639.489
+  type: 'test'
+  ...
+# Subtest: 注册一个源，collect 拿到它产出的通知
+ok 149 - 注册一个源，collect 拿到它产出的通知
+  ---
+  duration_ms: 3.2821
+  type: 'test'
+  ...
+# Subtest: 同一个 id 在一个会话里只注入一次，换个会话又能注入
+ok 150 - 同一个 id 在一个会话里只注入一次，换个会话又能注入
+  ---
+  duration_ms: 0.505
+  type: 'test'
+  ...
+# Subtest: 关掉 oncePerSurface 才看冷却
+ok 151 - 关掉 oncePerSurface 才看冷却
+  ---
+  duration_ms: 0.7793
+  type: 'test'
+  ...
+# Subtest: 一个源出错不挡住别的源，但留下 warn
+ok 152 - 一个源出错不挡住别的源，但留下 warn
+  ---
+  duration_ms: 0.6713
+  type: 'test'
+  ...
+# Subtest: 通知说不清楚就抛错，不猜
+ok 153 - 通知说不清楚就抛错，不猜
+  ---
+  duration_ms: 1.1637
+  type: 'test'
+  ...
+# Subtest: 源返回非数组时记 warn 并跳过
+ok 154 - 源返回非数组时记 warn 并跳过
+  ---
+  duration_ms: 1.2626
+  type: 'test'
+  ...
+# Subtest: 取消注册后不再被问
+ok 155 - 取消注册后不再被问
+  ---
+  duration_ms: 0.4203
+  type: 'test'
+  ...
+# Subtest: re-enabling rejects stale or unproven queued notices without consuming their delivery
+ok 156 - re-enabling rejects stale or unproven queued notices without consuming their delivery
+  ---
+  duration_ms: 0.8612
+  type: 'test'
+  ...
+# Subtest: an awaited notification cannot cross an off-on transition
+ok 157 - an awaited notification cannot cross an off-on transition
+  ---
+  duration_ms: 0.7743
+  type: 'test'
+  ...
+# Subtest: later source waits cannot commit an earlier source after its control edit
+ok 158 - later source waits cannot commit an earlier source after its control edit
+  ---
+  duration_ms: 0.9889
+  type: 'test'
+  ...
+# Subtest: 注册参数不对就抛错
+ok 159 - 注册参数不对就抛错
+  ---
+  duration_ms: 1.5406
+  type: 'test'
+  ...
+# Subtest: 命中提示规则时注入一条提醒
+ok 160 - 命中提示规则时注入一条提醒
+  ---
+  duration_ms: 9.0517
+  type: 'test'
+  ...
+# Subtest: 通知关联相同评估编号并只引用实际输入的持久事件
+ok 161 - 通知关联相同评估编号并只引用实际输入的持久事件
+  ---
+  duration_ms: 1.3248
+  type: 'test'
+  ...
+# Subtest: 没命中就不注入
+ok 162 - 没命中就不注入
+  ---
+  duration_ms: 0.4619
+  type: 'test'
+  ...
+# Subtest: 没装索引插件时什么都不做，也不报错
+ok 163 - 没装索引插件时什么都不做，也不报错
+  ---
+  duration_ms: 0.4816
+  type: 'test'
+  ...
+# Subtest: 同一段用户输入只提醒一次
+ok 164 - 同一段用户输入只提醒一次
+  ---
+  duration_ms: 1.3447
+  type: 'test'
+  ...
+# Subtest: 冷却期内换一段输入也不提醒（冷却管时间）
+ok 165 - 冷却期内换一段输入也不提醒（冷却管时间）
+  ---
+  duration_ms: 1.2519
+  type: 'test'
+  ...
+# Subtest: 冷却和去重都是按会话算的，会话之间互不影响
+ok 166 - 冷却和去重都是按会话算的，会话之间互不影响
+  ---
+  duration_ms: 1.8743
+  type: 'test'
+  ...
+# Subtest: 没有真人说话的边界不判
+ok 167 - 没有真人说话的边界不判
+  ---
+  duration_ms: 0.3374
+  type: 'test'
+  ...
+# Subtest: 规则没说清楚要提醒什么就抛错，不静默跳过
+ok 168 - 规则没说清楚要提醒什么就抛错，不静默跳过
+  ---
+  duration_ms: 1.4023
+  type: 'test'
+  ...
+# Subtest: 规则是坏数据时抛错，并指出是哪个来源
+ok 169 - 规则是坏数据时抛错，并指出是哪个来源
+  ---
+  duration_ms: 0.9399
+  type: 'test'
+  ...
+# Subtest: 规则里指名别的消费者时不落到本插件，也不报错
+ok 170 - 规则里指名别的消费者时不落到本插件，也不报错
+  ---
+  duration_ms: 0.5466
+  type: 'test'
+  ...
+# Subtest: duplicate committed seq does not retrigger, cooldown and healthy rearm need new completed evidence
+ok 171 - duplicate committed seq does not retrigger, cooldown and healthy rearm need new completed evidence
+  ---
+  duration_ms: 48.7649
+  type: 'test'
+  ...
+# Subtest: known unstarted feedback handoff restores the prior allowance without undoing delivery
+ok 172 - known unstarted feedback handoff restores the prior allowance without undoing delivery
+  ---
+  duration_ms: 3.3821
+  type: 'test'
+  ...
+# Subtest: cold restore retains pending and bounds replay of a reserved but unknown delivery
+ok 173 - cold restore retains pending and bounds replay of a reserved but unknown delivery
+  ---
+  duration_ms: 8.507
+  type: 'test'
+  ...
+# Subtest: target route explicitly allows carry and separates source from receiving model; otherwise supersedes
+ok 174 - target route explicitly allows carry and separates source from receiving model; otherwise supersedes
+  ---
+  duration_ms: 2.8456
+  type: 'test'
+  ...
+# Subtest: counts complete prose with source offsets, overlap merging and distinct families
+ok 175 - counts complete prose with source offsets, overlap merging and distinct families
+  ---
+  duration_ms: 61.8424
+  type: 'test'
+  ...
+# Subtest: Markdown code, quotes and local vocabulary discussion are excluded but commitments count
+ok 176 - Markdown code, quotes and local vocabulary discussion are excluded but commitments count
+  ---
+  duration_ms: 7.6171
+  type: 'test'
+  ...
+# Subtest: sparse output stays below thresholds; repeated short and window outputs trigger
+ok 177 - sparse output stays below thresholds; repeated short and window outputs trigger
+  ---
+  duration_ms: 7.1913
+  type: 'test'
+  ...
+# Subtest: bounds report unavailable rather than measuring a tail; vocabulary/configuration fails at load
+ok 178 - bounds report unavailable rather than measuring a tail; vocabulary/configuration fails at load
+  ---
+  duration_ms: 29.9847
+  type: 'test'
+  ...
+# Subtest: switch and static rules match exact routes, purposes and explicit first bind
+ok 179 - switch and static rules match exact routes, purposes and explicit first bind
+  ---
+  duration_ms: 0.6902
+  type: 'test'
+  ...
+# Subtest: 发出的 kind 不是退役的 plugin 包装
+ok 180 - 发出的 kind 不是退役的 plugin 包装
+  ---
+  duration_ms: 1.6809
+  type: 'test'
+  ...
+# Subtest: 认得出未迁移的 V3 包装（迁移前的事件仍在 surface 上）
+ok 181 - 认得出未迁移的 V3 包装（迁移前的事件仍在 surface 上）
+  ---
+  duration_ms: 0.3658
+  type: 'test'
+  ...
+# Subtest: 未知生产者家族按前缀判定
+ok 182 - 未知生产者家族按前缀判定
+  ---
+  duration_ms: 0.2533
+  type: 'test'
+  ...
+# Subtest: 交接标记在新旧两种写法下都认，且不误认自己的状态消息
+ok 183 - 交接标记在新旧两种写法下都认，且不误认自己的状态消息
+  ---
+  duration_ms: 0.2677
+  type: 'test'
+  ...
+# Subtest: textOf 只取 text 块
+ok 184 - textOf 只取 text 块
+  ---
+  duration_ms: 1.7215
+  type: 'test'
+  ...
+# Subtest: lastUserMessage 找最后一条真人说的
+ok 185 - lastUserMessage 找最后一条真人说的
+  ---
+  duration_ms: 0.3787
+  type: 'test'
+  ...
+# Subtest: recentToolCalls 从会话事件里取工具调用，按时间正序
+ok 186 - recentToolCalls 从会话事件里取工具调用，按时间正序
+  ---
+  duration_ms: 1.4805
+  type: 'test'
+  ...
+# Subtest: lastAssistantText 取最后一条助手输出
+ok 187 - lastAssistantText 取最后一条助手输出
+  ---
+  duration_ms: 0.2783
+  type: 'test'
+  ...
+# Subtest: 会话没有 surface 时返回空，不抛
+ok 188 - 会话没有 surface 时返回空，不抛
+  ---
+  duration_ms: 0.3191
+  type: 'test'
+  ...
+# Subtest: prompt catalog restores all insertion paths, exact bodies, selected sources and truthful delivery state
+ok 189 - prompt catalog restores all insertion paths, exact bodies, selected sources and truthful delivery state
+  ---
+  duration_ms: 106.4973
+  type: 'test'
+  ...
+# Subtest: rule evidence joins only a persisted stable evaluation identity and legacy segments remain explicit
+ok 190 - rule evidence joins only a persisted stable evaluation identity and legacy segments remain explicit
+  ---
+  duration_ms: 5.8157
+  type: 'test'
+  ...
+# Subtest: identification never expands a system marker into unrelated instructions
+ok 191 - identification never expands a system marker into unrelated instructions
+  ---
+  duration_ms: 0.4559
+  type: 'test'
+  ...
+# Subtest: journal-only request decision restores exact prompt without inventing a reconstructed wrapper
+ok 192 - journal-only request decision restores exact prompt without inventing a reconstructed wrapper
+  ---
+  duration_ms: 0.2958
+  type: 'test'
+  ...
+# Subtest: optional prompt evidence is a detached JSON snapshot before durable admission
+ok 193 - optional prompt evidence is a detached JSON snapshot before durable admission
+  ---
+  duration_ms: 0.3482
+  type: 'test'
+  ...
+# Subtest: prompt polling locates historical seq and releases pages independently of other sessions
+ok 194 - prompt polling locates historical seq and releases pages independently of other sessions
+  ---
+  duration_ms: 1.4104
+  type: 'test'
+  ...
+# Subtest: token budget keeps higher priority whole injections and excludes skipped parents and dependent jobs
+ok 195 - token budget keeps higher priority whole injections and excludes skipped parents and dependent jobs
+  ---
+  duration_ms: 19.468
+  type: 'test'
+  ...
+# Subtest: character errors stop planning even when token or cache admission would exclude the action
+ok 196 - character errors stop planning even when token or cache admission would exclude the action
+  ---
+  duration_ms: 5.2245
+  type: 'test'
+  ...
+# Subtest: missing token measurement reports unknown and refuses bounded injections with visible evidence
+ok 197 - missing token measurement reports unknown and refuses bounded injections with visible evidence
+  ---
+  duration_ms: 8.4583
+  type: 'test'
+  ...
+# Subtest: complete UTF8 request byte budget includes tools, system and call configuration, with exact boundaries
+ok 198 - complete UTF8 request byte budget includes tools, system and call configuration, with exact boundaries
+  ---
+  duration_ms: 1.4452
+  type: 'test'
+  ...
+# Subtest: cache estimate excludes lower priority actions and replans dependent jobs without mutating the original
+ok 199 - cache estimate excludes lower priority actions and replans dependent jobs without mutating the original
+  ---
+  duration_ms: 6.9845
+  type: 'test'
+  ...
+# Subtest: missing view anchors skip complete injections and dependents without relocating or hiding character errors
+ok 200 - missing view anchors skip complete injections and dependents without relocating or hiding character errors
+  ---
+  duration_ms: 3.7223
+  type: 'test'
+  ...
+# Subtest: cascade compares the complete final request to its original baseline instead of resetting the cache budget
+ok 201 - cascade compares the complete final request to its original baseline instead of resetting the cache budget
+  ---
+  duration_ms: 1.707
+  type: 'test'
+  ...
+# Subtest: request journal detaches queued data and serializes phases through durable acknowledgement
+ok 202 - request journal detaches queued data and serializes phases through durable acknowledgement
+  ---
+  duration_ms: 12.3147
+  type: 'test'
+  ...
+# Subtest: request journal exposes original write failure through put, flush and disposal
+ok 203 - request journal exposes original write failure through put, flush and disposal
+  ---
+  duration_ms: 1.3549
+  type: 'test'
+  ...
+# Subtest: request transform cooldown and surface memory belong to each session
+ok 204 - request transform cooldown and surface memory belong to each session
+  ---
+  duration_ms: 10.1856
+  type: 'test'
+  ...
+# Subtest: 没有 request 级规则时不改 body
+ok 205 - 没有 request 级规则时不改 body
+  ---
+  duration_ms: 0.5101
+  type: 'test'
+  ...
+# Subtest: 有 request 级规则时改 body
+ok 206 - 有 request 级规则时改 body
+  ---
+  duration_ms: 0.6299
+  type: 'test'
+  ...
+# Subtest: placement 不是 request 的规则不在这一层跑
+ok 207 - placement 不是 request 的规则不在这一层跑
+  ---
+  duration_ms: 0.5945
+  type: 'test'
+  ...
+# Subtest: 命中会留下记录
+ok 208 - 命中会留下记录
+  ---
+  duration_ms: 0.5707
+  type: 'test'
+  ...
+# Subtest: 规则来源是坏数据时抛错，不静默放过
+ok 209 - 规则来源是坏数据时抛错，不静默放过
+  ---
+  duration_ms: 1.1574
+  type: 'test'
+  ...
+# Subtest: 规则第一次生效时费一次缓存，之后不再费
+ok 210 - 规则第一次生效时费一次缓存，之后不再费
+  ---
+  duration_ms: 1.5537
+  type: 'test'
+  ...
+# Subtest: 不同接口各记各的上一次
+ok 211 - 不同接口各记各的上一次
+  ---
+  duration_ms: 1.0789
+  type: 'test'
+  ...
+# Subtest: 循环清理:请求体里最后一条助手消息的循环尾巴被清掉
+ok 212 - 循环清理:请求体里最后一条助手消息的循环尾巴被清掉
+  ---
+  duration_ms: 3.9546
+  type: 'test'
+  ...
+# Subtest: 循环清理:没有循环时不改 body
+ok 213 - 循环清理:没有循环时不改 body
+  ---
+  duration_ms: 1.5264
+  type: 'test'
+  ...
+# Subtest: control changes during rewrite audit refuse delivery without spending cooldown or surface deduplication
+ok 214 - control changes during rewrite audit refuse delivery without spending cooldown or surface deduplication
+  ---
+  duration_ms: 2.4916
+  type: 'test'
+  ...
+# Subtest: 循环清理:body 不是 JSON 时不动
+ok 215 - 循环清理:body 不是 JSON 时不动
+  ---
+  duration_ms: 0.3616
+  type: 'test'
+  ...
+# Subtest: 循环清理:引擎规则和循环清理同时命中时都生效
+ok 216 - 循环清理:引擎规则和循环清理同时命中时都生效
+  ---
+  duration_ms: 0.6825
+  type: 'test'
+  ...
+# Subtest: Host 与客户端的哈希实现必须一致 —— 不一致卡片就永远不出现
+ok 217 - Host 与客户端的哈希实现必须一致 —— 不一致卡片就永远不出现
+  ---
+  duration_ms: 2.4644
+  type: 'test'
+  ...
+# Subtest: 哈希稳定且定长
+ok 218 - 哈希稳定且定长
+  ---
+  duration_ms: 0.5602
+  type: 'test'
+  ...
+# Subtest: changedBlocks 只报真的变了的块
+ok 219 - changedBlocks 只报真的变了的块
+  ---
+  duration_ms: 0.6737
+  type: 'test'
+  ...
+# Subtest: 没有变化时不报任何块
+ok 220 - 没有变化时不报任何块
+  ---
+  duration_ms: 1.1959
+  type: 'test'
+  ...
+# Subtest: Host-owned rewrite records survive reconstruction without an optional index plugin
+ok 221 - Host-owned rewrite records survive reconstruction without an optional index plugin
+  ---
+  duration_ms: 1.8954
+  type: 'test'
+  ...
+# Subtest: pending rewrite ACKs are hidden and backend rows are constrained to the requested session
+ok 222 - pending rewrite ACKs are hidden and backend rows are constrained to the requested session
+  ---
+  duration_ms: 1.1261
+  type: 'test'
+  ...
+# Subtest: 进程内记录:写进去能读出来
+ok 223 - 进程内记录:写进去能读出来
+  ---
+  duration_ms: 0.613
+  type: 'test'
+  ...
+# Subtest: 内部诊断支持列出全部会话，指定 sessionId 时约束结果
+ok 224 - 内部诊断支持列出全部会话，指定 sessionId 时约束结果
+  ---
+  duration_ms: 0.3959
+  type: 'test'
+  ...
+# Subtest: 索引服务在时落属性表,并把持久结果报回来
+ok 225 - 索引服务在时落属性表,并把持久结果报回来
+  ---
+  duration_ms: 0.9901
+  type: 'test'
+  ...
+# Subtest: 属性表写不进去时退到进程内,且不抛
+ok 226 - 属性表写不进去时退到进程内,且不抛
+  ---
+  duration_ms: 0.8569
+  type: 'test'
+  ...
+# Subtest: 属性表与进程内合并去重
+ok 227 - 属性表与进程内合并去重
+  ---
+  duration_ms: 0.5784
+  type: 'test'
+  ...
+# Subtest: rewrite route failure is observable, backs off and clears after recovery
+ok 228 - rewrite route failure is observable, backs off and clears after recovery
+  ---
+  duration_ms: 4.8708
+  type: 'test'
+  ...
+# Subtest: invalid rewrite payload reports an error and disposal aborts an outstanding request
+ok 229 - invalid rewrite payload reports an error and disposal aborts an outstanding request
+  ---
+  duration_ms: 0.7626
+  type: 'test'
+  ...
+# Subtest: session watches share requests, release only the final owner and ignore late responses
+ok 230 - session watches share requests, release only the final owner and ignore late responses
+  ---
+  duration_ms: 0.8078
+  type: 'test'
+  ...
+# Subtest: a response containing another session is rejected before any records are published
+ok 231 - a response containing another session is rejected before any records are published
+  ---
+  duration_ms: 0.6979
+  type: 'test'
+  ...
+# Subtest: the recorded assistant probe produces the journal hash
+ok 232 - the recorded assistant probe produces the journal hash
+  ---
+  duration_ms: 4.5136
+  type: 'test'
+  ...
+# Subtest: buildViewNode keeps message hashes independent of asynchronous journal data
+ok 233 - buildViewNode keeps message hashes independent of asynchronous journal data
+  ---
+  duration_ms: 3.1444
+  type: 'test'
+  ...
+# Subtest: buildViewNode hashes concatenated same-type blocks for Chat Completions
+ok 234 - buildViewNode hashes concatenated same-type blocks for Chat Completions
+  ---
+  duration_ms: 0.3719
+  type: 'test'
+  ...
+# Subtest: buildViewNode supports string content, thinking blocks and Responses summaries
+ok 235 - buildViewNode supports string content, thinking blocks and Responses summaries
+  ---
+  duration_ms: 0.7129
+  type: 'test'
+  ...
+# Subtest: RewriteNodeView renders a record only for the matching session and hash
+ok 236 - RewriteNodeView renders a record only for the matching session and hash
+  ---
+  duration_ms: 11.1643
+  type: 'test'
+  ...
+# Subtest: RewriteNodeView includes removed-line details when available
+ok 237 - RewriteNodeView includes removed-line details when available
+  ---
+  duration_ms: 1.2243
+  type: 'test'
+  ...
+# Subtest: match accepts assistant messages only
+ok 238 - match accepts assistant messages only
+  ---
+  duration_ms: 0.4875
+  type: 'test'
+  ...
+# Subtest: session CAS, independent actions, pause and reset survive restart without publishing unacknowledged writes
+ok 239 - session CAS, independent actions, pause and reset survive restart without publishing unacknowledged writes
+  ---
+  duration_ms: 16.6211
+  type: 'test'
+  ...
+# Subtest: failed storage cannot appear saved or execute through stale values; retry recovers explicitly
+ok 240 - failed storage cannot appear saved or execute through stale values; retry recovers explicitly
+  ---
+  duration_ms: 2.197
+  type: 'test'
+  ...
+# Subtest: namespaced registrations, unload and re-registration preserve attribution and preferences
+ok 241 - namespaced registrations, unload and re-registration preserve attribution and preferences
+  ---
+  duration_ms: 2.5598
+  type: 'test'
+  ...
+# Subtest: dynamic streaming toggles reset evidence, disabled actions do not consume a hit, resume needs successful abort
+ok 242 - dynamic streaming toggles reset evidence, disabled actions do not consume a hit, resume needs successful abort
+  ---
+  duration_ms: 2.8161
+  type: 'test'
+  ...
+# Subtest: notification delivery checks policy again after awaited source and keeps source namespaces separate
+ok 243 - notification delivery checks policy again after awaited source and keeps source namespaces separate
+  ---
+  duration_ms: 1.7034
+  type: 'test'
+  ...
+# Subtest: default guidance stays exact; disabled report keeps explicit operation facts with independently selected advice
+ok 244 - default guidance stays exact; disabled report keeps explicit operation facts with independently selected advice
+  ---
+  duration_ms: 0.7591
+  type: 'test'
+  ...
+# Subtest: dependency cycles reject registration and transitive dependencies control execution
+ok 245 - dependency cycles reject registration and transitive dependencies control execution
+  ---
+  duration_ms: 1.5265
+  type: 'test'
+  ...
+# Subtest: old user evidence does not replay after enabling, and foreign consumers retain ownership
+ok 246 - old user evidence does not replay after enabling, and foreign consumers retain ownership
+  ---
+  duration_ms: 4.9339
+  type: 'test'
+  ...
+# Subtest: malformed engine definitions fail registration and dynamic catalog validation
+ok 247 - malformed engine definitions fail registration and dynamic catalog validation
+  ---
+  duration_ms: 1.465
+  type: 'test'
+  ...
+# Subtest: third-party engine definitions are qualified before execution, preserving same IDs from different plugins
+ok 248 - third-party engine definitions are qualified before execution, preserving same IDs from different plugins
+  ---
+  duration_ms: 1.2051
+  type: 'test'
+  ...
+# Subtest: fresh prefixes precede checkpoint merges and target selection uses the smallest covering prefix
+ok 249 - fresh prefixes precede checkpoint merges and target selection uses the smallest covering prefix
+  ---
+  duration_ms: 4.7323
+  type: 'test'
+  ...
+# Subtest: two checkpoints separated by status can merge, one cannot satisfy explicit rest, and pressure retains its fallback
+ok 250 - two checkpoints separated by status can merge, one cannot satisfy explicit rest, and pressure retains its fallback
+  ---
+  duration_ms: 1.016
+  type: 'test'
+  ...
+# Subtest: checkpoint coverage expands prior summaries and prune references in source order without transaction leaves
+ok 251 - checkpoint coverage expands prior summaries and prune references in source order without transaction leaves
+  ---
+  duration_ms: 2.1723
+  type: 'test'
+  ...
+# Subtest: durable no-useful decisions ignore status and log growth but reset on task material or frozen prices
+ok 252 - durable no-useful decisions ignore status and log growth but reset on task material or frozen prices
+  ---
+  duration_ms: 3.6658
+  type: 'test'
+  ...
+# Subtest: selection and executor share trigger identity and settle failures before a summary transaction starts
+ok 253 - selection and executor share trigger identity and settle failures before a summary transaction starts
+  ---
+  duration_ms: 0.5544
+  type: 'test'
+  ...
+# Subtest: 视图只保留固定行数的窗口，计数与窗口同步
+ok 254 - 视图只保留固定行数的窗口，计数与窗口同步
+  ---
+  duration_ms: 3.0538
+  type: 'test'
+  ...
+# Subtest: 视图的文本总量受上限约束：逐段累积与单个超长块都不能突破
+ok 255 - 视图的文本总量受上限约束：逐段累积与单个超长块都不能突破
+  ---
+  duration_ms: 926.9896
+  type: 'test'
+  ...
+# Subtest: viewTail 不重复末尾未完成行，也不拼接整段历史
+ok 256 - viewTail 不重复末尾未完成行，也不拼接整段历史
+  ---
+  duration_ms: 0.3111
+  type: 'test'
+  ...
+# Subtest: 短行与空行不进入窗口
+ok 257 - 短行与空行不进入窗口
+  ---
+  duration_ms: 1.3131
+  type: 'test'
+  ...
+# Subtest: marker 的滑动窗口不随帧数增长：喂一万帧，进位尾巴仍是常数长度
+ok 258 - marker 的滑动窗口不随帧数增长：喂一万帧，进位尾巴仍是常数长度
+  ---
+  duration_ms: 3.6354
+  type: 'test'
+  ...
+# Subtest: marker 能跨帧拼出标记，且同一 attempt 内只报一次
+ok 259 - marker 能跨帧拼出标记，且同一 attempt 内只报一次
+  ---
+  duration_ms: 1.928
+  type: 'test'
+  ...
+# Subtest: scope 决定看哪一路增量：只声明 text 的模式不吃思考块
+ok 260 - scope 决定看哪一路增量：只声明 text 的模式不吃思考块
+  ---
+  duration_ms: 1.0418
+  type: 'test'
+  ...
+# Subtest: line-repeat：窗口里密集重复的行命中
+ok 261 - line-repeat：窗口里密集重复的行命中
+  ---
+  duration_ms: 1.0205
+  type: 'test'
+  ...
+# Subtest: line-repeat：稀疏重复不命中（正常的长清单不该被误杀）
+ok 262 - line-repeat：稀疏重复不命中（正常的长清单不该被误杀）
+  ---
+  duration_ms: 1.4158
+  type: 'test'
+  ...
+# Subtest: line-repeat：次数不够但连续重复照样命中
+ok 263 - line-repeat：次数不够但连续重复照样命中
+  ---
+  duration_ms: 3.1062
+  type: 'test'
+  ...
+# Subtest: line-repeat：行数不够时任何比例都不判
+ok 264 - line-repeat：行数不够时任何比例都不判
+  ---
+  duration_ms: 0.5891
+  type: 'test'
+  ...
+# Subtest: windowed 模式按累计字节节流：没到量就根本不叫判定器
+ok 265 - windowed 模式按累计字节节流：没到量就根本不叫判定器
+  ---
+  duration_ms: 2.5048
+  type: 'test'
+  ...
+# Subtest: 命中后同一 attempt 不再重复触发，start 帧会重置
+ok 266 - 命中后同一 attempt 不再重复触发，start 帧会重置
+  ---
+  duration_ms: 1.0832
+  type: 'test'
+  ...
+# Subtest: 不同会话互不干扰，各自维护状态
+ok 267 - 不同会话互不干扰，各自维护状态
+  ---
+  duration_ms: 0.6463
+  type: 'test'
+  ...
+# Subtest: 操作抛错被记账，不会把这一帧的判定打断
+ok 268 - 操作抛错被记账，不会把这一帧的判定打断
+  ---
+  duration_ms: 4.1495
+  type: 'test'
+  ...
+# Subtest: 未知操作被如实记账，不静默跳过
+ok 269 - 未知操作被如实记账，不静默跳过
+  ---
+  duration_ms: 0.7504
+  type: 'test'
+  ...
+# Subtest: 非文本增量（工具调用、用量、收尾）不参与判定
+ok 270 - 非文本增量（工具调用、用量、收尾）不参与判定
+  ---
+  duration_ms: 0.5646
+  type: 'test'
+  ...
+# Subtest: phrase：任意短语命中即报，且能跨帧拼出来
+ok 271 - phrase：任意短语命中即报，且能跨帧拼出来
+  ---
+  duration_ms: 0.6219
+  type: 'test'
+  ...
+# Subtest: phrase：空词表不报，词表里的短串也不会误吞
+ok 272 - phrase：空词表不报，词表里的短串也不会误吞
+  ---
+  duration_ms: 0.2289
+  type: 'test'
+  ...
+# Subtest: 长度为 1 的模式不会让进位尾巴无限增长（slice(-0) 的坑）
+ok 273 - 长度为 1 的模式不会让进位尾巴无限增长（slice(-0) 的坑）
+  ---
+  duration_ms: 3.9276
+  type: 'test'
+  ...
+# Subtest: ordinary compensation inherits exact-route region retries unless maxPasses is explicit
+ok 274 - ordinary compensation inherits exact-route region retries unless maxPasses is explicit
+  ---
+  duration_ms: 1.586
+  type: 'test'
+  ...
+# Subtest: summary candidates retain entire tool batches in surface order with fresh minimum
+ok 275 - summary candidates retain entire tool batches in surface order with fresh minimum
+  ---
+  duration_ms: 3.4531
+  type: 'test'
+  ...
+# Subtest: one summary builder includes only system head, selected prefix, tools and final directive
+ok 276 - one summary builder includes only system head, selected prefix, tools and final directive
+  ---
+  duration_ms: 0.6501
+  type: 'test'
+  ...
+# Subtest: summary config inherits public exact-route policy and explicit plugin overrides
+ok 277 - summary config inherits public exact-route policy and explicit plugin overrides
+  ---
+  duration_ms: 1.5059
+  type: 'test'
+  ...
+# Subtest: Tavern regex converts independent global captures and display copies without editing raw blocks
+ok 278 - Tavern regex converts independent global captures and display copies without editing raw blocks
+  ---
+  duration_ms: 246.1328
+  type: 'test'
+  ...
+# Subtest: Tavern regex reports rejected and unknown fields while retaining valid independent scripts
+ok 279 - Tavern regex reports rejected and unknown fields while retaining valid independent scripts
+  ---
+  duration_ms: 14.8002
+  type: 'test'
+  ...
+# Subtest: prompt rendering is strict, literal and single-pass
+ok 280 - prompt rendering is strict, literal and single-pass
+  ---
+  duration_ms: 17.5932
+  type: 'test'
+  ...
+# Subtest: bounded loops and named partials reject runaway output and recursion
+ok 281 - bounded loops and named partials reject runaway output and recursion
+  ---
+  duration_ms: 9.9129
+  type: 'test'
+  ...
+# Subtest: typed inputs stay JSON values and do not interpret captured shell characters
+ok 282 - typed inputs stay JSON values and do not interpret captured shell characters
+  ---
+  duration_ms: 2.1102
+  type: 'test'
+  ...
+# Subtest: data paths cannot execute functions or getters, including unused nested values
+ok 283 - data paths cannot execute functions or getters, including unused nested values
+  ---
+  duration_ms: 4.0307
+  type: 'test'
+  ...
+# Subtest: disabled helpers and template directives cannot be enabled by declarations
+ok 284 - disabled helpers and template directives cannot be enabled by declarations
+  ---
+  duration_ms: 3.4334
+  type: 'test'
+  ...
+# Subtest: reminder declarations support readable variables, conditions, loops and named templates
+ok 285 - reminder declarations support readable variables, conditions, loops and named templates
+  ---
+  duration_ms: 38.3513
+  type: 'test'
+  ...
+# Subtest: rule evaluations persist complete evidence in Host storage without introducing Session event types
+ok 286 - rule evaluations persist complete evidence in Host storage without introducing Session event types
+  ---
+  duration_ms: 3.3606
+  type: 'test'
+  ...
+# Subtest: journal ACK failures remain observable, and evaluations without a session do not claim durable ownership
+ok 287 - journal ACK failures remain observable, and evaluations without a session do not claim durable ownership
+  ---
+  duration_ms: 3.9439
+  type: 'test'
+  ...
+# Subtest: World-info retains valid neighbours and reports invalid data, IDs, macros and unsupported depth anchors
+ok 288 - World-info retains valid neighbours and reports invalid data, IDs, macros and unsupported depth anchors
+  ---
+  duration_ms: 44.9783
+  type: 'test'
+  ...
+# Subtest: Every present accepted field has a compatibility report and timing, depth and recursion differences remain explicit
+ok 289 - Every present accepted field has a compatibility report and timing, depth and recursion differences remain explicit
+  ---
+  duration_ms: 7.3736
+  type: 'test'
+  ...
+# Subtest: Secondary keyword logic uses the same native matcher and constant entries do not retain inactive secondary activation
+ok 290 - Secondary keyword logic uses the same native matcher and constant entries do not retain inactive secondary activation
+  ---
+  duration_ms: 28.268
+  type: 'test'
+  ...
+# Subtest: World-info entry limits reject excess entries without rejecting the document, native input remains strict
+ok 291 - World-info entry limits reject excess entries without rejecting the document, native input remains strict
+  ---
+  duration_ms: 160.2806
+  type: 'test'
+  ...
+# Subtest: Workbench publishes after ACK, serializes competing CAS, and retries a failed write explicitly
+ok 292 - Workbench publishes after ACK, serializes competing CAS, and retries a failed write explicitly
+  ---
+  duration_ms: 21.2872
+  type: 'test'
+  ...
+# Subtest: Global and preset variables share persisted values, enforce scope CAS, and isolate preset identities
+ok 293 - Global and preset variables share persisted values, enforce scope CAS, and isolate preset identities
+  ---
+  duration_ms: 6.1328
+  type: 'test'
+  ...
+# Subtest: Workbench rejects duplicate declaration names across documents and stops accepting writes during close
+ok 294 - Workbench rejects duplicate declaration names across documents and stops accepting writes during close
+  ---
+  duration_ms: 3.532
+  type: 'test'
+  ...
+# Subtest: Source registration can inspect pending document ACKs without publishing them as saved
+ok 295 - Source registration can inspect pending document ACKs without publishing them as saved
+  ---
+  duration_ms: 1.7399
+  type: 'test'
+  ...
+# Subtest: Externally registered documents reject local replacement and declaration collisions before persistence
+ok 296 - Externally registered documents reject local replacement and declaration collisions before persistence
+  ---
+  duration_ms: 1.4611
+  type: 'test'
+  ...
+# Subtest: Rule admission seqs commit with the document, survive restore and preserve unchanged revisions
+ok 297 - Rule admission seqs commit with the document, survive restore and preserve unchanged revisions
+  ---
+  duration_ms: 11.1291
+  type: 'test'
+  ...
+# Subtest: Bounded matcher terminates catastrophic backtracking and can still process a later request
+ok 298 - Bounded matcher terminates catastrophic backtracking and can still process a later request
+  ---
+  duration_ms: 434.5804
+  type: 'test'
+  ...
+# Subtest: Bounded matcher abort and disposal settle pending calls without retaining workers
+ok 299 - Bounded matcher abort and disposal settle pending calls without retaining workers
+  ---
+  duration_ms: 28.5603
+  type: 'test'
+  ...
+# Subtest: Program mappings use the fixed native tool name and never invoke after an approval-time control change
+ok 300 - Program mappings use the fixed native tool name and never invoke after an approval-time control change
+  ---
+  duration_ms: 61.1581
+  type: 'test'
+  ...
+# Subtest: Execution cancellation remains requested until the native pipeline actually settles
+ok 301 - Execution cancellation remains requested until the native pipeline actually settles
+  ---
+  duration_ms: 2.1403
+  type: 'test'
+  ...
+# Subtest: Only explicit continue can consume a recorded dependency failure; disabled and unknown parents still block it
+ok 302 - Only explicit continue can consume a recorded dependency failure; disabled and unknown parents still block it
+  ---
+  duration_ms: 19.7633
+  type: 'test'
+  ...
+# Subtest: Failed programs and undelivered notifications retain their ledger without consuming success state
+ok 303 - Failed programs and undelivered notifications retain their ledger without consuming success state
+  ---
+  duration_ms: 2.3093
+  type: 'test'
+  ...
+# Subtest: Delivery followed by a failed completion ACK remains unknown and is not automatically delivered again
+ok 304 - Delivery followed by a failed completion ACK remains unknown and is not automatically delivered again
+  ---
+  duration_ms: 2.1689
+  type: 'test'
+  ...
+# Subtest: Crash recovery marks unconfirmed execution unknown and does not rerun it
+ok 305 - Crash recovery marks unconfirmed execution unknown and does not rerun it
+  ---
+  duration_ms: 1.2403
+  type: 'test'
+  ...
+# Subtest: Concurrent enqueues respect the durable queue budget and disabled work remains observable
+ok 306 - Concurrent enqueues respect the durable queue budget and disabled work remains observable
+  ---
+  duration_ms: 2.4057
+  type: 'test'
+  ...
+# Subtest: A cancelled durable queue record cannot be revived by a stale pending item
+ok 307 - A cancelled durable queue record cannot be revived by a stale pending item
+  ---
+  duration_ms: 1.4696
+  type: 'test'
+  ...
+# Subtest: Turn cancellation settles a stuck approval without invoking the tool or consuming occurrence state
+ok 308 - Turn cancellation settles a stuck approval without invoking the tool or consuming occurrence state
+  ---
+  duration_ms: 1.4287
+  type: 'test'
+  ...
+# context-care: first failed while handling the primary error Error: first-close
+#     at TestContext.<anonymous> (file:///D:/dev/dsh-context-care/test/workbench-runtime.test.js:290:38)
+#     at Test.runInAsyncScope (node:async_hooks:214:14)
+#     at Test.run (node:internal/test_runner/test:1047:25)
+#     at Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+#     at Test.postRun (node:internal/test_runner/test:1173:19)
+#     at Test.run (node:internal/test_runner/test:1101:12)
+#     at async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+# Subtest: Action timeout includes approval and cancellation after a running ACK still prevents tool execution
+ok 309 - Action timeout includes approval and cancellation after a running ACK still prevents tool execution
+  ---
+  duration_ms: 38.8034
+  type: 'test'
+  ...
+# Subtest: Execution capacity is shared across sessions and a cancelled waiter never starts
+ok 310 - Execution capacity is shared across sessions and a cancelled waiter never starts
+  ---
+  duration_ms: 2.3127
+  type: 'test'
+  ...
+# Subtest: Resource cleanup releases later owners after a failure and preserves the startup error
+ok 311 - Resource cleanup releases later owners after a failure and preserves the startup error
+  ---
+  duration_ms: 0.792
+  type: 'test'
+  ...
+1..311
+# tests 314
+# suites 0
+# pass 314
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 9423.9079

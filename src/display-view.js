@@ -49,7 +49,9 @@ export function DisplayDetails({ sessionId, useDisplaySelection, useDisplayRecor
       React.createElement('summary', null, t('processingFailed'), ` · ${failure.count ?? 1}`),
       React.createElement('pre', null, JSON.stringify(failure.diagnostic, null, 2)))),
     !Number.isSafeInteger(seq) ? React.createElement('p', null, t('displaySelect'))
-      : record?.status === 'error' ? React.createElement('div', { role: 'alert' }, React.createElement('p', null, t('displayUnavailable')), React.createElement('pre', null, record.route, '\n', record.error))
+      : record?.status === 'error' ? React.createElement('div', { role: 'alert' }, React.createElement('p', null, t('displayUnavailable')),
+        record.phase ? React.createElement('p', null, t(`displayFailure_${record.phase}`), record.httpStatus === undefined ? '' : ` · HTTP ${record.httpStatus}`) : null,
+        React.createElement('pre', null, record.route, '\n', record.error))
       : !record || record.status === 'loading' ? React.createElement('p', { role: 'status' }, t('actionsLoading'))
       : projection ? React.createElement('div', null, React.createElement('p', null, t('displayExplanation')), column('displayOriginal', projection.before), column('displayTransformed', projection.after))
       : React.createElement('p', null, t('displayUnchanged')))

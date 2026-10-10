@@ -22,16 +22,27 @@ export function createDisplayRecords({ fetcher = fetch } = {}) {
     const operation = { controller, done: undefined }; pending.set(key, operation)
     operation.done = (async () => {
       const route = `/context-care/display?sessionId=${encodeURIComponent(sessionId)}&seq=${seq}`
+      let phase = 'fetch'; let httpStatus
       try {
         const response = await fetcher(route, { signal: controller.signal, headers: { accept: 'application/json' } })
-        // Desktop forwarding can return an empty/HTML failure before the JSON route runs.
-        if (!response.ok) throw await httpFailure(response, route)
-        const body = await response.json()
+        httpStatus = response.status
+        // Electron can report the same Failed to fetch while reading a body after headers arrived.
+        // Keep that phase and status distinct from a request that never received headers.
+        phase = 'body'
+        if (!response.ok) {
+          const failure = await httpFailure(response, route)
+          phase = 'http'
+          throw failure
+        }
+        const text = await response.text()
+        phase = 'json'
+        const body = JSON.parse(text)
+        phase = 'validation'
         const value = { status: 'ready', ...parseDisplayResponse(body, { seq }) }
         if (!controller.signal.aborted) publish(key, value)
         return value
       } catch (error) {
-        if (!controller.signal.aborted) publish(key, { status: 'error', error: String(error), route })
+        if (!controller.signal.aborted) publish(key, { status: 'error', error: String(error), route, phase, httpStatus })
       } finally { if (pending.get(key) === operation) pending.delete(key) }
     })()
     return operation.done
