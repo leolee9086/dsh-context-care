@@ -6,7 +6,7 @@
 
 参考 S-forge MAGI 的指标曲线和 Codex 的上下文生命周期设计，以独立 Cordis 插件接入，不修改 Harness、S-forge 或 Codex 源码。本文档以中文为主。
 
-> 发行版本：`v0.8.1`，面向官方 DSH `0.2.0-rc.2`。安装 GitHub 版本前确认对应标签已经发布；本地修复包可使用下文的 tgz 装法。源码组合验收使用显式外部 Host 的 `pnpm test:integration:source`，不依赖残留构建产物；桌面产物验收由 Electron 从其封装目录只读加载官方模块。
+> 发行版本：`v0.8.2`，面向官方 DSH `0.2.0-rc.2`。通过 GitHub 标签安装，客户端构建产物已入库。完整真实 Client 验收尚未完成，验证范围见[版本记录](artifacts/RELEASE-0.8.2.md)。
 
 ## 指标与行为
 
@@ -237,7 +237,7 @@ model 条目的 `lifetime` 决定已激活文本参与哪些请求。首次成�
 
 Tavern 正则转换对照 [SillyTavern release 正则引擎](https://github.com/SillyTavern/SillyTavern/blob/release/public/scripts/extensions/regex/engine.js)：支持 user/assistant/reasoning placement 1/2/6、明确 display 或 prompt 副本、g/i/m/s/u、数字与命名捕获及 `{{match}}`。g 转为独立 occurrence，最多 1000 次，每次捕获属于自身；Unicode 零宽扫描按码点前进。所有规则对不可变基线规划，重叠区间按优先级决议，**不等同于酒馆逐条修改前一条结果或历史编辑**。宏执行、非空 trimStrings、不等价 depth、未支持 placement 与历史原地修改明确拒绝；`runOnEdit` 和副本模式的差异、每个已出现字段与未知字段逐项报告。有效邻居保留，拒绝项不会伪装成成功转换。world-info 同样逐字段报告：支持常驻、主/次关键词及 ANY/ALL/NOT 逻辑、大小写/词边界、扫描窗口、稳定优先级和显式有限级联；概率、原酒馆计时与不等价注入位置不猜语义。
 
-验证使用真实 Connection/Loader/storage-domain、官方客户端 Slot/Sidebar/Conversation 装配与独立包安装。真实供应商网络和模型效果不属于这些测试的证据；现场 GUI 安装版本按现有部署保留，发行开发树不会自动替换现场。
+独立 GitHub 安装记录确认包来源与依赖解析。完整真实 Client 的 Slot/Sidebar/Conversation 验收尚未完成；真实供应商网络和模型效果也未验证。当前 GUI 没有自动安装或加载新标签。
 
 ## 完成表述的持久观察
 
@@ -257,28 +257,28 @@ UI 优先显示当前进程最近一次请求边界的独立数值采样，关�
 
 ## 安装
 
-运行环境需要 Node.js 22.19.0 或更新版本。当前修复树通过标准包依赖使用 `@leolee9086/dsh-rule-engine@0.3.0` 与 `dsh-better-session-query@0.1.1`，已移除内嵌副本。2026-10-10 已核对两个版本公开 npm 可用，实际下载内容的 SHA-512 与本仓库锁文件完全一致；独立消费目录已从公开 Git 提交安装插件，从 npm 取得两个依赖。旧 v0.8.1 标签保留其已发布内容，下面的旧版安装命令不会安装当前修复树。
+运行环境需要 Node.js 22.19.0 或更新版本。当前修复树通过标准包依赖使用 `@leolee9086/dsh-rule-engine@0.3.0` 与 `dsh-better-session-query@0.1.1`，已移除内嵌副本。2026-10-10 已核对两个版本公开 npm 可用，实际下载内容的 SHA-512 与本仓库锁文件完全一致；独立消费目录已从公开 Git 提交安装插件，从 npm 取得两个依赖。旧 v0.8.1 标签保留其原有内容，下方安装命令使用包含修复的 v0.8.2。
 
 刚发布的依赖受 pnpm 的 `minimumReleaseAge` 政策约束。本机 pnpm 11.7.0 与 12.6.0 的冻结锁文件安装都因两个版本未满24小时而失败；pnpm 11.7.0 的普通 `add` 成功，但自动在消费目录记录了两个精确版本的 `minimumReleaseAgeExclude`。这与无豁免安装不同。保持该政策且没有精确版本批准的环境应等待其发布时间窗口满足后再安装；本仓库不分发豁免，不修改消费者的全局设置。
 
-GitHub 标签已包含客户端构建产物；包没有 `prepare`、`prepack` 或安装生命周期脚本。官方插件管理器的包来源可直接填写 `github:leolee9086/dsh-context-care#v0.8.1`。普通 pnpm 安装不需要 `allowBuilds`、`--ignore-scripts` 或 `blockExoticSubdeps` 例外。v0.8.0 的安装契约问题和历史验证限制保留在更新记录中。
+GitHub 标签已包含客户端构建产物；包没有 `prepare`、`prepack` 或安装生命周期脚本。官方插件管理器的包来源可直接填写 `github:leolee9086/dsh-context-care#v0.8.2`。普通 pnpm 安装不需要 `allowBuilds`、`--ignore-scripts` 或 `blockExoticSubdeps` 例外。v0.8.0 的安装契约问题和历史验证限制保留在更新记录中。
 
 ### 安装发行包
 
 在插件管理界面的包来源填写 tgz 的完整路径，或使用官方 CLI（将路径替换为包的实际位置）：
 
 ```sh
-dsh plugin --profile desktop add "/absolute/path/to/dsh-context-care-0.8.1.tgz"
+dsh plugin --profile desktop add "/absolute/path/to/plugin.tgz"
 ```
 
 Host 代码更新后需要重启 DSH，再刷新页面；重新启用条目不会清除旧 Node 模块缓存。安装和重启通过官方管理流程完成。
 
 ### 从 GitHub 安装
 
-确认 `v0.8.1` 标签已发布后可使用：
+使用固定的 `v0.8.2` 标签：
 
 ```sh
-dsh plugin --profile web add "github:leolee9086/dsh-context-care#v0.8.1"
+dsh plugin --profile web add "github:leolee9086/dsh-context-care#v0.8.2"
 ```
 
 构建产物 `lib/` 已入库，装完即可用 —— 不需要额外构建，也不需要手工打包上传 tgz。带上标签安装，版本不会跟着分支漂。
