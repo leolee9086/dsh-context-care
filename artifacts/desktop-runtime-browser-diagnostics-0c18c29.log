@@ -1,0 +1,22 @@
+ℹ entry: test/browser-display-entry.js
+ℹ target: es2022
+ℹ Build start
+ℹ Cleaning 1 files
+ℹ Hint: consider adding deps.onlyBundle option to avoid unintended bundling of dependencies, or set deps.onlyBundle: false to disable this hint.
+See more at https://tsdown.dev/options/dependencies#deps-onlybundle
+Detected dependencies in bundle:
+- react
+- scheduler
+- react-dom
+ℹ C:\Users\al765\AppData\Local\Temp\care-browser-production-ui-xhNs18\fixture.js  262.07 kB │ gzip: 70.39 kB
+ℹ 1 files, total: 262.07 kB
+✔ Build complete in 345ms
+✔ browser on-demand reader reaches authenticated real Host and shows disconnect as failure (3101.7634ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 1
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 4074.0163

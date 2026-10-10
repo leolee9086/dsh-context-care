@@ -29,6 +29,8 @@
 - 此后补齐详情失败诊断：右栏显示具体请求路由，空或HTML的HTTP失败保留状态码。真实HTTP2/2、真实Host浏览器断开1/1、官方Client装配2/2通过，见 [display-http-diagnostic-fixed.log](display-http-diagnostic-fixed.log)、[display-sidebar-diagnostic-browser.log](display-sidebar-diagnostic-browser.log)、[display-sidebar-diagnostic-client.log](display-sidebar-diagnostic-client.log)。pnpm run build仍因发布时间政策失败；直接执行已安装构建器成功并更新已提交Client产物，没有更改安装政策。
 - 17:23从公开最新提交0c18c29再做全新消费者/全新store安装，53包全部下载，普通add再次只自动写入上述两个精确年龄豁免；依赖integrity与源锁一致，见 [public-current-install-0c18c29.log](public-current-install-0c18c29.log)。独立入口/Client factory/真实worker smoke通过，见 [public-current-consumer-0c18c29.log](public-current-consumer-0c18c29.log)。公开安装Host的8项真实故障检查及真实浏览器按需取数/断开共9/9通过，见 [public-current-host-node24-0c18c29.log](public-current-host-node24-0c18c29.log)；读取同一安装包已构建Client的官方装配2/2通过，见 [public-current-client-assembly-node24-0c18c29.log](public-current-client-assembly-node24-0c18c29.log)。浏览器fixture构建仍来自测试checkout生产组件，95个发布src及lib/client.js与此次公开安装逐SHA256一致，见 [public-current-source-0c18c29.json](public-current-source-0c18c29.json)。
 
+实际运行的桌面 Host 引擎为 Electron 内置 Node24.18.1，启动带 `--expose-internals`；此前的 Node24.21.0 是部署随带的独立 Node。最新公开消费包在实际引擎及同一启动参数下的入口、Client factory、原块和 worker smoke通过，见 [desktop-engine-public-consumer-0c18c29.log](desktop-engine-public-consumer-0c18c29.log)。真实已部署 ASAR 模块（DSH0.2.0-rc.2、Cordis4.0.4、Loader1.0.5）的8项故障及多会话检查全部通过，见 [desktop-runtime-public-host-fixed-0c18c29.log](desktop-runtime-public-host-fixed-0c18c29.log)。首次检查在测试解析包名处失败，已修正目录叶推断为显式公开包名；未修改生产解析。生产标记与右栏reader通过真实msedge→该ASAR Host的按需读取及断开检查1/1，见 [desktop-runtime-browser-diagnostics-0c18c29.log](desktop-runtime-browser-diagnostics-0c18c29.log)。浏览器入口从相同生产源码构建，源码与公开安装文件一致；这不是将插件安装进现场GUI。
+
 测试明确指定外部只读 Harness；生产运行时不导入该 checkout。LLM 使用测试适配器，未验证真实模型供应商行为。主包声明 AGPL-3.0-only；引擎依赖声明 AGPL-3.0-or-later，查询依赖声明 MIT。
 
 ## 现场剩余工作
@@ -36,5 +38,7 @@
 只读检查确认桌面安装目录仍为0.8.1，文件中的旧实现仍有逐消息读取和两秒轮询；当前profile bundle名册和有效Host组合已无照料插件。桌面旧boot图保留照料条目，但真实/plugins/events返回200后的当前图已无照料。对应display/actions/controls同源只读GET均为空404，页面没有自动详情请求；该状态不能当作10:29原失败的重现。
 
 已读取原始两张截图：显示卡片只有TypeError: Failed to fetch，没有当时请求URL或底层网络码；matcher异常进入工具提示和整轮UNKNOWN失败。原图保留在既有本地存储。实际部署桌面代码将非静态app路径转发到Host并移除连接encoding/length头，当前同源404也证明能拿到Response；不能直接归咎于自定义协议。fetch-router Client没有改写全局fetch。
+
+只读选择原安装0.8.1、实际Node24.18.1与已部署ASAR Host，用原生产reader做真实msedge HTTP诊断：8条空规则请求均200，8条真实正则超时请求均503且显示HTTP503:matcher-work-timeout，两组requestfailed均零。参数化诊断脚本复验相同，见 [legacy-display-transport-parameterized.log](legacy-display-transport-parameterized.log)。该结果只确认所测试HTTP路径的超时错误响应，不覆盖历史dsh-app连接或所有原配置。修正测试解析器后，源码Host的有效标记回归1/1也通过，见 [source-host-resolver-regression.log](source-host-resolver-regression.log)。
 
 实际DevTools保留的 `/plugins/events` net::ERR_FAILED、旧crash日志与会话工作台记录均不足以证明原显示请求的失败原因。原现场Failed to fetch的具体传输根因仍缺当时URL、网络码或对应Host记录；隔离Host断开测试验证同类错误显示，不替代历史根因。未修改现场Harness/profile/preset/deploy，也未读取凭据。代码与标准依赖阶段通过，整个目标尚未完成。

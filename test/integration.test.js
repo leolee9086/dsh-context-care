@@ -25,21 +25,18 @@ if (!runtimeRoot && !process.env.DSH_TEST_CHECKOUT) throw new Error('test:integr
 const checkout = resolve(runtimeRoot ?? process.env.DSH_TEST_CHECKOUT)
 const source = !runtimeRoot && process.env.DSH_TEST_SOURCE === '1'
 const runtimeRequire = runtimeRoot ? createRequire(pathToFileURL(resolve(runtimeRoot, 'package.json'))) : undefined
-const vendorNames = { cordis: '@deepseek-ai/cordis', loader: '@deepseek-ai/cordis-plugin-loader', include: '@deepseek-ai/cordis-plugin-include' }
-const load = async path => {
-  // Desktop artifacts live inside ASAR, resolved by Electron's official loader.
-  // The test consumes them read-only; runtime plugin imports remain independent.
-  const parts = path.split('/')
-  const target = runtimeRequire ? runtimeRequire.resolve(parts[0] === 'vendor' ? vendorNames[parts[1]]
-    : `@deepseek-ai/dsh-${parts[2] === 'webserver' ? 'host-webserver' : parts[2]}`)
+const load = async (path, packageName) => {
+  // ASAR consumers resolve the declared public package name: folder leaves such
+  // as client/connection are not that package's published name.
+  const target = runtimeRequire ? runtimeRequire.resolve(packageName)
     : resolve(checkout, source ? path.replace('/lib/index.js', '/src/index.ts') : path)
   return import(pathToFileURL(target).href)
 }
-const { Context } = await load('vendor/cordis/lib/index.js')
-const { LlmAdapter, createUserMessage, createMessage } = await load('packages/llm/llm/lib/index.js')
-const { Session, buildForkSeed } = await load('packages/core/session/lib/index.js')
-const { default: Loader } = await load('vendor/loader/lib/index.js')
-const { default: Include } = await load('vendor/include/lib/index.js')
+const { Context } = await load('vendor/cordis/lib/index.js', '@deepseek-ai/cordis')
+const { LlmAdapter, createUserMessage, createMessage } = await load('packages/llm/llm/lib/index.js', '@deepseek-ai/dsh-llm')
+const { Session, buildForkSeed } = await load('packages/core/session/lib/index.js', '@deepseek-ai/dsh-session')
+const { default: Loader } = await load('vendor/loader/lib/index.js', '@deepseek-ai/cordis-plugin-loader')
+const { default: Include } = await load('vendor/include/lib/index.js', '@deepseek-ai/cordis-plugin-include')
 const paths = {
   llm: 'llm/llm', session: 'core/session', 'session-projection': 'session/session-projection',
   'system-prompt': 'core/system-prompt', tools: 'core/tools', agent: 'core/agent',
@@ -48,7 +45,7 @@ const paths = {
   storage: 'storage/storage', 'storage-json': 'storage/storage-json', 'storage-domain': 'storage/storage-domain', 'host-webserver': 'host/webserver', 'compaction-image-offload': 'compaction/compaction-image-offload',
 }
 const modules = new Map(await Promise.all(Object.entries(paths).map(async ([name, path]) => {
-  const module = await load(`packages/${path}/lib/index.js`)
+  const module = await load(`packages/${path}/lib/index.js`, `@deepseek-ai/dsh-${name}`)
   return [`@deepseek-ai/dsh-${name}`, module.default ?? module]
 })))
 modules.set('dsh-context-care', displayPlugin)
@@ -2418,7 +2415,11 @@ test('browser on-demand reader reaches authenticated real Host and shows disconn
     res.writeHead(200, { 'content-type': 'text/html' })
     res.end(`<!doctype html><div id="root"></div><script>window.testIdentity = ${JSON.stringify({ sessionId: String(agent.id), seq: event.seq })}</script><script type="module" src="./fixture.js"></script>`)
   } }))
-  const browserRequire = createRequire(pathToFileURL(resolve(checkout, 'apps/web/package.json')))
+  // The packaged Host has no browser test driver; select that external test
+  // dependency separately from the ASAR modules being exercised.
+  if (runtimeRoot && !process.env.DSH_TEST_CHECKOUT) throw new Error('Packaged Host browser checks require DSH_TEST_CHECKOUT for Playwright')
+  const browserCheckout = resolve(process.env.DSH_TEST_CHECKOUT ?? checkout)
+  const browserRequire = createRequire(pathToFileURL(resolve(browserCheckout, 'apps/web/package.json')))
   const { chromium } = browserRequire('playwright')
   const browser = await chromium.launch({ headless: true, channel: 'msedge' })
   t.after(() => browser.close())

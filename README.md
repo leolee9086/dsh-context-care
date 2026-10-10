@@ -419,6 +419,10 @@ pnpm run build
 pnpm run test:client:source
 ```
 
+桌面产物检查显式设置 `DSH_TEST_RUNTIME_ROOT` 为部署内的 `app.asar/dsh`，用该部署的 Electron 可执行文件和 `ELECTRON_RUN_AS_NODE=1`、`--expose-internals` 运行 `test/integration.test.js`。`DSH_TEST_PLUGIN_ROOT` 可选择独立安装的候选插件；浏览器检查另需 `DSH_TEST_CHECKOUT` 提供 Playwright。Host 模块按公开包名从 ASAR 读取，测试存储和端口独立。2026-10-10 检查的实际 Host 引擎为 Electron 内置 Node 24.18.1；部署随带的 Node 24.21.0 用于包管理及独立进程，两者分别验证。
+
+历史传输诊断 `test/diagnose-legacy-display-transport.js` 要求显式 `DSH_TEST_RUNTIME_ROOT`、`DSH_TEST_LEGACY_ROOT` 和 `DSH_TEST_CHECKOUT`，且拒绝非 0.8.1 的历史目录。它用真实 msedge 读取原版 reader，在独立 ASAR Host 上检查八条空规则响应及八条真实正则超时响应，记录 HTTP 状态和浏览器 requestfailed；不修改所选安装目录或现有 GUI。该诊断使用 HTTP，不能代替历史桌面自定义协议的失败网络记录。
+
 源码组合挂载发行 Host 入口及 requests/completion，实际启动自有端口的 HTTP 服务和 JSON 存储。测试检查路由与工具卸载、真实历史 seed 恢复、完成冷却及崩溃补写、一次性大提示校准、约 5.102 倍输入校准后的十步不重复压缩、完整摘要预算和有限溢出恢复。测试目录、临时存储与端口都属于外部测试，不改部署与现有 GUI。客户端装配测试读取实际发行模块工厂，在外部 Host 提供的真实 SlotRegistry、SessionProvider、框架 hook 和渲染器中运行，验证两正式页签、通知原位定位、精确包装正文、重复定位、刷新、分页、会话切换、HTTP 错误与卸载，并保存 DOM 快照；该测试是 jsdom 装配验收，不代表已安装到正在运行的 GUI。
 
 `pnpm test` 验证曲线、百分比节流、范围配对、参数拒绝、失败、取消、卸载、数值投影与中文 UI，并检查 manifest、锁文件和运行时代码不引入 DSH 包。`pnpm run test:integration` 使用明确指定的真实 DSH Loader YAML、agent loop、工具注册表、token meter 与 compaction provider，仅模拟 LLM；检查摘要事务、工具结果顺序、继续执行、提示快照、投影重放和请求前缀。`pnpm run build` 生成客户端构建产物。
