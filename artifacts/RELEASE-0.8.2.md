@@ -47,6 +47,10 @@
 
 诊断脚本可明确选定部署main的ASAR路径；Electron引擎复制到测试临时目录，不复制生产app.asar或profile。隐藏renderer与独立socket通信，记录protocol异常、renderer网络码和原reader结果。故障由真实TCP端点产生，无fetch mock。合成负载与受控断连定位错误传播机制，不证明10:29的原始触发。目标保持active；不以缺旧日志标受阻。
 
+此后补齐实际Client产物：设置`DSH_TEST_CLIENT_ARTIFACT=1`，直接加载已安装且未修改的Client构建产物，通过其实际Slot注册取得显示reader；React使用该安装包真实解析到的发布版本。旧0.8.1在64消息/gzip/实际Electron协议下的正常读取、真实HTTP503与三种TCP故障整组通过，见[legacy-artifact-deployed-asar-gzip64.log](legacy-artifact-deployed-asar-gzip64.log)。公开消费e8ccd9c的已构建Client同组通过，响应体截断保持body+HTTP200，见[public-client-artifact-deployed-asar-gzip-fixed-e8ccd9c.log](public-client-artifact-deployed-asar-gzip-fixed-e8ccd9c.log)。公开候选首次fixture因pnpm junction路径解析React失败，改用实际包路径后通过；首次失败另保留，不算行为验收。该fixture只检查注册reader，正式Slot/Sidebar渲染证据仍为前面的Client assembly测试。
+
+只读原持久域进一步确认10:30:00.807请求为REQUEST_PREFLIGHT_FAILED且dispatched=false。其140个已提交来源读取290原始块，1585311字节空匹配参考输入在实际桌面引擎下：旧版正常返回，候选完全不启动worker。参考输入不含历史模型副本或提示注入；该结果验证空规则修复在实际来源规模下生效，没有复现历史超时。原消息与持久文件未导出或提交。
+
 ## 现场剩余工作
 
 只读检查确认桌面安装目录仍为0.8.1，文件中的旧实现仍有逐消息读取和两秒轮询；当前profile bundle名册和有效Host组合已无照料插件。桌面旧boot图保留照料条目，但真实/plugins/events返回200后的当前图已无照料。对应display/actions/controls同源只读GET均为空404，页面没有自动详情请求；该状态不能当作10:29原失败的重现。

@@ -1,0 +1,24 @@
+{"case":"legacy-cleanup-start","owner":"browser"}
+{"case":"legacy-cleanup-start","owner":"desktop"}
+{"case":"legacy-cleanup-start","owner":"host"}
+{"case":"legacy-cleanup-start","owner":"temp"}
+{"case":"legacy-cleanup-finished"}
+node:internal/modules/cjs/loader:1524
+  const err = new Error(message);
+              ^
+
+Error: Cannot find module 'react/package.json'
+Require stack:
+- C:\Users\al765\AppData\Local\Temp\care-public-dependencies-4967e9aff45849448c36b3a06ccdbde5\consumer-phase-e8ccd9c\node_modules\dsh-context-care\package.json
+    at Module._resolveFilename (node:internal/modules/cjs/loader:1524:15)
+    at wrapResolveFilename (node:internal/modules/cjs/loader:1078:27)
+    at resolveForCJSWithHooks (node:internal/modules/cjs/loader:1129:12)
+    at require.resolve (node:internal/modules/helpers:171:31)
+    at file:///D:/dev/dsh-context-care/test/diagnose-legacy-display-transport.js:93:45 {
+  code: 'MODULE_NOT_FOUND',
+  requireStack: [
+    'C:\\Users\\al765\\AppData\\Local\\Temp\\care-public-dependencies-4967e9aff45849448c36b3a06ccdbde5\\consumer-phase-e8ccd9c\\node_modules\\dsh-context-care\\package.json'
+  ]
+}
+
+Node.js v24.18.1

@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { resolve } from 'node:path'
+import { resolve, dirname } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { createServer } from 'node:net'
 
@@ -15,6 +15,8 @@ const runtime = resolve(process.env.DSH_TEST_RUNTIME_ROOT)
 const legacy = resolve(process.env.DSH_TEST_LEGACY_ROOT)
 const reader = process.env.DSH_TEST_READER_ROOT ? resolve(process.env.DSH_TEST_READER_ROOT) : legacy
 const candidateReader = reader !== legacy
+const clientArtifact = process.env.DSH_TEST_CLIENT_ARTIFACT === '1'
+assert.ok(!process.env.DSH_TEST_CLIENT_ARTIFACT || clientArtifact, 'Client artifact flag must be 1')
 const compression = process.env.DSH_TEST_WEB_COMPRESSION ?? 'none'
 assert.ok(['none', 'gzip'].includes(compression), 'Web compression must be none or gzip')
 assert.equal(JSON.parse(await readFile(resolve(legacy, 'package.json'), 'utf8')).version, '0.8.1')
@@ -86,10 +88,31 @@ try {
       res.writeHead(200, { 'content-type': 'text/javascript' }); res.end(source)
     } }))
   }
+  if (clientArtifact) {
+    // pnpm's package dependencies live beside the real package, not the consumer junction.
+    const readerRequire = createRequire(pathToFileURL(await realpath(resolve(reader, 'package.json'))))
+    const reactRoot = dirname(readerRequire.resolve('react/package.json'))
+    for (const [route, file] of [
+      ['react.js', resolve(reactRoot, 'cjs/react.production.min.js')],
+      ['client.js', resolve(reader, 'lib/client.js')],
+      ['artifact-reader.js', new URL('./fixtures/artifact-display-reader.js', import.meta.url)],
+    ]) {
+      const source = await readFile(file, 'utf8')
+      // React's published CJS factory is wrapped for this browser; the actual Client stays untouched.
+      const content = route === 'react.js' ? `window.React = (() => { const exports = {}; ${source}; return exports })();` : source
+      ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/care-test/legacy/' + route, handler(_req, res) {
+        res.writeHead(200, { 'content-type': 'text/javascript' }); res.end(content)
+      } }))
+    }
+  }
   ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/care-test/legacy/page', handler(_req, res) {
     res.writeHead(200, { 'content-type': 'text/html' })
-    res.end(`<!doctype html><script type="module">import {createDisplayRecords} from './display-records.js'; window.records=createDisplayRecords(); for(const seq of ${JSON.stringify(activeSeqs)})window.records.watch(${JSON.stringify(String(agent.id))},0,seq); window.readerReady=true;</script>`)
+    const setup = clientArtifact
+      ? `import { loadArtifactReader } from './artifact-reader.js'; window.records = await loadArtifactReader(${JSON.stringify(candidateReader)});`
+      : `import { createDisplayRecords } from './display-records.js'; window.records = createDisplayRecords();`
+    res.end(`<!doctype html><script type="module">${setup} for(const seq of ${JSON.stringify(activeSeqs)})window.records.watch(${JSON.stringify(String(agent.id))},0,seq); window.readerReady=true;</script>`)
   } }))
+  console.log(JSON.stringify({ case: 'legacy-diagnostic-reader', reader: candidateReader ? 'candidate' : 'legacy', artifact: clientArtifact, compression }))
   if (process.env.DSH_TEST_DESKTOP_EXE) {
     const { createDesktopProtocolDriver } = await import('./desktop-protocol-driver.js')
     desktop = await createDesktopProtocolDriver(root)
