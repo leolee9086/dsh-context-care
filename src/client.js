@@ -10,7 +10,7 @@ import { createControlRecords } from './control-records.js'
 import { ContextCareControls, ContextCareControlsOpener } from './control-view.js'
 
 import { sourceNavigation } from './source-navigation.js'
-import { DISPLAY_NODE, DisplayNodeView, createDisplayDefinition } from './display-view.js'
+import { DISPLAY_NODE, DISPLAY_TAB, DisplayNodeView, DisplayDetails, createDisplayDefinition } from './display-view.js'
 
 export const inject = ['slots', 'locale', 'uiConversation', 'sessions', 'sidebarRightTabs', 'sidebarRight', 'layout']
 const ACTIONS_TAB = 'dsh-context-care:actions'
@@ -26,6 +26,14 @@ export function apply(ctx) {
   const rewrites = createRewriteRecords()
   const prompts = createActionRecords({ endpoint: '/context-care/prompts', collection: 'prompts' })
   const display = createDisplayRecords()
+  let displaySelection = new Map(); const displayListeners = new Set()
+  const displaySource = { getSnapshot: () => displaySelection, subscribe(listener) { displayListeners.add(listener); return () => displayListeners.delete(listener) } }
+  function openDisplay(sessionId, seq) {
+    displaySelection = new Map(displaySelection).set(sessionId, seq)
+    for (const listener of displayListeners) listener()
+    ctx.sidebarRight.openTabIn(sessionId, DISPLAY_TAB)
+    if (ctx.sidebarRight.isExpanded() !== true) ctx.layout.openRightbar(false, false)
+  }
   let selection = new Map()
   const selectionListeners = new Set()
   const promptSelection = { getSnapshot: () => selection, subscribe(listener) { selectionListeners.add(listener); return () => selectionListeners.delete(listener) } }
@@ -35,10 +43,11 @@ export function apply(ctx) {
     ctx.sidebarRight.openTabIn(sessionId, PROMPTS_TAB)
     if (ctx.sidebarRight.isExpanded() !== true) ctx.layout.openRightbar(false, false)
   }
-  ctx.effect(() => () => { controls.dispose(); actions.dispose(); rewrites.dispose(); prompts.dispose(); display.dispose(); selectionListeners.clear(); selection.clear() })
+  ctx.effect(() => () => { controls.dispose(); actions.dispose(); rewrites.dispose(); prompts.dispose(); display.dispose(); displayListeners.clear(); displaySelection.clear(); selectionListeners.clear(); selection.clear() })
   ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
     name: 'conversation.composer.dock', id: 'context-care', order: 4, locale: 'dsh-context-care',
-    inject: () => ({ hooks: { careActions: actions.source, rewriteHealth: rewrites.health }, watchActions: actions.watch, watchRewrites: rewrites.watch }),
+    inject: () => ({ hooks: { careActions: actions.source, rewriteHealth: rewrites.health }, watchActions: actions.watch, watchRewrites: rewrites.watch,
+      openActions(sessionId) { ctx.sidebarRight.openTabIn(sessionId, ACTIONS_TAB); if (ctx.sidebarRight.isExpanded() !== true) ctx.layout.openRightbar(false, false) } }),
   }, ContextCareStatus))
   const t = ctx.locale.bind('dsh-context-care')
   ctx.effect(() => ctx.sidebarRightTabs.register({ id: CONTROLS_TAB, kind: CONTROLS_TAB, title: () => t('controlsTitle') }))
@@ -70,10 +79,16 @@ export function apply(ctx) {
       if (ctx.sidebarRight.isExpanded() !== true) ctx.layout.openRightbar(false, false)
     } }),
   }, ContextCareActionsOpener))
+  ctx.effect(() => ctx.sidebarRightTabs.register({ id: DISPLAY_TAB, kind: DISPLAY_TAB, title: () => t('displayTitle') }))
+  ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
+    name: 'sidebar.right.pane.tab', key: DISPLAY_TAB, locale: 'dsh-context-care',
+    inject: () => ({ hooks: { displayRecords: display.source, displaySelection: displaySource, careActions: actions.source },
+      watchDisplay: display.watch, refreshDisplay: display.refresh }),
+  }, DisplayDetails))
   ctx.effect(() => ctx.uiConversation.events.register(createDisplayDefinition()))
   ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
     name: 'conversation.chat.node', key: DISPLAY_NODE, locale: 'dsh-context-care',
-    inject: () => ({ hooks: { displayRecords: display.source }, watchDisplay: display.watch }),
+    inject: () => ({ hooks: { displayRecords: display.source, careActions: actions.source }, openDisplay }),
   }, DisplayNodeView))
   ctx.effect(() => ctx.uiConversation.events.register(createNoticeDefinition()))
   ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({

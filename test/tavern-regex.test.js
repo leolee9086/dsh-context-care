@@ -15,7 +15,7 @@ test('Tavern regex converts independent global captures and display copies witho
   const block = { id: 'b', view: 'display', sessionId: 's', seq: 1, messageId: 'm', turnId: 't', role: 'assistant', type: 'text', path: '0', text: 'ab' }
   const matcher = createBoundedMatcher()
   try {
-    const { normalizeRuleV2 } = await import('../src/vendor/rule-engine/index.js')
+    const { normalizeRuleV2 } = await import('@leolee9086/dsh-rule-engine')
     const normalized = rules.map(normalizeRuleV2)
     const events = await matcher.detect({ rules: normalized, blocks: [block], stage: 'display.render' })
     const planned = planDisplayV2({ blocks: [block], rules: normalized, events, templates, snapshot: {}, decision: () => ({ enabled: true }), maxInjectedChars: 65536, maxBytes: 100000 })

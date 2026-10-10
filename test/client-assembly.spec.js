@@ -214,7 +214,7 @@ test('native slots show readable records, locate paged sources, isolate sessions
   } finally { sidebar.controller.tabDomain.dispose(); await runtime.dispose(); vi.unstubAllGlobals(); vi.restoreAllMocks() }
 })
 
-test('built client renders its comparison alongside native message nodes and removes definitions and reads on unload', async () => {
+test('built client leaves unchanged native messages without markers or display HTTP reads', async () => {
   const runtime = await SlotTestRuntime.create(); const dictionaries = new Map()
   const bind = name => key => dictionaries.get(name)?.[key] ?? key
   runtime.ctx.provide('locale', { bind, register(name, values) { dictionaries.set(name, values.zh); return () => dictionaries.delete(name) } })
@@ -228,12 +228,7 @@ test('built client renders its comparison alongside native message nodes and rem
   runtime.ctx.provide('layout', { openRightbar() {} })
   await runtime.sessions.add({ id: 'display-session', events: [event(24)] })
   const session = runtime.sessions.retainFor(runtime.ctx, 'display-session')
-  const fetcher = vi.fn(async url => ({ ok: true, json: async () => {
-    expect(url).toContain('/context-care/display?')
-    expect(url).toContain('sessionId=display-session'); expect(url).toContain('seq=24')
-    return { projections: [{ seq: 24, before: [{ id: 'original', role: 'user', type: 'text', text: 'Source 24' }],
-      after: [{ id: 'copy', role: 'user', type: 'text', text: '<script>display only</script>' }] }] }
-  } }))
+  const fetcher = vi.fn(() => { throw new Error('Rendering an unchanged message must not read display details') })
   vi.stubGlobal('fetch', fetcher)
   await runtime.root.declare({ 'conversation.chat.node': { kind: 'keyed', scope: 'session' } }, ({ SessionProvider, renderSlot }) => {
     const assembly = conversation.binding(session.sessionId); assembly.activate('chat')
@@ -246,15 +241,11 @@ test('built client renders its comparison alongside native message nodes and rem
   const feature = await runtime.mount(plugin.exports)
   try {
     const view = runtime.renderRoot()
-    await waitFor(() => expect(view.getByText('<script>display only</script>')).toBeTruthy())
     expect(view.container.querySelector('[data-native-message]').textContent).toBe('Source 24')
-    expect(view.getByText('原文')).toBeTruthy(); expect(view.getByText('变换后')).toBeTruthy()
-    expect(view.container.querySelectorAll('script')).toHaveLength(0)
-    expect(view.container.querySelectorAll('details[open]')).toHaveLength(2)
-    expect(snapshotView(view.container)).toMatchSnapshot('native original and display comparison')
-    const request = fetcher.mock.calls[0][1]
+    expect(view.container.querySelector('[data-context-care-marker]')).toBeNull()
+    expect(view.queryByText('原文')).toBeNull(); expect(view.queryByText('变换后')).toBeNull()
+    expect(fetcher).not.toHaveBeenCalled()
     await feature.dispose()
-    expect(request.signal.aborted).toBe(true)
     expect(conversation.binding(session.sessionId).snapshot.getSnapshot().views.get('chat').nodes.values().some(node => node.kind === 'context-care-display-copy')).toBe(false)
     expect(runtime.slots.entries('conversation.chat.node')).toHaveLength(0)
   } finally { await runtime.dispose(); vi.unstubAllGlobals(); vi.restoreAllMocks() }

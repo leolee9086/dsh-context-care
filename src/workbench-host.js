@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { normalizeRuleV2 } from './vendor/rule-engine/index.js'
-import { extractRawBlocks } from './vendor/session-query/blocks.js'
+import { normalizeRuleV2 } from '@leolee9086/dsh-rule-engine'
+import { extractRawBlocks } from 'dsh-better-session-query/blocks'
 import { planDisplayV2 } from './display-plan.js'
 import { openWorkbenchStore, entryRule, variableSnapshot, variableKey, validateDocument, validateDocumentSet } from './workbench-store.js'
 import { createTemplates } from './templates.js'
-import { createBoundedMatcher } from './bounded-matcher.js'
+import { createBoundedMatcher, MatcherFailure } from './bounded-matcher.js'
 import { createDetectorRegistry } from './detector-registry.js'
 import { createExecutorRegistry, createActionRuns, compactExecutorRef } from './action-runs.js'
 import { originalSessionBlocks, modelRequestBlocks, sessionTurn } from './request-blocks.js'
@@ -20,7 +20,7 @@ const actionKey = (event, action) => JSON.stringify([event.sourceId, event.ruleI
 const dispatchKey = (event, action) => `$dispatch:${actionKey(event, action)}`
 const dispatchItems = planned => [...new Map([...planned.applied, ...(planned.entryTransitions ?? [])].map(item => [dispatchKey(item.event, item.action), item])).values()]
 /** Single Request Host contribution: durable documents, shared matching, execution controls and jobs. */
-export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executors: configuredExecutors = [], maxCascadePasses = 4, maxInjectedChars = 65536, maxInjectedTokens = 65536, maxCacheChangedBytes, maxRequestBytes = 8388608, maxQueued = 128, maxConcurrent = 8, maxDeltaChars = 32768, maxDeltaBlocks = 16 } = {}) {
+export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executors: configuredExecutors = [], maxCascadePasses = 4, maxInjectedChars = 65536, maxInjectedTokens = 65536, maxCacheChangedBytes, maxRequestBytes = 8388608, maxQueued = 128, maxConcurrent = 8, maxDeltaChars = 32768, maxDeltaBlocks = 16, matcher: matcherOptions = {}, requiredStages = [] } = {}) {
   const report = error => ctx.logger.warn(`context-care: workbench failed: ${String(error)}`)
   const templates = createTemplates()
   const registrations = new Map(); const observations = new Map(); const admittedSessions = new Map(); let generation = 0; let closed = false; let closing
@@ -34,10 +34,12 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
     if (!session) throw new Error('workbench-session-unavailable')
     return tailSeq(session)
   } })
-  const workerMatcher = createBoundedMatcher()
-  const detectors = createDetectorRegistry(workerMatcher)
+  const workerMatcher = createBoundedMatcher(matcherOptions)
+  // Sidebar reads have their own bounded pool so they cannot exhaust dispatch admission.
+  const displayWorker = createBoundedMatcher({ ...matcherOptions, maxPending: Math.min(matcherOptions.maxPending ?? 2, 2), maxIdle: 1 })
+  const detectors = createDetectorRegistry({ detect: (input, signal) => (input.stage === 'display.render' ? displayWorker : workerMatcher).detect(input, signal) })
   const matcher = { detect: (input, signal, options) => detectors.detect(input, signal, options),
-    close: () => releaseResources([['workbench-detectors', () => detectors.close()], ['workbench-worker', () => workerMatcher.close()]]) }
+    close: () => releaseResources([['workbench-detectors', () => detectors.close()], ['workbench-worker', () => workerMatcher.close()], ['workbench-display-worker', () => displayWorker.close()]]) }
   const executors = createExecutorRegistry({ tools: ctx.tools })
   try {
     // Fixed producer-owned tool; native execution retains policy, sandbox and approval. Success means scheduled, not summarized.
@@ -181,12 +183,49 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
       ['workbench-matcher', () => matcher.close()], ['workbench-executors', () => executors.close()], ['workbench-store', () => store.close()]], error)
     throw error
   }
+  async function recordMatchFailure(agent, error, sourceSeqs = [], kind = 'matching') {
+    const id = String(agent.session.id); const at = Date.now()
+    const diagnostic = JSON.parse(JSON.stringify(error.diagnostic))
+    const group = JSON.stringify([diagnostic.stage, error.message, diagnostic.rules])
+    await store.runtime(id, runtime => {
+      // Aggregate repeated failures without presenting a successful or unmatched assessment.
+      const previous = runtime.runs.findLast(run => run.kind === kind && run.group === group)
+      if (previous) {
+        previous.updatedAt = at; previous.count++; previous.result = diagnostic
+        previous.sourceSeqs = [...new Set([...previous.sourceSeqs, ...sourceSeqs])].slice(-128)
+      } else runtime.runs.push({ id: diagnostic.operationId, group, kind, status: 'failed',
+        sourceId: diagnostic.rules[0]?.sourceId ?? 'dsh-context-care', ruleId: diagnostic.rules[0]?.ruleId ?? '', actionId: '',
+        reason: error.message, delivery: 'not-requested', createdAt: at, updatedAt: at, count: 1,
+        sourceSeqs, inputs: { stage: diagnostic.stage, rules: diagnostic.rules, inputBytes: diagnostic.inputBytes ?? null, blockCount: diagnostic.blockCount }, result: diagnostic })
+    })
+    report(error)
+  }
   async function plan(agent, request, stage, suppliedBlocks, freshSeq) {
+    try { return await evaluatePlan(agent, request, stage, suppliedBlocks, freshSeq) }
+    catch (error) {
+      if (!(error instanceof MatcherFailure) || request.signal?.aborted) throw error
+      const seqs = freshSeq === undefined ? [] : [freshSeq]
+      await recordMatchFailure(agent, error, seqs)
+      if (request.purpose === 'preview' && stage === 'request.assemble' || requiredStages.includes(stage)) throw error
+      // Failed optional processing leaves the complete input untouched. No partial patches or actions survive.
+      const failedRules = error.diagnostic.rules
+      const unchanged = planRequestV2({ request, blocks: [], rules: [], events: [], templates: renderTemplates(agent), snapshot: {}, decision: () => ({ enabled: false }),
+        maxInjectedChars, maxInjectedTokens, maxRequestBytes, estimateMessage: message => ctx.tokenMeter.estimateMessage(message) })
+      return { ...unchanged, matchStatus: 'failed', failure: error.diagnostic,
+        records: failedRules.map(rule => ({ sourceId: rule.sourceId, ruleId: rule.ruleId, status: 'skipped', assessment: 'failed', reason: error.message })),
+        token: token(agent), stage, turnId: sessionTurn(agent.session), documents: [], entryTransitions: [], entryPolicies: {}, entryPrevious: {} }
+    }
+  }
+  async function evaluatePlan(agent, request, stage, suppliedBlocks, freshSeq) {
     const captured = token(agent); const docs = documents(agent); const localTemplates = renderTemplates(agent)
-    const rules = definitions(agent)
+    const rules = definitions(agent).filter(rule => rule.on.includes(stage))
     const snapshot = { session: { id: String(agent.session.id), turnId: sessionTurn(agent.session) }, vars: variableSnapshot({ ...record(agent), documents: docs }, sessionTurn(agent.session)),
       ...(freshSeq === undefined ? {} : { currentSeq: freshSeq }) }
-    const blocks = suppliedBlocks ?? [...originalSessionBlocks(agent.session), ...modelRequestBlocks(agent.session, request, randomUUID())]
+    const views = new Set(rules.map(rule => rule.select.view))
+    const blocks = suppliedBlocks ?? [
+      ...(views.has('original') ? originalSessionBlocks(agent.session) : []),
+      ...(views.has('model') ? modelRequestBlocks(agent.session, request, randomUUID()) : []),
+    ]
     const id = String(agent.session.id)
     const admittedRules = freshSeq === undefined ? rules : rules.filter(rule => {
       const document = docs.find(document => rule.sourceId === `context-care:document:${document.id}`)
@@ -283,6 +322,7 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
   }
   const service = {
     store, executors, sources, token, presetId, turnId: agent => sessionTurn(agent.session),
+    matcherStats: () => ({ processing: workerMatcher.getStats(), display: displayWorker.getStats() }),
     // Hash only producer-owned scalars. Runtime revisions include dispatch, cooldown
     // and lifetime changes; the event tail includes new context even within a turn.
     snapshotId(agent) {
@@ -387,15 +427,39 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
       }
       const display = original.map(block => ({ ...block, view: 'display' }))
       const snapshot = { session: { id, turnId }, vars: variableSnapshot({ ...record(agent), documents: docs }, turnId), currentSeq: seq }
-      const events = await matcher.detect({ rules: enabled, blocks: [...original, ...display], stage: 'display.render', snapshot, freshSeq: seq }, signal,
-        { sessionId: id, current: () => captured === token(agent) })
-      const projection = planDisplayV2({ blocks: display.filter(block => block.seq === seq), rules, events, templates: renderTemplates(agent), snapshot,
-        decision: (event, action) => controls.decision(id, event.sourceId, event.ruleId, action.id), maxInjectedChars, maxBytes: maxRequestBytes })
+      let events
+      try { events = await matcher.detect({ rules: enabled, blocks: [...original, ...display], stage: 'display.render', snapshot, freshSeq: seq }, signal,
+        { sessionId: id, current: () => captured === token(agent) }) }
+      catch (error) {
+        if (error instanceof MatcherFailure && !signal?.aborted) await recordMatchFailure(agent, error, [seq])
+        throw error
+      }
+      let result
+      try {
+        const projection = planDisplayV2({ blocks: display.filter(block => block.seq === seq), rules, events, templates: renderTemplates(agent), snapshot,
+          decision: (event, action) => controls.decision(id, event.sourceId, event.ruleId, action.id), maxInjectedChars, maxBytes: maxRequestBytes })
+        result = { seq, ...projection }
+        // Include identity, change flag and HTTP envelope in the published byte budget.
+        if (Buffer.byteLength(JSON.stringify({ projections: result.changed ? [result] : [] }), 'utf8') > maxRequestBytes) throw new Error('display-result-budget-exceeded')
+      } catch (cause) {
+        if (signal?.aborted) throw signal.reason ?? cause
+        // Presentation planning is optional. Keep its fault distinct from matching;
+        // neither persist template/message text nor let a broken display end a turn.
+        const fixedPatchReasons = ['rules-v2: block cannot be text-patched', 'rules-v2: stale block anchor',
+          'rules-v2: cross-block replacement requires per-block patches', 'rules-v2: invalid patch range', 'rules-v2: replacement must be text']
+        const fixedDisplayReasons = ['display-rule-unavailable', 'display-dependency-cycle', 'display-cross-block-write-unavailable',
+          'display-action-output-budget-exceeded', 'display-text-range-unavailable', 'display-opaque-filter-denied', 'display-target-unavailable',
+          'display-message-depth-unavailable', 'display-anchor-unavailable', 'display-injection-budget-exceeded', 'display-result-budget-exceeded']
+        const reason = [...fixedDisplayReasons, ...fixedPatchReasons].includes(cause?.message) ? cause.message : 'display-planning-failed'
+        const error = Object.assign(new Error(reason, { cause }), { code: 'CONTEXT_CARE_DISPLAY_FAILED', diagnostic: {
+          operationId: randomUUID(), stage: 'display.render', phase: 'planning', failureClass: cause?.name ?? 'Error',
+          rules: enabled.map(rule => ({ sourceId: rule.sourceId, ruleId: rule.id, revision: rule.revision })), blockCount: display.length,
+        } })
+        await recordMatchFailure(agent, error, [seq], 'display')
+        throw error
+      }
       if (signal?.aborted) throw signal.reason ?? new Error('display-cancelled')
       if (captured !== token(agent)) throw new Error('workbench-changed-during-display')
-      const result = { seq, ...projection }
-      // Include identity, change flag and HTTP envelope in the published byte budget.
-      if (Buffer.byteLength(JSON.stringify({ projections: result.changed ? [result] : [] }), 'utf8') > maxRequestBytes) throw new Error('display-result-budget-exceeded')
       return result
     },
     openDelta(agent, { requestId, attemptId }) {
@@ -505,13 +569,36 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
       if (observations.has(id)) return observations.get(id)
       const operation = (async () => {
         const lastSeq = Math.max(record(agent).runtime.state['$observed']?.seq ?? -1, admittedSessions.get(id) ?? -1)
-        const all = originalSessionBlocks(agent.session)
-        for (const event of agent.session.snapshotEvents().filter(event => event.seq > lastSeq && (event.type === 'assistant/message' && !event.data.interrupted || event.type === 'tool/result'))) {
+        const events = agent.session.snapshotEvents()
+        const displayRules = definitions(agent).filter(rule => rule.on.includes('display.render') && rule.actions.some(action => controls.enabled(id, rule.sourceId, rule.id, action.id)))
+        if (displayRules.length) {
+          const displaySeq = Math.max(record(agent).runtime.state['$displayObserved']?.seq ?? -1, admittedSessions.get(id) ?? -1)
+          for (const event of events.filter(event => event.seq > displaySeq && ['assistant/message', 'user/message', 'system/message', 'tool/result'].includes(event.type))) {
+            let assessment = 'completed'
+            try {
+              const projection = await service.display(agent, event.seq, signal)
+              if (projection.changed) await store.runtime(id, runtime => {
+                runtime.state['$displayMarkers'] = [...(runtime.state['$displayMarkers'] ?? []).filter(value => value.seq !== event.seq),
+                  { seq: event.seq, token: token(agent) }].slice(-256)
+              })
+            } catch (error) {
+              if (signal?.aborted || !(error instanceof MatcherFailure || error.code === 'CONTEXT_CARE_DISPLAY_FAILED')) throw error
+              assessment = 'failed' // display() retained the actual fault; avoid repeating old failures each boundary.
+            }
+            await store.runtime(id, runtime => { runtime.state['$displayObserved'] = { seq: event.seq, assessment } })
+          }
+        }
+        const relevant = definitions(agent).some(rule => ['output.complete', 'tool.result'].some(stage => rule.on.includes(stage)))
+        const all = relevant ? originalSessionBlocks(agent.session) : []
+        for (const event of events.filter(event => event.seq > lastSeq && (event.type === 'assistant/message' && !event.data.interrupted || event.type === 'tool/result'))) {
           // Later committed messages cannot influence this output's depth window or captures.
           const selected = all.filter(block => block.seq <= event.seq)
           const planned = await plan(agent, { messages: agent.session.deriveMessages(), purpose: 'preview', signal }, event.type === 'tool/result' ? 'tool.result' : 'output.complete', selected, event.seq)
           await jobs.enqueue(id, planned.scheduled, planned.token)
-          await store.runtime(id, runtime => { runtime.state['$observed'] = { seq: event.seq } })
+          await store.runtime(id, runtime => {
+            // This is an attempted watermark. A failed assessment is explicitly retained as failed.
+            runtime.state['$observed'] = { seq: event.seq, assessment: planned.matchStatus === 'failed' ? 'failed' : 'completed' }
+          })
         }
       })()
       observations.set(id, operation)
@@ -526,8 +613,15 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
       const block = { id: `execution:${exec.callId}`, sessionId: String(agent.session.id), messageId: `execution:${exec.callId}`,
         turnId: sessionTurn(agent.session), role: 'assistant', view: 'original', type: 'tool-call', callId: exec.callId,
         raw: { type: 'tool-call', id: exec.callId, name: exec.name, arguments: JSON.stringify(exec.arguments) }, arguments: exec.arguments }
-      const events = await matcher.detect({ rules, blocks: [block], stage: 'tool.before-execute', snapshot: {} }, exec.signal,
-        { sessionId: String(agent.session.id), current: () => captured === token(agent) })
+      let events
+      try { events = await matcher.detect({ rules, blocks: [block], stage: 'tool.before-execute', snapshot: {} }, exec.signal,
+        { sessionId: String(agent.session.id), current: () => captured === token(agent) }) }
+      catch (error) {
+        if (!(error instanceof MatcherFailure) || exec.signal?.aborted) throw error
+        await recordMatchFailure(agent, error)
+        return { kind: 'deny', reason: `Tool rule assessment failed: ${error.message}. No rule denial was established; inspect ${error.diagnostic.operationId}.`,
+          info: { code: error.code, operationId: error.diagnostic.operationId, stage: 'tool.before-execute' } }
+      }
       for (const event of events) for (const action of rules.find(rule => rule.id === event.ruleId && rule.sourceId === event.sourceId).actions) {
         if (action.kind !== 'filter' || action.stage !== 'tool.before-execute' || !decision(agent, event, action, captured).enabled) continue
         await store.runtime(String(agent.session.id), runtime => {

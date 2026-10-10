@@ -1,5 +1,5 @@
 import { createContext, Script } from 'node:vm'
-import { validateDetectorEvidenceV2 } from './vendor/rule-engine/index.js'
+import { validateDetectorEvidenceV2 } from '@leolee9086/dsh-rule-engine'
 import { detectorValidator, validateDetectorValue, assertDetectorJson } from './detector-protocol.js'
 import { builtinDetectorCallbacks } from './builtin-detectors.js'
 

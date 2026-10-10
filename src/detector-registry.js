@@ -1,4 +1,4 @@
-import { V2_STAGES } from './vendor/rule-engine/index.js'
+import { V2_STAGES } from '@leolee9086/dsh-rule-engine'
 import { detectorCallbackSource, detectorValidator, assertDetectorJson } from './detector-protocol.js'
 import { builtinDetectorSpecifications } from './builtin-detectors.js'
 import { releaseResources } from './resource-cleanup.js'

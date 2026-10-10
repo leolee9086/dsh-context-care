@@ -35,7 +35,11 @@ export function ActionDetails({ value, t, revealSource }) {
     t(value?.status === 'error' ? 'actionsUnavailable' : 'actionsLoading'), value?.error ? h('div', null, `${t('actionsError')}: ${value.error}`) : null)
   const action = value.actions.find(item => item.id === selected)
   if (action) return h(ActionRecord, { key: action.id, action, t, revealSource, onBack: () => select(null) })
-  return h(React.Fragment, null, h(Budget, { admission: value.admission, t }),
+  return h(React.Fragment, null,
+    value.matchingFailures?.length ? h('section', { 'aria-label': t('processingFailed') }, h('h4', null, t('processingFailed')),
+      ...value.matchingFailures.map(failure => h('details', { key: failure.id }, h('summary', null, `${failure.diagnostic.stage} · ${failure.reason} · ${failure.count}`),
+        h('pre', null, JSON.stringify(failure.diagnostic, null, 2))))) : null,
+    h(Budget, { admission: value.admission, t }),
     h('div', { className: 'care-section-heading' }, h('h4', null, t('actionsHistory')), h('span', { className: 'care-muted' }, `${value.total ?? value.actions.length}`)),
     value.actions.length ? h('ul', { className: 'care-record-list' }, ...value.actions.map(item => h('li', { key: item.id }, h('button', {
       type: 'button', ref: recordRef(item.id), className: 'care-record', onClick: () => select(item.id), 'aria-label': `${label(t, 'action', item.action)} · ${date(item.at)}`,

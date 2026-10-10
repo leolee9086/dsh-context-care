@@ -80,7 +80,14 @@ export function apply(ctx, config = {}) {
       const pageOffset = selectedIndex < 0 ? offset : Math.floor(selectedIndex / limit) * limit
       const page = items.slice(pageOffset, pageOffset + limit)
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-      res.end(JSON.stringify({ admission: view.admission, currentState: ctx.contextCareRequests.controls.currentSample(sessionId), [collection]: page, total: items.length, offset: pageOffset,
+      const runtime = ctx.get('contextCareWorkbench')?.store.read(sessionId)?.runtime
+      const matchingFailures = collection === 'actions' ? (runtime?.runs ?? []).filter(run => ['matching', 'display'].includes(run.kind)).map(run => ({
+        id: run.id, kind: run.kind, status: run.status, reason: run.reason, count: run.count, updatedAt: run.updatedAt, sourceSeqs: run.sourceSeqs, diagnostic: run.result,
+      })) : undefined
+      const workbench = ctx.get('contextCareWorkbench'); const agent = ctx.agents.get(sessionId)
+      const displayMarkers = collection === 'actions' ? (runtime?.state['$displayMarkers'] ?? [])
+        .filter(value => agent && value.token === workbench.token(agent)).map(value => value.seq) : undefined
+      res.end(JSON.stringify({ admission: view.admission, currentState: ctx.contextCareRequests.controls.currentSample(sessionId), matchingFailures, displayMarkers, [collection]: page, total: items.length, offset: pageOffset,
         selectedFound: selectedSeq === undefined ? undefined : selectedIndex >= 0,
         nextOffset: pageOffset + page.length < items.length ? pageOffset + page.length : null }))
     } catch (error) {

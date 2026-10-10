@@ -11,7 +11,7 @@
 // when.produced 和 when.idle 要的助手输出与工具调用历史,从会话事件里取(见 prompt-text.js)。
 
 import { randomUUID } from 'node:crypto'
-import { createEngine } from './vendor/rule-engine/index.js'
+import { createEngine } from '@leolee9086/dsh-rule-engine'
 import { createUserMessage } from './message.js'
 import { producerKind } from './producer-source.js'
 import { lastAssistantText, lastUserMessage, recentToolCalls, textOf } from './prompt-text.js'

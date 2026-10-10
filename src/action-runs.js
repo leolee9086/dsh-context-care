@@ -1,7 +1,7 @@
 import Ajv from 'ajv'
 import { randomUUID } from 'node:crypto'
 import { createUserMessage } from './message.js'
-import { bindInputs } from './vendor/rule-engine/index.js'
+import { bindInputs } from '@leolee9086/dsh-rule-engine'
 import { createActionCapacity, awaitApproval } from './action-capacity.js'
 import { releaseResources } from './resource-cleanup.js'
 import { recordSecondaryFailure } from './secondary-failure.js'

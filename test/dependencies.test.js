@@ -1,7 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile, readdir } from 'node:fs/promises'
-import { createHash } from 'node:crypto'
 
 // Keep the plugin install independent from the Host; composition names are service
 // wiring metadata, not npm dependencies or module imports.
@@ -37,17 +36,4 @@ test('release has no install-time preparation or exotic dependency', async () =>
   assert.match(manifest.scripts['release:pack'], /pnpm release:check && pnpm pack/)
   const lock = await readFile(new URL('../pnpm-lock.yaml', import.meta.url), 'utf8')
   assert.doesNotMatch(lock, /gitHosted:|codeload\.github\.com/)
-})
-
-// Pin copied bytes, including the distinct upstream licenses. No checkout alias
-// can replace the modules being validated by the standalone release tests.
-test('fixed upstream modules retain their recorded SHA-256', async () => {
-  const provenance = JSON.parse(await readFile(new URL('../src/vendor/provenance.json', import.meta.url), 'utf8'))
-  for (const [directory, upstream] of Object.entries(provenance)) {
-    assert.match(upstream.commit, /^[a-f0-9]{40}$/)
-    for (const [file, expected] of Object.entries(upstream.sha256)) {
-      const bytes = await readFile(new URL(`../src/vendor/${directory}/${file}`, import.meta.url))
-      assert.equal(createHash('sha256').update(bytes).digest('hex'), expected, `${directory}/${file}`)
-    }
-  }
 })

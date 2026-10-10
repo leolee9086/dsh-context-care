@@ -11,6 +11,7 @@ import { openRuleControls } from './rule-controls.js'
 import { recordSecondaryFailure } from './secondary-failure.js'
 import { releaseResources } from './resource-cleanup.js'
 import { openWorkbenchHost } from './workbench-host.js'
+import { MatcherFailure } from './bounded-matcher.js'
 
 export const name = 'context-care-requests'
 export const inject = ['agents', 'sessions', 'tools', 'llm', 'tokenMeter', 'storageDomain']
@@ -27,6 +28,13 @@ export const Config = z.object({ ruleFiles: z.array(z.string().min(1).max(4096))
   maxConcurrent: z.number().int().min(1).max(64).default(8),
   maxDeltaChars: z.number().int().min(1).max(1048576).default(32768),
   maxDeltaBlocks: z.number().int().min(1).max(128).default(16),
+  matcher: z.object({ timeoutMs: z.number().int().min(1).max(60000).default(250),
+    startupMs: z.number().int().min(1).max(60000).default(10000),
+    maxBytes: z.number().int().min(1).max(33554432).default(4194304),
+    maxPending: z.number().int().min(1).max(64).default(4),
+    maxIdle: z.number().int().min(0).max(64).default(2) }).strict().prefault({}),
+  // Only an explicit requirement can stop dispatch on a failed request transformation.
+  requiredStages: z.array(z.literal('request.assemble')).max(1).default([]),
 }).strict().prefault({})
 
 /** prepareCall clones its config. Keep native cancellation and request data out
@@ -302,7 +310,7 @@ export async function apply(ctx, config = {}) {
       }
       // Budget failures must enter the ordinary request-error recovery path.
       // Storage and programming failures remain thrown, with their original stack.
-      if (!(error instanceof RequestBudgetExceeded)) throw error
+      if (!(error instanceof RequestBudgetExceeded) && !(error instanceof MatcherFailure)) throw error
       call.failure = { code: error.code, message: error.message }
       await persist(call, 'failed', { failure: call.failure })
       yield { type: 'finish', reason: { kind: 'error', failure: call.failure } }

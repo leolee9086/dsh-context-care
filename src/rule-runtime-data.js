@@ -15,7 +15,7 @@ export function runtimePage(state, { offset = 0, limit = 20, status = '', search
         rules: document.rules.map(rule => {
           const registered = source.rules.find(value => value.id === rule.id)
           if (!registered) throw new Error('rule-definition-unavailable')
-          return registered.definition
+          return { ...registered.definition, title: registered.definition.title ?? registered.definition.id }
         }), entries: document.entries,
         variables: document.variables.map(variable => ({ name: variable.name, scope: variable.scope, type: variable.type, description: variable.description, value: state.values[variable.name] })),
         partials: document.partials }

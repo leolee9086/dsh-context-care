@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { normalizeRuleV2, detectRulesV2 } from '../src/vendor/rule-engine/index.js'
+import { normalizeRuleV2, detectRulesV2 } from '@leolee9086/dsh-rule-engine'
 import { planRequestV2 } from '../src/request-plan.js'
 import { requestImpact } from '../src/request-impact.js'
 import { createTemplates } from '../src/templates.js'

@@ -6,6 +6,7 @@ import { controlCopy } from './control-copy.js'
 export const dictionaries = {
   zh: {
     ...careCopy.zh, ...controlCopy.zh,
+    displayChanged: '显示已处理', processingFailed: '规则判定失败', displaySelect: '点击会话中的处理标记查看详情。', displayUnchanged: '这条消息没有显示变换。',
     displayTitle: '显示副本', displayOriginal: '原文', displayTransformed: '变换后', displayEmpty: '副本中已过滤所有块',
     displayExplanation: '按当前规则生成的对照副本；会话原文与模型输入保持原样。',
     displayNontext: '此非文本块保留在原生消息中。', displayUnavailable: '显示副本暂不可用', displayError: '错误详情',
@@ -51,6 +52,7 @@ export const dictionaries = {
   },
   en: {
     ...careCopy.en, ...controlCopy.en,
+    displayChanged: 'Display processed', processingFailed: 'Rule assessment failed', displaySelect: 'Select a processing marker in the conversation to inspect details.', displayUnchanged: 'This message has no display transformation.',
     displayTitle: 'Display copy', displayOriginal: 'Original', displayTransformed: 'Transformed', displayEmpty: 'All blocks filtered from the copy',
     displayExplanation: 'Comparison generated with current rules; session originals and model input remain unchanged.',
     displayNontext: 'This non-text block remains in the native message.', displayUnavailable: 'Display copy unavailable', displayError: 'Error details',
@@ -112,7 +114,7 @@ function indicator(label, value, level, kind, t) {
 }
 
 /** Pure display receives the framework-owned projection hook. */
-export function ContextCareStatus({ useProjection, useCareActions, useRewriteHealth, watchActions, watchRewrites, sessionId, t }) {
+export function ContextCareStatus({ useProjection, useCareActions, useRewriteHealth, watchActions, watchRewrites, openActions, sessionId, t }) {
   const projection = useProjection('contextCareNumeric')
   const actions = useCareActions(table => table.get(`${sessionId}:0`))
   const state = actions?.currentState ?? projection
@@ -126,6 +128,7 @@ export function ContextCareStatus({ useProjection, useCareActions, useRewriteHea
   React.createElement(CareStyles),
   indicator(t('fatigue'), state?.fatigueValue, state?.fatigue ?? 'unknown', 'fatigue', t),
   indicator(t('wakefulness'), state?.wakefulnessValue, state?.wakefulness ?? 'unknown', 'wakefulness', t),
+  actions?.matchingFailures?.length ? React.createElement('button', { type: 'button', onClick: () => openActions?.(sessionId) }, t('processingFailed'), ` · ${actions.matchingFailures.length}`) : null,
   error ? React.createElement('span', { role: 'alert', style: { color: 'var(--dsw-alias-state-error-primary)' } }, `${t('actionsUnavailable')}: ${error}`)
     : !state ? React.createElement('span', null, t('waiting')) : null)
 }

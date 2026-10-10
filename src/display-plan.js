@@ -1,4 +1,4 @@
-import { applyBlockPatchesV2 } from './vendor/rule-engine/index.js'
+import { applyBlockPatchesV2 } from '@leolee9086/dsh-rule-engine'
 
 const viewBlock = block => ({ id: block.id, seq: block.seq, path: block.path, role: block.role, type: block.type, text: block.text })
 /** Plan a read-only comparison for one committed message. Every patch uses baseline UTF-16 ranges. */

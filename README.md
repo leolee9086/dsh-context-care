@@ -178,7 +178,11 @@ v2 规则由 AI 编写为声明，或由外部插件通过 `contextCareWorkbench
 
 `output.delta` 在真实请求流的可等待 chunk 边界检测，仅使用当前流块的正文或思考文本；不扫描完整历史、不处理未完成工具参数。流身份包含会话、请求、attempt 和块索引，没有提交序号的流不伪造 `seq/path`。支持实时取消、依赖取消成功的续接和 next-step 提醒；同一规则在一个流块内只触发一次，即使匹配范围随文本增长或声明 `dedupe: none`。开关、来源或变量版本改变会重置未触发文本，结束和取消清理流状态。requests Host 配置 `maxDeltaChars`（默认 32768，每块 UTF-16 字符）和 `maxDeltaBlocks`（默认 16）限制保留量；超限明确报错并停止该请求，不静默裁切后改变正则锚点。没有开启的流式动作时不保留流文本。
 
-`display.render` 在独立“显示副本”节点中默认展开原文与变换后对照，支持已提交的 user/system/assistant 消息和工具结果里的文本、思考块替换、过滤及文本注入。原生消息、模型输入和会话日志保持原样；规则文本按普通文本转义，不执行 HTML。只读 GET `/context-care/display?sessionId=...&seq=...` 要求连接鉴权、返回 no-store，客户端卸载或切换消息会取消读取。历史副本采用当前开关、变量和声明，重复渲染不消耗自动动作的冷却、去重或寿命。匹配窗口止于该事件，原文与 display 块具有相同来源编号；所有动作对同一基线规划，不逐动作重新匹配。字符预算沿用 `maxInjectedChars`，副本结果受 `maxRequestBytes` 限制，正则仍由可终止 worker 执行。注入锚点局限当前消息（start/end/matched/当前块编号，depth 只接受 0 或 1）；不支持 model 选择、跨块写入、结构化工具参数改写及跨轮/会话显示寿命，目录明确标为不可用。签名或不透明思考块不允许替换、过滤；非文本块在对照卡标明类型，完整媒体继续由原生消息显示。
+`display.render` 对内容确实发生变化的消息显示轻量处理标记，点击后在右侧栏查看原文与变换后对照；未命中或变换后与原文相同的消息不显示标记。消息渲染不发起详情请求，不为每条消息轮询。支持已提交的 user/system/assistant 消息和工具结果里的文本、思考块替换、过滤及文本注入。原生消息、模型输入和会话日志保持原样；规则文本按普通文本转义，不执行 HTML。只读 GET `/context-care/display?sessionId=...&seq=...` 要求连接鉴权、返回 no-store，客户端卸载或切换消息会取消读取。历史副本采用当前开关、变量和声明，重复渲染不消耗自动动作的冷却、去重或寿命。匹配窗口止于该事件，原文与 display 块具有相同来源编号；所有动作对同一基线规划，不逐动作重新匹配。字符预算沿用 `maxInjectedChars`，副本结果受 `maxRequestBytes` 限制，正则仍由可终止 worker 执行。注入锚点局限当前消息（start/end/matched/当前块编号，depth 只接受 0 或 1）；不支持 model 选择、跨块写入、结构化工具参数改写及跨轮/会话显示寿命，目录明确标为不可用。签名或不透明思考块不允许替换、过滤；非文本块在对照卡标明类型，完整媒体继续由原生消息显示。
+
+requests Host 的 `config.matcher` 可配置 worker 的 `timeoutMs`（默认 250）、`startupMs`（默认 10000）、`maxBytes`（默认 4194304）、`maxPending`（默认 4）和 `maxIdle`（默认 2）。无当前阶段规则时不启动线程；只准备当前规则选择的视图。显示读取独立使用最多两个并行 worker，不占请求匹配接纳额度。超时诊断区分启动、传输与已开始处理的阶段，并记录规则身份、输入大小与父线程观察到的计时；这些计时不等同于精确 CPU 耗时。
+
+匹配失败明确保存为 `kind: matching, status: failed`，包含规则、阶段、错误原因、来源序号与重复次数，不保存消息正文，也不伪造未命中或执行成功。输入区提供故障入口，右栏可读完整诊断。默认可选的请求变换或输出观察失败时，保留完整输入并继续；失败规划的局部改写和动作不派发。若请求变换是派发的必需前提，在 requests Host 明确设置 `requiredStages: ['request.assemble']`，失败返回 `CONTEXT_CARE_MATCH_FAILED` 且不派发请求。工具阻止判定失败只拒绝对应工具操作，并将判定失败写入工具结果；不声称规则已经判定应阻止。失败观察更新尝试水位，故障记录仍保留，旧事件不会在每轮无限重试。显示模板与显示预算的规划失败另记为 `kind: display, status: failed`，错误码为 `CONTEXT_CARE_DISPLAY_FAILED`，显示标记和右栏故障入口可追踪；这类呈现错误不会中断对话。
 
 完成输出与工具结果匹配保留截至当前事件的历史窗口。触发序号独立于窗口来源序号：只匹配到旧内容不会触发，也不会占据独占组；重新启用允许新输出使用历史作为上下文，但不回放开关之前的输出。规则版本与新增条目在文档保存事务中记录提交时已有的事件序号，未变更的版本保留原起始序号；外部注册取注册时的会话尾部。Host 重新打开与会话恢复、fork 后从已有尾部开始观察；基线扫描只读取当前会话视图，视图替换不会删除原始事件或重置轮数。来源注册和捕获的规划状态仍在执行前复查，异步匹配使用真实轮次取消信号。
 
@@ -253,7 +257,7 @@ UI 优先显示当前进程最近一次请求边界的独立数值采样，关�
 
 ## 安装
 
-运行环境需要 Node.js 22.19.0 或更新版本。v0.8.1 随包携带 rule-engine v0.3.0 的纯模块与 better-session-query v0.1.1 的块读取模块，保留固定 commit、文件哈希和各自许可证；详见 [模块来源](src/vendor/README.md)。其余运行依赖来自公开 registry，安装需能访问 GitHub 和 registry。
+运行环境需要 Node.js 22.19.0 或更新版本。当前修复树通过标准包依赖使用 `@leolee9086/dsh-rule-engine@0.3.0` 与 `dsh-better-session-query@0.1.1`，已移除内嵌副本。两个目标版本的公开 npm 分发尚未完成；已用各仓库生成的真实 tgz 在隔离测试 registry 验证普通版本号安装和运行行为，这不代表公开安装已可用。旧 v0.8.1 标签保留其已发布内容，下面的旧版安装命令不会安装当前修复树。
 
 GitHub 标签已包含客户端构建产物；包没有 `prepare`、`prepack` 或安装生命周期脚本。官方插件管理器的包来源可直接填写 `github:leolee9086/dsh-context-care#v0.8.1`。普通 pnpm 安装不需要 `allowBuilds`、`--ignore-scripts` 或 `blockExoticSubdeps` 例外。v0.8.0 的安装契约问题和历史验证限制保留在更新记录中。
 
@@ -323,9 +327,9 @@ dsh plugin --profile web add "github:leolee9086/dsh-context-care#v0.8.1"
 
 ### 从源码开发
 
-插件可以在任意目录独立安装、测试和构建，无需同级 DSH checkout，也没有 `link:../deepseek-harness` 依赖。运行时 registry 依赖为 React、Zod、Ajv、Handlebars 与 mdast-util-from-markdown；规则引擎和块读取使用包内固定源码。Cordis 核心仅作为默认测试环境的 registry 开发依赖，不随插件运行时载入。
+插件可以在任意目录独立安装、测试和构建，无需同级 DSH checkout，也没有 `link:../deepseek-harness` 依赖。运行时 registry 依赖为 React、Zod、Ajv、Handlebars、mdast-util-from-markdown，以及标准 rule-engine 和 better-session-query 包；不再携带依赖的源码副本。Cordis 核心仅作为默认测试环境的 registry 开发依赖，不随插件运行时载入。
 
-作者发布时运行 `pnpm release:pack`，显式完成语法检查、单元测试和客户端构建后生成 `artifacts/` 中的 tgz，并将更新后的 `lib/` 提交到发行标签。消费者直接使用已发布产物；普通 `pnpm pack` 不承担作者发布校验。整体许可证为 AGPL-3.0-only，MIT 块读取模块保留原许可；完整对应源码与构建配置可从本仓库发行标签获取。
+作者发布时运行 `pnpm release:pack`，显式完成语法检查、单元测试和客户端构建后生成 `artifacts/` 中的 tgz，并将更新后的 `lib/` 提交到发行标签。消费者直接使用已发布产物；普通 `pnpm pack` 不承担作者发布校验。本包许可证为 AGPL-3.0-only；独立规则引擎包声明 AGPL-3.0-or-later，块读取包声明 MIT，各自保留其仓库、源码和许可证。本包完整对应源码与构建配置可从本仓库发行标签获取。
 
 ```sh
 git clone https://github.com/leolee9086/dsh-context-care.git

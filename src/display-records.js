@@ -1,28 +1,43 @@
-import { createActionRecords } from './action-records.js'
+import { parseDisplayResponse } from './display-response.js'
+export { parseDisplayResponse } from './display-response.js'
 
-/** Validate identities and text before publishing a snapshot to React; diagnostics stay on the Host. */
-export function parseDisplayResponse(body, { seq }) {
-  const invalid = () => { throw new Error('Invalid display response') }
-  if (!body || !Array.isArray(body.projections) || body.projections.length > 1 || !Number.isSafeInteger(seq)) invalid()
-  const blocks = input => {
-    if (!Array.isArray(input)) invalid()
-    const ids = new Set()
-    return input.map(block => {
-      if (!block || typeof block.id !== 'string' || !block.id || ids.has(block.id)
-        || typeof block.role !== 'string' || !block.role || typeof block.type !== 'string' || !block.type
-        || block.text !== undefined && typeof block.text !== 'string'
-        || block.path !== undefined && typeof block.path !== 'string'
-        || block.seq !== undefined && block.seq !== seq) invalid()
-      ids.add(block.id)
-      return { id: block.id, role: block.role, type: block.type, text: block.text, path: block.path, seq: block.seq }
-    })
+/** On-demand detail reads: no timer, no per-message subscription, no implicit retry. */
+export function createDisplayRecords({ fetcher = fetch } = {}) {
+  let snapshot = new Map(); let disposed = false
+  const listeners = new Set(); const pending = new Map()
+  const keyFor = (sessionId, seq) => `${sessionId}:0:${seq}`
+  const publish = (key, value) => {
+    if (disposed) return
+    snapshot = new Map(snapshot).set(key, value)
+    for (const listener of listeners) listener()
   }
-  return { projections: body.projections.map(projection => {
-    if (!projection || projection.seq !== seq) invalid()
-    return { seq, before: blocks(projection.before), after: blocks(projection.after) }
-  }) }
-}
-
-export function createDisplayRecords(options = {}) {
-  return createActionRecords({ ...options, endpoint: '/context-care/display', collection: 'projections', parse: parseDisplayResponse })
+  async function read(sessionId, seq, { refresh = false } = {}) {
+    const key = keyFor(sessionId, seq)
+    if (disposed) return
+    if (pending.has(key)) return pending.get(key).done
+    if (!refresh && snapshot.get(key)?.status === 'ready') return snapshot.get(key)
+    const controller = new AbortController()
+    publish(key, { status: 'loading' })
+    const operation = { controller, done: undefined }; pending.set(key, operation)
+    operation.done = (async () => {
+      const route = `/context-care/display?sessionId=${encodeURIComponent(sessionId)}&seq=${seq}`
+      try {
+        const response = await fetcher(route, { signal: controller.signal, headers: { accept: 'application/json' } })
+        const body = await response.json()
+        if (!response.ok) throw new Error(`${route}: HTTP ${response.status}: ${body.message ?? body.error ?? ''}`)
+        const value = { status: 'ready', ...parseDisplayResponse(body, { seq }) }
+        if (!controller.signal.aborted) publish(key, value)
+        return value
+      } catch (error) {
+        if (!controller.signal.aborted) publish(key, { status: 'error', error: String(error), route })
+      } finally { if (pending.get(key) === operation) pending.delete(key) }
+    })()
+    return operation.done
+  }
+  return {
+    source: { getSnapshot: () => snapshot, subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener) } },
+    read, refresh: (sessionId, _offset, seq) => read(sessionId, seq, { refresh: true }),
+    watch(sessionId, _offset, seq) { void read(sessionId, seq); return () => pending.get(keyFor(sessionId, seq))?.controller.abort() },
+    dispose() { disposed = true; for (const operation of pending.values()) operation.controller.abort(); pending.clear(); listeners.clear(); snapshot = new Map() },
+  }
 }

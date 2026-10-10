@@ -27,6 +27,7 @@
   config:
     auto: false
 - name: 'dsh-context-care/requests'
+  config: !!js ctx.get('contextCareTestRequestConfig')
 - name: 'dsh-context-care/runtime'
   config: !!js >-
     ({ retainRatio: 0.01, minFreshTokens: 100, ...ctx.get('contextCareTestConfig') })

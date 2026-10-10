@@ -1,4 +1,4 @@
-import { applyBlockPatchesV2, bindInputs } from './vendor/rule-engine/index.js'
+import { applyBlockPatchesV2, bindInputs } from '@leolee9086/dsh-rule-engine'
 import { createHash } from 'node:crypto'
 import { setRequestBlock } from './request-blocks.js'
 import { estimateInjection, requestImpact } from './request-impact.js'

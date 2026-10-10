@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { normalizeRuleV2 } from '../src/vendor/rule-engine/index.js'
+import { normalizeRuleV2 } from '@leolee9086/dsh-rule-engine'
 import { createBoundedMatcher } from '../src/bounded-matcher.js'
 import { createDetectorRegistry } from '../src/detector-registry.js'
 

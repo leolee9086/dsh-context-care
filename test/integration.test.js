@@ -117,12 +117,13 @@ class ScriptedAdapter extends LlmAdapter {
   }
 }
 
-async function boot(root, completion = true, config = {}, completionConfig = {}) {
+async function boot(root, completion = true, config = {}, completionConfig = {}, requestConfig = {}) {
   const ctx = new Context()
   ctx.provide('contextCareTestRoot', root)
   ctx.provide('contextCareTestCompletion', completion)
   ctx.provide('contextCareTestConfig', config)
   ctx.provide('contextCareTestCompletionConfig', completionConfig)
+  ctx.provide('contextCareTestRequestConfig', requestConfig)
   try {
   await ctx.plugin(Loader)
   ctx.loader.builtins.include = Include
@@ -322,7 +323,7 @@ test('real loop honors explicit rest when conversation and summary capacities ar
 })
 
 // Each test owns its disk root and Loader instances, including restart instances.
-async function fixture(t, completion = true, config = {}, completionConfig = {}) {
+async function fixture(t, completion = true, config = {}, completionConfig = {}, requestConfig = {}) {
   const sourceComposition = await readFile(new URL('./fixtures/cordis.yml', import.meta.url), 'utf8')
   const root = await mkdtemp(resolve(tmpdir(), 'context-care-durable-'))
   const contexts = new Set()
@@ -334,7 +335,7 @@ async function fixture(t, completion = true, config = {}, completionConfig = {})
   // Loader writes entry ids and disabled flags: never give it the shared source fixture.
   await copyFile(new URL('./fixtures/cordis.yml', import.meta.url), resolve(root, 'cordis.yml'))
   return {
-    async open(completionEnabled = completion) { const ctx = await boot(root, completionEnabled, config, completionConfig); contexts.add(ctx); return ctx },
+    async open(completionEnabled = completion) { const ctx = await boot(root, completionEnabled, config, completionConfig, requestConfig); contexts.add(ctx); return ctx },
     async close(ctx) { await ctx.fiber.dispose(); contexts.delete(ctx) },
   }
 }
@@ -2395,6 +2396,116 @@ test('Workbench v2 display compares pure copies and re-renders history with curr
   assert.deepEqual(agent.session.snapshotEvents(), before)
 })
 
+test('browser on-demand reader reaches authenticated real Host and shows disconnect as failure', { timeout: 30000 }, async t => {
+  const owned = await fixture(t, false); const ctx = await owned.open(); const service = ctx.contextCareWorkbench
+  ctx.llm.registerAdapter(['care-test'], new ScriptedAdapter())
+  const agent = await ctx.agentLoop.create('browser-display-real-host', { provider: 'care-test', model: 'care-test' })
+  await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'browser', revision: 1, title: 'Browser', rules: [
+    { schemaVersion: 2, id: 'replace', revision: 1, on: ['display.render'], select: { view: 'display', roles: ['user'], blockTypes: ['text'] },
+      match: { kind: 'regex', pattern: 'ORIGINAL' }, actions: [{ id: 'copy', kind: 'replace', stage: 'display.render', enabledDefault: true, template: 'TRANSFORMED' }] },
+  ] } })
+  const event = agent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'ORIGINAL' }] }), { surfaceOp: 'append' })
+  await service.reconcile(agent)
+  const { base, cookie } = await controlCookie(ctx)
+  const { build } = await import('tsdown')
+  const out = await mkdtemp(resolve(tmpdir(), 'care-browser-production-ui-'))
+  t.after(() => rm(out, { recursive: true, force: true }))
+  await build({ config: false, entry: { fixture: 'test/browser-display-entry.js' }, outDir: out, platform: 'browser', format: 'esm',
+    target: 'es2022', dts: false, sourcemap: false, deps: { alwaysBundle: () => true }, define: { 'process.env.NODE_ENV': JSON.stringify('production') } })
+  const script = await readFile(resolve(out, 'fixture.js'), 'utf8')
+  ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/care-test/fixture.js', handler(_req, res) { res.writeHead(200, { 'content-type': 'text/javascript' }); res.end(script) } }))
+  ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/care-test/page', handler(_req, res) {
+    res.writeHead(200, { 'content-type': 'text/html' })
+    res.end(`<!doctype html><div id="root"></div><script>window.testIdentity = ${JSON.stringify({ sessionId: String(agent.id), seq: event.seq })}</script><script type="module" src="./fixture.js"></script>`)
+  } }))
+  const browserRequire = createRequire(pathToFileURL(resolve(checkout, 'apps/web/package.json')))
+  const { chromium } = browserRequire('playwright')
+  const browser = await chromium.launch({ headless: true, channel: 'msedge' })
+  t.after(() => browser.close())
+  const context = await browser.newContext()
+  const [name, value] = cookie.split('=')
+  await context.addCookies([{ name, value, url: base }])
+  const page = await context.newPage(); const requests = []
+  page.on('request', request => { if (request.url().includes('/context-care/display?')) requests.push(request.url()) })
+  await page.goto(`${base}/care-test/page`)
+  await page.waitForFunction(() => window.readerReady === true)
+  assert.equal(requests.length, 0, 'Mounting the actual marker performs no display HTTP read')
+  assert.equal(await page.locator('aside').count(), 0)
+  assert.equal(await page.locator('[data-context-care-marker]').textContent(), '显示已处理 →')
+  await page.locator('[data-context-care-marker]').click()
+  await page.locator('aside pre').filter({ hasText: 'TRANSFORMED' }).waitFor()
+  assert.equal(await page.locator('aside pre').first().textContent(), 'ORIGINAL')
+  assert.equal(await page.locator('aside pre').last().textContent(), 'TRANSFORMED')
+  assert.equal(await page.locator('[data-original]').textContent(), 'ORIGINAL')
+  assert.equal(requests.length, 1)
+  assert.equal(agent.session.deriveMessages()[0].content[0].text, 'ORIGINAL')
+  await page.screenshot({ path: resolve('artifacts/browser-real-host-sidebar.png') })
+  await owned.close(ctx)
+  await page.getByRole('button', { name: '刷新', exact: true }).click()
+  await page.locator('aside [role="alert"]').waitFor()
+  assert.match(await page.locator('aside [role="alert"]').textContent(), /Failed to fetch/)
+  assert.equal(requests.length, 2, 'Disconnect produces one explicit attempt, without background retry')
+})
+
+test('actual display template failure stays visible while two conversation turns complete', async t => {
+  const owned = await fixture(t, false); const ctx = await owned.open(); const service = ctx.contextCareWorkbench
+  ctx.llm.registerAdapter(['care-test'], new ScriptedAdapter())
+  const agent = await ctx.agentLoop.create('broken-display-template', { provider: 'care-test', model: 'care-test' })
+  await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'broken-template', revision: 1, title: 'Broken display', rules: [
+    { schemaVersion: 2, id: 'broken', revision: 1, on: ['display.render'], select: { view: 'display', roles: ['user'], blockTypes: ['text'] },
+      match: { kind: 'regex', pattern: 'SECRET_MESSAGE_BODY' }, actions: [{ id: 'copy', kind: 'replace', stage: 'display.render', enabledDefault: true, template: '{{vars.missing}}' }] },
+  ] } })
+  for (let index = 0; index < 2; index++) {
+    agent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'SECRET_MESSAGE_BODY' }] }), { surfaceOp: 'append' })
+    await completionTurn(ctx, agent)
+    const ended = agent.session.snapshotEvents().findLast(event => event.type === 'turn/end').data.reason
+    assert.equal(ended.kind, 'completed', JSON.stringify(ended))
+  }
+  await service.reconcile(agent)
+  const failures = service.store.read(agent.id).runtime.runs.filter(run => run.kind === 'display')
+  assert.equal(failures.length, 1)
+  assert.equal(failures[0].status, 'failed'); assert.equal(failures[0].count, 2)
+  assert.equal(failures[0].reason, 'display-planning-failed')
+  assert.equal(failures[0].result.phase, 'planning')
+  assert.equal(JSON.stringify(failures).includes('SECRET_MESSAGE_BODY'), false)
+  const { base, cookie } = await controlCookie(ctx)
+  const response = await fetch(`${base}/context-care/actions?sessionId=${agent.id}&limit=20`, { headers: { cookie } })
+  assert.equal(response.status, 200)
+  const wire = await response.json()
+  assert.equal(wire.matchingFailures[0].kind, 'display')
+  assert.equal(wire.matchingFailures[0].reason, 'display-planning-failed')
+  assert.deepEqual(wire.displayMarkers, [])
+})
+
+test('real display markers exclude unmatched and same-text replacements', async t => {
+  const owned = await fixture(t, false); const ctx = await owned.open(); const service = ctx.contextCareWorkbench
+  ctx.llm.registerAdapter(['care-test'], new ScriptedAdapter())
+  const agent = await ctx.agentLoop.create('display-marker-change-only', { provider: 'care-test', model: 'care-test' })
+  await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'markers', revision: 1, title: 'Markers', rules: [
+    { schemaVersion: 2, id: 'noop', revision: 1, on: ['display.render'], select: { view: 'display', roles: ['user'], blockTypes: ['text'] },
+      match: { kind: 'regex', pattern: 'KEEP' }, actions: [{ id: 'replace', kind: 'replace', stage: 'display.render', enabledDefault: true, template: 'KEEP' }] },
+    { schemaVersion: 2, id: 'change', revision: 1, on: ['display.render'], select: { view: 'display', roles: ['user'], blockTypes: ['text'] },
+      match: { kind: 'regex', pattern: 'CHANGE' }, actions: [{ id: 'replace', kind: 'replace', stage: 'display.render', enabledDefault: true, template: 'CHANGED' }] },
+  ] } })
+  const messages = ['PLAIN', 'KEEP', 'CHANGE'].map(text => agent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text }] }), { surfaceOp: 'append' }))
+  await service.reconcile(agent)
+  const { base, cookie } = await controlCookie(ctx)
+  const response = await fetch(`${base}/context-care/actions?sessionId=${agent.id}&limit=20`, { headers: { cookie } })
+  assert.equal(response.status, 200)
+  assert.deepEqual((await response.json()).displayMarkers, [messages[2].seq])
+  for (const event of messages.slice(0, 2)) {
+    const detail = await fetch(`${base}/context-care/display?sessionId=${agent.id}&seq=${event.seq}`, { headers: { cookie } })
+    assert.equal(detail.status, 200)
+    assert.deepEqual((await detail.json()).projections, [])
+  }
+  assert.deepEqual(agent.session.deriveMessages().map(message => message.content[0].text), ['PLAIN', 'KEEP', 'CHANGE'])
+  const controls = ctx.contextCareControls
+  await controls.patch(agent.id, { revision: controls.revision(agent.id), sourceId: 'context-care:document:markers', ruleId: 'change', paused: true })
+  const afterDisable = await fetch(`${base}/context-care/actions?sessionId=${agent.id}&limit=20`, { headers: { cookie } })
+  assert.equal(afterDisable.status, 200)
+  assert.deepEqual((await afterDisable.json()).displayMarkers, [], 'A previously changed result cannot mark an unchanged current projection')
+})
+
 test('Workbench v2 display refuses signed text patches and cancels matching without a state write', async t => {
   const owned = await fixture(t, false); const ctx = await owned.open(); const service = ctx.contextCareWorkbench
   ctx.llm.registerAdapter(['care-test'], new ScriptedAdapter())
@@ -2405,11 +2516,14 @@ test('Workbench v2 display refuses signed text patches and cancels matching with
     { schemaVersion: 2, id: 'patch', revision: 1, on: ['display.render'], select: { view: 'original', roles: ['assistant'], blockTypes: ['reasoning'] },
       match: { kind: 'regex', pattern: 'SEALED' }, actions: [{ id: 'replace', kind: 'replace', stage: 'display.render', enabledDefault: true, template: 'OPEN' }] },
   ] } })
-  const before = structuredClone(agent.session.snapshotEvents()); const runtime = service.store.read(agent.id)
-  await assert.rejects(service.display(agent, event.seq), /block cannot be text-patched/)
+  const before = structuredClone(agent.session.snapshotEvents())
+  await assert.rejects(service.display(agent, event.seq), error => error.code === 'CONTEXT_CARE_DISPLAY_FAILED' && /block cannot be text-patched/.test(error.message))
+  const runtime = service.store.read(agent.id)
+  assert.equal(runtime.runtime.runs.filter(run => run.kind === 'display' && run.status === 'failed').length, 1)
   const controller = new AbortController(); controller.abort(new Error('test-display-abort'))
   await assert.rejects(service.display(agent, event.seq, controller.signal), /test-display-abort/)
-  assert.deepEqual(agent.session.snapshotEvents(), before); assert.deepEqual(service.store.read(agent.id), runtime)
+  assert.deepEqual(agent.session.snapshotEvents(), before)
+  assert.deepEqual(service.store.read(agent.id), runtime, 'Cancellation must not create another failed assessment or consume action state')
 })
 
 test('Workbench v2 display budgets the complete response and refuses a configuration race before publication', async t => {
@@ -2483,6 +2597,95 @@ test('Workbench v2 external detector finalizes a real stream once and exposes ow
   await dispose()
   const missing = service.sources(agent.id).find(source => source.sourceId === 'context-care:document:detector').rules[0].actions[0]
   assert.equal(missing.available, false); assert.equal(missing.reason, 'detector-unavailable')
+})
+
+const pathologicalDocument = stage => ({ schemaVersion: 2, id: 'slow', revision: 1, title: 'Real pathological regex', rules: [
+  { schemaVersion: 2, id: 'slow', revision: 1, on: [stage], select: { view: stage === 'request.assemble' ? 'model' : 'original', roles: [stage === 'request.assemble' ? 'user' : 'assistant'], blockTypes: ['text'] },
+    match: { kind: 'regex', pattern: '(a+)+$' }, actions: [{ id: 'notify', kind: 'notify', stage, enabledDefault: true, template: 'MUST NOT DELIVER' }] },
+] })
+
+test('real output matcher failure is durable and visible over HTTP while two turns continue', async t => {
+  const owned = await fixture(t, false, {}, {}, { matcher: { timeoutMs: 100 } }); const ctx = await owned.open()
+  const text = 'a'.repeat(1000) + '!'
+  ctx.llm.registerAdapter(['care-test'], new CompletionAdapter([{ blocks: [{ type: 'text', text }] }, { blocks: [{ type: 'text', text: 'Second turn completes.' }] }]))
+  const agent = await ctx.agentLoop.create('matcher-output-fault', { provider: 'care-test', model: 'care-test' })
+  const service = ctx.contextCareWorkbench
+  await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: pathologicalDocument('output.complete') })
+  await completionTurn(ctx, agent)
+  await completionTurn(ctx, agent)
+  assert.deepEqual(agent.session.snapshotEvents().filter(event => event.type === 'turn/end').map(event => event.data.reason.kind), ['completed', 'completed'])
+  const failures = service.store.read(agent.id).runtime.runs.filter(run => run.kind === 'matching')
+  assert.equal(failures.length, 1)
+  assert.equal(failures[0].status, 'failed')
+  assert.equal(failures[0].result.stage, 'output.complete')
+  assert.equal(failures[0].reason, 'matcher-work-timeout')
+  assert.ok(failures[0].sourceSeqs.length)
+  assert.doesNotMatch(JSON.stringify(agent.session.deriveMessages()), /MUST NOT DELIVER/)
+  const { base, cookie } = await controlCookie(ctx)
+  const response = await fetch(`${base}/context-care/rule-runtime?sessionId=${agent.id}`, { headers: { cookie } })
+  const body = await response.json()
+  assert.equal(response.status, 200, JSON.stringify(body))
+  assert.equal(body.runs.find(run => run.kind === 'matching').result.stage, 'output.complete')
+  await owned.close(ctx)
+  const restored = await owned.open()
+  assert.equal(restored.contextCareWorkbench.store.read(agent.id).runtime.runs.find(run => run.kind === 'matching').reason, 'matcher-work-timeout')
+})
+
+test('real concurrent display timeouts cannot consume request matching admission', async t => {
+  const owned = await fixture(t, false, {}, {}, { matcher: { timeoutMs: 200, maxPending: 2 } }); const ctx = await owned.open(); const service = ctx.contextCareWorkbench
+  ctx.llm.registerAdapter(['care-test'], new ScriptedAdapter())
+  const agents = await Promise.all(['load-one', 'load-two', 'load-three'].map(name => ctx.agentLoop.create(name, { provider: 'care-test', model: 'care-test' })))
+  for (const agent of agents) await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'load', revision: 1, title: 'Load', rules: [
+    { schemaVersion: 2, id: 'slow', revision: 1, on: ['display.render'], select: { view: 'display', roles: ['user'], blockTypes: ['text'] }, match: { kind: 'regex', pattern: '(a+)+$' },
+      actions: [{ id: 'copy', kind: 'replace', stage: 'display.render', enabledDefault: true, template: 'COPY' }] },
+    { schemaVersion: 2, id: 'fast', revision: 1, on: ['request.assemble'], select: { view: 'model', roles: ['user'], blockTypes: ['text'] }, match: { kind: 'regex', pattern: 'ACTUAL' },
+      actions: [{ id: 'replace', kind: 'replace', stage: 'request.assemble', enabledDefault: true, template: 'PLANNED' }] },
+  ] } })
+  const events = agents.map(agent => agent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'a'.repeat(1000) + '!' }] }), { surfaceOp: 'append' }))
+  const reads = Promise.allSettled(agents.map((agent, index) => service.display(agent, events[index].seq)))
+  const plan = await service.assemble(agents[2], { messages: [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'ACTUAL' }] })], purpose: 'conversation' })
+  assert.match(JSON.stringify(plan.request.messages), /PLANNED/)
+  assert.notEqual(plan.matchStatus, 'failed')
+  const outcomes = await reads
+  assert.deepEqual(outcomes.map(value => value.status), ['rejected', 'rejected', 'rejected'])
+  assert.deepEqual(outcomes.map(value => value.reason.message).sort(), ['matcher-capacity-exceeded', 'matcher-work-timeout', 'matcher-work-timeout'])
+  assert.equal(service.matcherStats().display.active, 0)
+  assert.equal(service.matcherStats().processing.active, 0)
+  for (const agent of agents) assert.equal(service.store.read(agent.id).runtime.runs.find(run => run.kind === 'matching').status, 'failed')
+})
+
+test('real tool matcher timeout rejects only that tool assessment and the conversation continues', async t => {
+  const owned = await fixture(t, false, {}, {}, { matcher: { timeoutMs: 100 } }); const ctx = await owned.open()
+  let executions = 0
+  ctx.effect(() => ctx.tools.register({ name: 'matcher_fixture', description: 'Count actual execution',
+    parameters: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'], additionalProperties: false },
+    output: { schema: { type: 'object' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
+    async execute() { executions++; return { summary: 'Executed' } } }))
+  const adapter = new CompletionAdapter([{ blocks: [{ type: 'tool-call', id: 'matcher-call', name: 'matcher_fixture', arguments: JSON.stringify({ text: 'a'.repeat(1000) + '!' }) }] },
+    { blocks: [{ type: 'text', text: 'Conversation continued after tool assessment failure.' }] }])
+  ctx.llm.registerAdapter(['care-test'], adapter)
+  const agent = await ctx.agentLoop.create('matcher-tool-fault', { provider: 'care-test', model: 'care-test' })
+  await ctx.contextCareWorkbench.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'tool-fault', revision: 1, title: 'Tool fault', rules: [
+    { schemaVersion: 2, id: 'slow', revision: 1, on: ['tool.before-execute'], select: { view: 'original', roles: ['assistant'], blockTypes: ['tool-call'] },
+      match: { kind: 'regex', pattern: '(a+)+$', field: 'block.arguments.text' }, actions: [{ id: 'deny', kind: 'filter', stage: 'tool.before-execute', enabledDefault: true }] },
+  ] } })
+  await completionTurn(ctx, agent)
+  assert.equal(executions, 0)
+  assert.equal(agent.session.snapshotEvents().findLast(event => event.type === 'turn/end').data.reason.kind, 'completed')
+  assert.match(JSON.stringify(agent.session.snapshotEvents().find(event => event.type === 'tool/result').data), /assessment failed.*matcher-work-timeout/)
+  assert.equal(ctx.contextCareWorkbench.store.read(agent.id).runtime.runs.find(run => run.kind === 'matching').result.stage, 'tool.before-execute')
+})
+
+test('explicit required request matching reports failure and does not dispatch the unresolved request', async t => {
+  const owned = await fixture(t, false, {}, {}, { matcher: { timeoutMs: 100 }, requiredStages: ['request.assemble'] }); const ctx = await owned.open()
+  const adapter = new ScriptedAdapter(); ctx.llm.registerAdapter(['care-test'], adapter)
+  const agent = await ctx.agentLoop.create('matcher-required-fault', { provider: 'care-test', model: 'care-test' })
+  const service = ctx.contextCareWorkbench
+  await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: pathologicalDocument('request.assemble') })
+  await completionTurn(ctx, agent, 'a'.repeat(1000) + '!')
+  assert.equal(adapter.requests.length, 0)
+  assert.match(JSON.stringify(agent.session.snapshotEvents()), /CONTEXT_CARE_MATCH_FAILED/)
+  assert.equal(service.store.read(agent.id).runtime.runs.find(run => run.kind === 'matching').result.stage, 'request.assemble')
 })
 
 test('Workbench v2 builtin incremental detector excludes closed-interval text in the real Host pipeline', { timeout: 30000 }, async t => {

@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { normalizeRuleV2 } from './vendor/rule-engine/index.js'
+import { normalizeRuleV2 } from '@leolee9086/dsh-rule-engine'
 import { ControlError } from './rule-controls.js'
 import { recordSecondaryFailure } from './secondary-failure.js'
 
