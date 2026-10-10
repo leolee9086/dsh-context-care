@@ -28,5 +28,5 @@ for (const name of ['react', 'react/jsx-runtime', 'react/jsx-dev-runtime', 'reac
   alias.unshift({ find: new RegExp(`^${escape(name)}$`), replacement: clientRequire.resolve(name) })
 }
 export default { resolve: { alias }, cacheDir: resolve('node_modules/.cache/context-care-client-test'),
-  test: { environment: 'jsdom', include: ['test/client-assembly.spec.js', 'test/care-ui.spec.js', 'test/source-navigation.spec.js', 'test/rule-runtime.spec.js'], testTimeout: 10000,
+  test: { environment: 'jsdom', include: ['test/care-ui.spec.js', 'test/source-navigation.spec.js', 'test/rule-runtime.spec.js'], testTimeout: 10000,
     deps: { moduleDirectories: ['node_modules', resolve(checkout, 'node_modules')] } } }

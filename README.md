@@ -410,20 +410,13 @@ pnpm run test:integration
 
 ## 验证与来源
 
-验证本地实现可直接读取外部未修改的 Harness 源码，无需构建或改动 Harness：
-
-```powershell
-$env:DSH_TEST_CHECKOUT = '/path/to/deepseek-harness'
-pnpm run test:integration:source
-pnpm run build
-pnpm run test:client:source
-```
+生产改动已提交，完整真实 Client 验收尚未完成。手写 ctx、替换服务和手工框架 hooks 的历史结果不能作为发行依据。未经核验全应用写入位置与并行冲突，不启动另一份完整应用来补验。
 
 桌面产物检查显式设置 `DSH_TEST_RUNTIME_ROOT` 为部署内的 `app.asar/dsh`，用该部署的 Electron 可执行文件和 `ELECTRON_RUN_AS_NODE=1`、`--expose-internals` 运行 `test/integration.test.js`。`DSH_TEST_PLUGIN_ROOT` 可选择独立安装的候选插件；浏览器检查另需 `DSH_TEST_CHECKOUT` 提供 Playwright。Host 模块按公开包名从 ASAR 读取，测试存储和端口独立。2026-10-10 检查的实际 Host 引擎为 Electron 内置 Node 24.18.1；部署随带的 Node 24.21.0 用于包管理及独立进程，两者分别验证。
 
-[历史传输诊断](test/diagnose-legacy-display-transport.js) 要求显式 `DSH_TEST_RUNTIME_ROOT`、`DSH_TEST_LEGACY_ROOT` 和 `DSH_TEST_CHECKOUT`，且拒绝非 0.8.1 的历史目录。真实 msedge 读取独立 ASAR Host 的空规则及真实 matcher 故障响应；另设 `DSH_TEST_DESKTOP_EXE` 和 `DSH_TEST_DESKTOP_MAIN`（必须指向部署的 `app.asar/lib/main.js`），会复制 Electron 引擎到测试临时目录，使用独立 profile、隐藏窗口和测试 socket 通信。执行部署中的 scheme 注册与转发函数，原版 reader 经真实 `dsh-app://app` 读取同一 Host，再检查响应头前断连、响应体中断和拒绝连接。`DSH_TEST_DISPLAY_COUNT=64` 检查并发卡片和原版两秒轮询；`DSH_TEST_READER_ROOT` 可选择本候选的 reader，检查阶段、状态和按需读取。`DSH_TEST_WEB_COMPRESSION=gzip` 对齐现场压缩配置（level 1、阈值 1024 字节），成功变换检查实际压缩头及完整原文/变换后内容。清理记录标明浏览器、桌面、Host与临时目录的释放阶段。测试不修改所选安装或现有 GUI，不使用 fetch mock；合成故障证明错误传播机制，不能据此断定历史10:29的具体触发。
+此前手写 ctx 的 artifact-reader、替换服务的 jsdom assembly、手工 hook 的浏览器页面和局部 reader/protocol 诊断已退出验收。相关“正式 Client/右栏通过”的记录全部撤回，详见[验收撤回记录](artifacts/CLIENT-VALIDATION-RETRACTION.md)。历史日志保留尝试原貌，不作为发行依据。
 
-源码组合挂载发行 Host 入口及 requests/completion，实际启动自有端口的 HTTP 服务和 JSON 存储。测试检查路由与工具卸载、真实历史 seed 恢复、完成冷却及崩溃补写、一次性大提示校准、约 5.102 倍输入校准后的十步不重复压缩、完整摘要预算和有限溢出恢复。测试目录、临时存储与端口都属于外部测试，不改部署与现有 GUI。客户端装配测试读取实际发行模块工厂，在外部 Host 提供的真实 SlotRegistry、SessionProvider、框架 hook 和渲染器中运行，验证两正式页签、通知原位定位、精确包装正文、重复定位、刷新、分页、会话切换、HTTP 错误与卸载，并保存 DOM 快照；该测试是 jsdom 装配验收，不代表已安装到正在运行的 GUI。
+此次 UI 改动需要在实际应用确认：只为变化/失败显示标记，点击经原有右栏读取一次详情，未变化消息不读取详情，刷新失败保留原始正文并显示可追踪错误，卸载清理全部注册。纯规则、协议解析与真实 worker 的独立检查只验收各自输入输出；它们不代替应用的模块加载、依赖注入、会话与插槽行为。
 
 `pnpm test` 验证曲线、百分比节流、范围配对、参数拒绝、失败、取消、卸载、数值投影与中文 UI，并检查 manifest、锁文件和运行时代码不引入 DSH 包。`pnpm run test:integration` 使用明确指定的真实 DSH Loader YAML、agent loop、工具注册表、token meter 与 compaction provider，仅模拟 LLM；检查摘要事务、工具结果顺序、继续执行、提示快照、投影重放和请求前缀。`pnpm run build` 生成客户端构建产物。
 

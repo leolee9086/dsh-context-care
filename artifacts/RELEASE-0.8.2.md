@@ -1,62 +1,30 @@
 # dsh-context-care 0.8.2 修复候选
 
-主包候选未发布、未部署；v0.8.0 与 v0.8.1 旧标签保持原位。此前公开消费验收对应提交 `6b37fa1b97e6b32e71fb2a98a993c213afc49838` 和包含请求路由诊断的 `0c18c2981ee398ec59339b208de6aeae3ad51cb0`。此后新增响应读取阶段诊断和Client构建，下面将此前公开包结果与本轮开发树结果分开记录。
+生产修改已提交并推送，最后一次生产改动为 e8ccd9c。主包没有发布、部署或安装到正在运行的桌面版。完整真实 Client 验收尚未完成，原 10:29 显示请求失败的具体原因尚未定位；不能把代码完成表述为实际环境验证完成。
 
-消息区只为内容实际改变的消息显示轻量处理标记，点击后在右栏按需读取详情。逐消息显示对照卡和两秒详情轮询已移除；未命中、同文替换无标记，规则状态变化使旧标记失效。
+代码移除逐消息对照卡和两秒详情轮询，改为变化/失败标记与右栏按需详情。可选匹配失败保留完整输入并记录失败；必需请求匹配失败禁止派发；显示与请求使用独立匹配池。worker 显式使用空 execArgv，不继承父进程启动参数。详情错误保留 route、phase 和收到的 HTTP 状态。
 
-可选匹配失败保留完整输入并持久化 failed 记录；显式必需请求匹配失败不派发；工具判定失败只拒绝对应操作并返回明确错误，后续对话继续。显示模板与预算规划失败独立记录，取消不伪造新失败。独立显示匹配池避免占用请求接纳容量。
+## 验收撤回
 
-## 已发布的标准依赖
+所有依赖手写 ctx、替换应用服务、测试会话或手工框架 hooks 的 Client/正式右栏/装配通过结论均撤回，详见[验收撤回记录](CLIENT-VALIDATION-RETRACTION.md)。对应 fixture、jsdom assembly、手工浏览器装配及直接模拟激活/会话环境的测试已删除，旧 partial-environment 入口已停用。
+
+此前 311/314 单元、25/26 Client 及公开 Client assembly 的套件数量不能作为发行依据。artifact-reader、卸载、reader/protocol/load/gzip 的历史日志只保留尝试记录，不构成完整应用验收。真实 TCP、HTTP 与 Electron 错误记录不能补足模块加载、依赖注入、会话、布局和插槽装配的缺失。
+
+补验时曾启动一份临时完整 profile；未事先验证全部持久化写入位置与并行冲突，该路径已中止，测试入口已删除。没有在实际右栏获得验收结果，没有调用模型。不能仅凭临时 DSH_HOME 宣称与现场数据完全隔离。
+
+## 标准公开依赖
 
 | npm 包 | 精确版本 | 公开元数据 |
 | --- | --- | --- |
 | @leolee9086/dsh-rule-engine | 0.3.0 | https://registry.npmjs.org/@leolee9086/dsh-rule-engine |
 | dsh-better-session-query | 0.1.1 | https://registry.npmjs.org/dsh-better-session-query |
 
-两依赖由哥哥完成 npm 发布。公开 registry 已返回精确版本及对应 latest，实际下载归档的 SHA-512 与本仓库锁文件完全一致。所有生产导入均解析普通 npm 包，内嵌副本已撤销；Host 与 worker 使用同一组已安装依赖，没有 Harness checkout 别名或开发链接。
+两依赖由哥哥发布。生产导入解析普通 npm 包，内嵌副本和 Harness checkout 别名已撤销。registry 归档的 SHA-512 与锁文件一致。普通 pnpm 11.7.0 add 在独立消费者下载53包时自动写入两条精确版本 minimumReleaseAgeExclude；不构成无豁免安装，本仓库没有改变年龄政策。
 
-发布时间分别为 `2026-10-10T07:00:10.101Z` 与 `2026-10-10T07:01:25.519Z`。本机 pnpm 11.7.0 与 12.6.0 的无豁免 frozen-lockfile 安装均因未满足24小时 minimumReleaseAge 而被拒绝。实际部署工具链 pnpm 11.7.0 的普通 add 在新空消费目录和新 store 中安装53包成功，同时自动写入两个精确版本的 minimumReleaseAgeExclude；该结果不能表述为无豁免安装。本仓库不提供这两个豁免，项目与全局政策未修改。
+## 当前诊断结论
 
-公开固定提交安装结果见 [public-fixed-install.log](public-fixed-install.log)。12:44 阶段的旧主包归档不含此后修复的 worker 启动参数，不能作为当前代码的发行产物；本轮验证直接消费公开 Git 提交，没有额外准备发布 tgz。
+真实子进程确认父进程参数继承会触发 ERR_WORKER_INVALID_EXEC_ARGV，生产 worker 启动参数已修正。这项结论针对明确复现的 worker 启动错误，不能代替历史 matcher 超时原因。
 
-## 运行验证
+Failed to fetch 可发生在响应头前，也可发生在收到 HTTP200 后消费响应体时。此前“该文案证明没有 Response”的判断已撤回。候选 reader 保存失败阶段与收到的状态，避免丢失这一差别。
 
-- 在实际部署所带 Node 24.21.0 下，真实子进程先复现 ERR_WORKER_INVALID_EXEC_ARGV：父进程的 V8/process 参数被传给 worker。纯 JavaScript worker 改为显式空 execArgv，不继承父进程 loader、inline-entry、test 或 V8 参数。Node 22.19.0 与 24.21.0 的 worker 回归均4/4通过，覆盖进程专用参数、病态正则超时后的恢复和真实并发超载。
-- 公开下载依赖下独立单元套件311/311通过，见 [public-dependencies-unit-fixed.log](public-dependencies-unit-fixed.log)。Node22完整真实 Host 套件74/74通过，见 [public-dependencies-host.log](public-dependencies-host.log)，包括鉴权 HTTP、持久化重启、工具链、三会话并发与显示/请求池隔离。
-- 从公开提交独立安装后，在 Node24 下检查公开 Host 入口、纯声明、已构建 Client factory、依赖精确版本、原始块读取和实际 worker 匹配，全部通过，见 [public-fixed-consumer.log](public-fixed-consumer.log)。
-- 同一独立安装包在 Node24 下的8项真实 Host 检查通过：显示模板失败后两轮继续、有效变化标记、外部和内建增量检测器、输出故障持久化、并发显示超时、工具判定超时、必需请求匹配失败不派发，见 [public-fixed-installed-host-node24.log](public-fixed-installed-host-node24.log)。
-- 生产标记、右栏组件与 reader 已在真实 msedge 浏览器中读取真实鉴权 Host；点击标记只读取一次，断开 Host 后显式刷新可见真实 Failed to fetch，原生正文保持原文。没有 page.route、固定成功 fetch 或伪造服务响应。官方客户端装配此前25/25通过。
-- 此后补齐详情失败诊断：右栏显示具体请求路由，空或HTML的HTTP失败保留状态码。真实HTTP2/2、真实Host浏览器断开1/1、官方Client装配2/2通过，见 [display-http-diagnostic-fixed.log](display-http-diagnostic-fixed.log)、[display-sidebar-diagnostic-browser.log](display-sidebar-diagnostic-browser.log)、[display-sidebar-diagnostic-client.log](display-sidebar-diagnostic-client.log)。pnpm run build仍因发布时间政策失败；直接执行已安装构建器成功并更新已提交Client产物，没有更改安装政策。
-- 17:23从公开最新提交0c18c29再做全新消费者/全新store安装，53包全部下载，普通add再次只自动写入上述两个精确年龄豁免；依赖integrity与源锁一致，见 [public-current-install-0c18c29.log](public-current-install-0c18c29.log)。独立入口/Client factory/真实worker smoke通过，见 [public-current-consumer-0c18c29.log](public-current-consumer-0c18c29.log)。公开安装Host的8项真实故障检查及真实浏览器按需取数/断开共9/9通过，见 [public-current-host-node24-0c18c29.log](public-current-host-node24-0c18c29.log)；读取同一安装包已构建Client的官方装配2/2通过，见 [public-current-client-assembly-node24-0c18c29.log](public-current-client-assembly-node24-0c18c29.log)。浏览器fixture构建仍来自测试checkout生产组件，95个发布src及lib/client.js与此次公开安装逐SHA256一致，见 [public-current-source-0c18c29.json](public-current-source-0c18c29.json)。
-
-实际运行的桌面 Host 引擎为 Electron 内置 Node24.18.1，启动带 `--expose-internals`；此前的 Node24.21.0 是部署随带的独立 Node。最新公开消费包在实际引擎及同一启动参数下的入口、Client factory、原块和 worker smoke通过，见 [desktop-engine-public-consumer-0c18c29.log](desktop-engine-public-consumer-0c18c29.log)。真实已部署 ASAR 模块（DSH0.2.0-rc.2、Cordis4.0.4、Loader1.0.5）的8项故障及多会话检查全部通过，见 [desktop-runtime-public-host-fixed-0c18c29.log](desktop-runtime-public-host-fixed-0c18c29.log)。首次检查在测试解析包名处失败，已修正目录叶推断为显式公开包名；未修改生产解析。生产标记与右栏reader通过真实msedge→该ASAR Host的按需读取及断开检查1/1，见 [desktop-runtime-browser-diagnostics-0c18c29.log](desktop-runtime-browser-diagnostics-0c18c29.log)。浏览器入口从相同生产源码构建，源码与公开安装文件一致；这不是将插件安装进现场GUI。
-
-测试明确指定外部只读 Harness；生产运行时不导入该 checkout。LLM 使用测试适配器，未验证真实模型供应商行为。主包声明 AGPL-3.0-only；引擎依赖声明 AGPL-3.0-or-later，查询依赖声明 MIT。
-
-## 桌面协议与响应阶段
-
-原0.8.1 reader已在真实Electron44/Node24.18.1中经`dsh-app://app`读取部署ASAR Host：64卡片、三轮两秒轮询收到192个200和192个matcher故障503，均无传输失败，见[legacy-desktop-protocol-load64.log](legacy-desktop-protocol-load64.log)。测试自有TCP故障证明响应头前断连（UND_ERR_SOCKET）、连接拒绝（ECONNREFUSED）和HTTP200后的响应体中断均可被旧reader显示为同一个TypeError: Failed to fetch。前两者renderer网络码为ERR_UNEXPECTED，后者为ERR_FAILED；此前“该字符串说明未拿到Response”的推断已撤回。
-
-候选reader保留fetch/body/http/json/validation阶段、具体route和收到的httpStatus，右栏显示本地化阶段说明。完整单元314/314、完整Client26/26及新增已构建Client真实HTTP中断快照通过，见[display-phase-unit.log](display-phase-unit.log)、[display-phase-client.log](display-phase-client.log)。95源文件syntax与直接执行已安装构建器通过，Client已重新生成。实际部署ASAR主程序的scheme和转发函数下，64消息在相同观察期只读64次，三个故障正确区分fetch或body+HTTP200，见[candidate-deployed-asar-protocol-load64.log](candidate-deployed-asar-protocol-load64.log)。历史Host使用原0.8.1，reader为候选，测试不声称旧Host故障策略已经改变。
-
-23:17从公开提交e8ccd9c建立全新消费者及store，53包全部下载，pnpm再次只自动记录两个精确年龄豁免，见[public-phase-install-e8ccd9c.log](public-phase-install-e8ccd9c.log)。97个src/Client/manifest文件逐SHA256一致，见[public-phase-source-e8ccd9c.json](public-phase-source-e8ccd9c.json)。实际桌面引擎的独立入口、Client factory、原块、真实worker smoke通过，见[public-phase-consumer-electron-e8ccd9c.log](public-phase-consumer-electron-e8ccd9c.log)；读取此公开安装Client的正式右栏真实中断与无变动零读取2/2通过，见[public-phase-client-e8ccd9c.log](public-phase-client-e8ccd9c.log)。
-
-现场Host实际gzip/level1/1024阈值与早先默认none测试有差异，已补齐2679字节成功变换：原0.8.1 reader及公开安装候选均通过msedge和实际桌面协议，HTTP确认content-encoding=gzip，解压后原文与COPY完整。公开候选整组退出0，见[public-phase-deployed-asar-gzip-e8ccd9c.log](public-phase-deployed-asar-gzip-e8ccd9c.log)。旧版初跑在所有行为结果后出现PostQueuedCompletionStatus(6)，退出0x80000003，不能算整组通过；加清理阶段记录后复验所有行为和browser/desktop/Host/temp释放，退出0，见[legacy-deployed-asar-gzip-cleanup-diagnostic.log](legacy-deployed-asar-gzip-cleanup-diagnostic.log)。第一次原生错误具体触发未确定，两个结果均保留。
-
-只读进程出生信息确认当前真正Host PID33496于10:26:16创建，早于10:29截图且迄今未退出；可以排除整Host进程在截图时死亡后重新启动的解释。原会话10:27:55的session/end-seed对应restore标记，单独不能证明Host退出；10:29:28工具判定超时后对话继续一小步，10:30:00整轮matcher超时。没有把该时间线当成显示连接底层错误码。
-
-诊断脚本可明确选定部署main的ASAR路径；Electron引擎复制到测试临时目录，不复制生产app.asar或profile。隐藏renderer与独立socket通信，记录protocol异常、renderer网络码和原reader结果。故障由真实TCP端点产生，无fetch mock。合成负载与受控断连定位错误传播机制，不证明10:29的原始触发。目标保持active；不以缺旧日志标受阻。
-
-此后补齐实际Client产物：设置`DSH_TEST_CLIENT_ARTIFACT=1`，直接加载已安装且未修改的Client构建产物，通过其实际Slot注册取得显示reader；React使用该安装包真实解析到的发布版本。旧0.8.1在64消息/gzip/实际Electron协议下的正常读取、真实HTTP503与三种TCP故障整组通过，见[legacy-artifact-deployed-asar-gzip64.log](legacy-artifact-deployed-asar-gzip64.log)。公开消费e8ccd9c的已构建Client同组通过，响应体截断保持body+HTTP200，见[public-client-artifact-deployed-asar-gzip-fixed-e8ccd9c.log](public-client-artifact-deployed-asar-gzip-fixed-e8ccd9c.log)。公开候选首次fixture因pnpm junction路径解析React失败，改用实际包路径后通过；首次失败另保留，不算行为验收。该fixture只检查注册reader，正式Slot/Sidebar渲染证据仍为前面的Client assembly测试。
-
-只读原持久域进一步确认10:30:00.807请求为REQUEST_PREFLIGHT_FAILED且dispatched=false。其140个已提交来源读取290原始块，1585311字节空匹配参考输入在实际桌面引擎下：旧版正常返回，候选完全不启动worker。参考输入不含历史模型副本或提示注入；该结果验证空规则修复在实际来源规模下生效，没有复现历史超时。原消息与持久文件未导出或提交。
-
-## 现场剩余工作
-
-只读检查确认桌面安装目录仍为0.8.1，文件中的旧实现仍有逐消息读取和两秒轮询；当前profile bundle名册和有效Host组合已无照料插件。桌面旧boot图保留照料条目，但真实/plugins/events返回200后的当前图已无照料。对应display/actions/controls同源只读GET均为空404，页面没有自动详情请求；该状态不能当作10:29原失败的重现。
-
-已读取原始两张截图：显示卡片只有TypeError: Failed to fetch，没有当时请求URL或底层网络码；matcher异常进入工具提示和整轮UNKNOWN失败。原图保留在既有本地存储。实际部署桌面代码将非静态app路径转发到Host并移除连接encoding/length头，当前同源404也证明能拿到Response；不能直接归咎于自定义协议。fetch-router Client没有改写全局fetch。
-
-只读选择原安装0.8.1、实际Node24.18.1与已部署ASAR Host，用原生产reader做真实msedge HTTP诊断：8条空规则请求均200，8条真实正则超时请求均503且显示HTTP503:matcher-work-timeout，两组requestfailed均零。参数化诊断脚本复验相同，见 [legacy-display-transport-parameterized.log](legacy-display-transport-parameterized.log)。该结果只确认所测试HTTP路径的超时错误响应，不覆盖历史dsh-app连接或所有原配置。修正测试解析器后，源码Host的有效标记回归1/1也通过，见 [source-host-resolver-regression.log](source-host-resolver-regression.log)。
-
-实际DevTools保留的 `/plugins/events` net::ERR_FAILED、旧crash日志与会话工作台记录均不足以证明原显示请求的失败原因。原现场Failed to fetch的具体传输根因仍缺当时URL、网络码或对应Host记录；隔离Host断开测试验证同类错误显示，不替代历史根因。未修改现场Harness/profile/preset/deploy，也未读取凭据。代码与标准依赖阶段通过，整个目标尚未完成。
+原持久记录确认10:30:00.807请求为 REQUEST_PREFLIGHT_FAILED、dispatched=false。该记录说明请求匹配失败未派发；它不是10:29显示连接失败的底层错误码。当前 Host 持续存活也不能排除单响应或监听器生命周期问题。历史显示请求的具体触发仍未定位。

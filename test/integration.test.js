@@ -2393,62 +2393,6 @@ test('Workbench v2 display compares pure copies and re-renders history with curr
   assert.deepEqual(agent.session.snapshotEvents(), before)
 })
 
-test('browser on-demand reader reaches authenticated real Host and shows disconnect as failure', { timeout: 30000 }, async t => {
-  const owned = await fixture(t, false); const ctx = await owned.open(); const service = ctx.contextCareWorkbench
-  ctx.llm.registerAdapter(['care-test'], new ScriptedAdapter())
-  const agent = await ctx.agentLoop.create('browser-display-real-host', { provider: 'care-test', model: 'care-test' })
-  await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'browser', revision: 1, title: 'Browser', rules: [
-    { schemaVersion: 2, id: 'replace', revision: 1, on: ['display.render'], select: { view: 'display', roles: ['user'], blockTypes: ['text'] },
-      match: { kind: 'regex', pattern: 'ORIGINAL' }, actions: [{ id: 'copy', kind: 'replace', stage: 'display.render', enabledDefault: true, template: 'TRANSFORMED' }] },
-  ] } })
-  const event = agent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'ORIGINAL' }] }), { surfaceOp: 'append' })
-  await service.reconcile(agent)
-  const { base, cookie } = await controlCookie(ctx)
-  const { build } = await import('tsdown')
-  const out = await mkdtemp(resolve(tmpdir(), 'care-browser-production-ui-'))
-  t.after(() => rm(out, { recursive: true, force: true }))
-  await build({ config: false, entry: { fixture: 'test/browser-display-entry.js' }, outDir: out, platform: 'browser', format: 'esm',
-    target: 'es2022', dts: false, sourcemap: false, deps: { alwaysBundle: () => true }, define: { 'process.env.NODE_ENV': JSON.stringify('production') } })
-  const script = await readFile(resolve(out, 'fixture.js'), 'utf8')
-  ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/care-test/fixture.js', handler(_req, res) { res.writeHead(200, { 'content-type': 'text/javascript' }); res.end(script) } }))
-  ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/care-test/page', handler(_req, res) {
-    res.writeHead(200, { 'content-type': 'text/html' })
-    res.end(`<!doctype html><div id="root"></div><script>window.testIdentity = ${JSON.stringify({ sessionId: String(agent.id), seq: event.seq })}</script><script type="module" src="./fixture.js"></script>`)
-  } }))
-  // The packaged Host has no browser test driver; select that external test
-  // dependency separately from the ASAR modules being exercised.
-  if (runtimeRoot && !process.env.DSH_TEST_CHECKOUT) throw new Error('Packaged Host browser checks require DSH_TEST_CHECKOUT for Playwright')
-  const browserCheckout = resolve(process.env.DSH_TEST_CHECKOUT ?? checkout)
-  const browserRequire = createRequire(pathToFileURL(resolve(browserCheckout, 'apps/web/package.json')))
-  const { chromium } = browserRequire('playwright')
-  const browser = await chromium.launch({ headless: true, channel: 'msedge' })
-  t.after(() => browser.close())
-  const context = await browser.newContext()
-  const [name, value] = cookie.split('=')
-  await context.addCookies([{ name, value, url: base }])
-  const page = await context.newPage(); const requests = []
-  page.on('request', request => { if (request.url().includes('/context-care/display?')) requests.push(request.url()) })
-  await page.goto(`${base}/care-test/page`)
-  await page.waitForFunction(() => window.readerReady === true)
-  assert.equal(requests.length, 0, 'Mounting the actual marker performs no display HTTP read')
-  assert.equal(await page.locator('aside').count(), 0)
-  assert.equal(await page.locator('[data-context-care-marker]').textContent(), '显示已处理 →')
-  await page.locator('[data-context-care-marker]').click()
-  await page.locator('aside pre').filter({ hasText: 'TRANSFORMED' }).waitFor()
-  assert.equal(await page.locator('aside pre').first().textContent(), 'ORIGINAL')
-  assert.equal(await page.locator('aside pre').last().textContent(), 'TRANSFORMED')
-  assert.equal(await page.locator('[data-original]').textContent(), 'ORIGINAL')
-  assert.equal(requests.length, 1)
-  assert.equal(agent.session.deriveMessages()[0].content[0].text, 'ORIGINAL')
-  await page.screenshot({ path: resolve('artifacts/browser-real-host-sidebar.png') })
-  await owned.close(ctx)
-  await page.getByRole('button', { name: '刷新', exact: true }).click()
-  await page.locator('aside [role="alert"]').waitFor()
-  const failure = await page.locator('aside [role="alert"]').textContent()
-  assert.match(failure, /Failed to fetch/)
-  assert.ok(failure.includes(`/context-care/display?sessionId=${encodeURIComponent(agent.id)}&seq=${event.seq}`), 'The sidebar identifies the actual failed request')
-  assert.equal(requests.length, 2, 'Disconnect produces one explicit attempt, without background retry')
-})
 
 test('actual display template failure stays visible while two conversation turns complete', async t => {
   const owned = await fixture(t, false); const ctx = await owned.open(); const service = ctx.contextCareWorkbench
