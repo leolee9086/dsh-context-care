@@ -1,0 +1,27 @@
+[WARN] The following settings cannot be set in the global config file ("C:\Users\al765\AppData\Local\pnpm\config\config.yaml") and were ignored: "_auth". Move them to a project-level pnpm-workspace.yaml. To share these settings across projects, use config dependencies: https://pnpm.io/11.x/config-dependencies
+Packages are hard linked from the content-addressable store to the virtual store.
+  Content-addressable store is at: C:\Users\al765\AppData\Local\Temp\care-public-dependencies-4967e9aff45849448c36b3a06ccdbde5\store-phase-e8ccd9c\v11
+  Virtual store is at:             node_modules/.pnpm
+Progress: resolved 0, reused 0, downloaded 1, added 0
+Packages: +53
++++++++++++++++++++++++++++++++++++++++++++++++++++++
+Progress: resolved 53, reused 0, downloaded 1, added 1
+Progress: resolved 53, reused 0, downloaded 13, added 13
+Progress: resolved 53, reused 0, downloaded 22, added 22
+Progress: resolved 53, reused 0, downloaded 31, added 31
+Progress: resolved 53, reused 0, downloaded 42, added 42
+[WARN] Tarball download average speed 3 KiB/s (size 4 KiB) is below 50 KiB/s: https://registry.npmjs.org/unist-util-stringify-position/-/unist-util-stringify-position-4.0.0.tgz (GET)
+Progress: resolved 53, reused 0, downloaded 47, added 47
+[WARN] Tarball download average speed 2 KiB/s (size 4 KiB) is below 50 KiB/s: https://registry.npmjs.org/micromark-util-sanitize-uri/-/micromark-util-sanitize-uri-2.0.1.tgz (GET)
+Progress: resolved 53, reused 0, downloaded 48, added 48
+Progress: resolved 53, reused 0, downloaded 50, added 50
+Progress: resolved 53, reused 0, downloaded 52, added 52
+Progress: resolved 53, reused 0, downloaded 53, added 53, done
+
+dependencies:
++ dsh-context-care 0.8.2
+
+Added 2 entries to minimumReleaseAgeExclude in pnpm-workspace.yaml (set minimumReleaseAgeStrict to true to gate these updates with a prompt):
+  @leolee9086/dsh-rule-engine@0.3.0
+  dsh-better-session-query@0.1.1
+Done in 16.6s using pnpm v11.7.0

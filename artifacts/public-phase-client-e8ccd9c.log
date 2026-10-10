@@ -1,0 +1,10 @@
+
+ RUN  v4.1.8 D:/dev/dsh-context-care
+
+ ✓ test/client-assembly.spec.js (3 tests | 1 skipped) 471ms
+   ✓ built client shows response-read stage and received status in the native sidebar after a real disconnect  447ms
+
+ Test Files  1 passed (1)
+      Tests  2 passed | 1 skipped (3)
+   Start at  23:17:33
+   Duration  42.42s (transform 8.21s, setup 0ms, import 23.94s, tests 471ms, environment 17.24s)

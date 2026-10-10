@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
-import { mkdtemp, readFile, copyFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -15,6 +15,8 @@ const runtime = resolve(process.env.DSH_TEST_RUNTIME_ROOT)
 const legacy = resolve(process.env.DSH_TEST_LEGACY_ROOT)
 const reader = process.env.DSH_TEST_READER_ROOT ? resolve(process.env.DSH_TEST_READER_ROOT) : legacy
 const candidateReader = reader !== legacy
+const compression = process.env.DSH_TEST_WEB_COMPRESSION ?? 'none'
+assert.ok(['none', 'gzip'].includes(compression), 'Web compression must be none or gzip')
 assert.equal(JSON.parse(await readFile(resolve(legacy, 'package.json'), 'utf8')).version, '0.8.1')
 if (candidateReader) assert.equal(JSON.parse(await readFile(resolve(reader, 'package.json'), 'utf8')).version, '0.8.2')
 const runtimeRequire = createRequire(pathToFileURL(resolve(runtime, 'package.json')))
@@ -50,7 +52,11 @@ try {
   ctx.provide('contextCareTestConfig', {})
   ctx.provide('contextCareTestCompletionConfig', {})
   ctx.provide('contextCareTestRequestConfig', {})
-  await copyFile(new URL('./fixtures/cordis.yml', import.meta.url), resolve(root, 'cordis.yml'))
+  const composition = await readFile(new URL('./fixtures/cordis.yml', import.meta.url), 'utf8')
+  assert.equal(composition.split('    port: 0').length, 2)
+  // Own the temporary composition; do not edit either the checked-in fixture or live profile.
+  await writeFile(resolve(root, 'cordis.yml'), composition.replace('    port: 0',
+    `    port: 0\n    compression: ${compression}\n    compressionLevel: 1\n    compressionThresholdBytes: 1024`))
   await ctx.plugin(Loader)
   ctx.loader.builtins.include = Include
   ctx.loader.internal = { version: 'v2', async import(name) {
@@ -68,6 +74,7 @@ try {
   const count = Number(process.env.DSH_TEST_DISPLAY_COUNT ?? 8)
   assert.ok(Number.isSafeInteger(count) && count >= 8 && count <= 256, 'Display count must be 8..256')
   const seqs = Array.from({ length: count }, () => agent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'a'.repeat(1000) + '!' }] }), { surfaceOp: 'append' }).seq)
+  let activeSeqs = seqs
   const base = `http://127.0.0.1:${ctx.webServer.port}`
   let cookie
   ctx.connection.authorizeIndex({ method: 'GET', url: ctx.connection.authenticatedUrl(base + '/'), headers: { host: new URL(base).host } }, {
@@ -81,7 +88,7 @@ try {
   }
   ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/care-test/legacy/page', handler(_req, res) {
     res.writeHead(200, { 'content-type': 'text/html' })
-    res.end(`<!doctype html><script type="module">import {createDisplayRecords} from './display-records.js'; window.records=createDisplayRecords(); for(const seq of ${JSON.stringify(seqs)})window.records.watch(${JSON.stringify(String(agent.id))},0,seq); window.readerReady=true;</script>`)
+    res.end(`<!doctype html><script type="module">import {createDisplayRecords} from './display-records.js'; window.records=createDisplayRecords(); for(const seq of ${JSON.stringify(activeSeqs)})window.records.watch(${JSON.stringify(String(agent.id))},0,seq); window.readerReady=true;</script>`)
   } }))
   if (process.env.DSH_TEST_DESKTOP_EXE) {
     const { createDesktopProtocolDriver } = await import('./desktop-protocol-driver.js')
@@ -107,8 +114,37 @@ try {
   assert.equal(responses.length, count); assert.deepEqual(responses, Array(count).fill(200)); assert.equal(failed.length, 0)
   await page.evaluate(() => window.records.dispose())
   console.log(JSON.stringify({ case: 'legacy-no-display-rules', engine: process.version, responses, transportFailures: failed }))
-  await ctx.contextCareWorkbench.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'legacy-timeout', revision: 1, title: 'Legacy real timeout', rules: [
-    { schemaVersion: 2, id: 'slow', revision: 1, on: ['display.render'], select: { view: 'display', roles: ['user'], blockTypes: ['text'] }, match: { kind: 'regex', pattern: '(a+)+$' }, actions: [{ id: 'replace', kind: 'replace', stage: 'display.render', enabledDefault: true, template: 'COPY' }] },
+  // A successful transformed result is large enough to exercise the real compression middleware.
+  // One open detail avoids mixing transport validation with the legacy matcher's admission limit.
+  await ctx.contextCareWorkbench.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'legacy-timeout', revision: 1, title: 'Legacy display transport', rules: [
+    { schemaVersion: 2, id: 'slow', revision: 1, on: ['display.render'], select: { view: 'display', roles: ['user'], blockTypes: ['text'] }, match: { kind: 'regex', pattern: '^a+!$' }, actions: [{ id: 'replace', kind: 'replace', stage: 'display.render', enabledDefault: true, template: 'COPY' }] },
+  ] } })
+  activeSeqs = [seqs[0]]
+  const route = `/context-care/display?sessionId=${String(agent.id)}&seq=${seqs[0]}`
+  const response = await fetch(base + route, { headers: { cookie, 'accept-encoding': 'gzip' } })
+  assert.equal(response.status, 200)
+  const encoding = response.headers.get('content-encoding')
+  assert.equal(encoding, compression === 'gzip' ? 'gzip' : null)
+  const detail = await response.json()
+  const validCopy = row => row.projections?.length === 1
+    && row.projections[0].before[0].text === 'a'.repeat(1000) + '!'
+    && row.projections[0].after[0].text === 'COPY'
+  assert.ok(validCopy(detail))
+  responses.length = 0
+  await page.reload()
+  await page.waitForFunction(() => window.readerReady && window.records.source.getSnapshot().size === 1 && [...window.records.source.getSnapshot().values()].every(row => row.status === 'ready'))
+  const success = await page.evaluate(() => { const rows = [...window.records.source.getSnapshot().values()]; window.records.dispose(); return rows })
+  assert.ok(success.every(validCopy)); assert.equal(failed.length, 0)
+  console.log(JSON.stringify({ case: 'legacy-valid-display', compression, encoding, responses, transportFailures: failed, resultBytes: Buffer.byteLength(JSON.stringify(detail)) }))
+  if (desktop) {
+    const result = await desktop.run({ base, cookie, status: 'ready', count: 1 })
+    assert.ok(result.snapshots.every(validCopy))
+    assert.equal(result.evidence.filter(row => row.surface === 'protocol' || row.surface === 'renderer-network').length, 0)
+    console.log(JSON.stringify({ case: 'legacy-desktop-valid-display', reader: candidateReader ? 'candidate' : 'legacy', compression, encoding, ...result }))
+  }
+  activeSeqs = seqs
+  await ctx.contextCareWorkbench.store.edit(agent.id, { revision: 1, operation: 'put-document', document: { schemaVersion: 2, id: 'legacy-timeout', revision: 2, title: 'Legacy display transport', rules: [
+    { schemaVersion: 2, id: 'slow', revision: 2, on: ['display.render'], select: { view: 'display', roles: ['user'], blockTypes: ['text'] }, match: { kind: 'regex', pattern: '(a+)+$' }, actions: [{ id: 'replace', kind: 'replace', stage: 'display.render', enabledDefault: true, template: 'COPY' }] },
   ] } })
   responses.length = 0
   await page.reload()
@@ -162,12 +198,19 @@ try {
   }
 } finally {
   // Each owner still releases its resources if a preceding cleanup rejects.
+  console.log(JSON.stringify({ case: 'legacy-cleanup-start', owner: 'browser' }))
   try { await browser?.close() }
   finally {
+    console.log(JSON.stringify({ case: 'legacy-cleanup-start', owner: 'desktop' }))
     try { await desktop?.close() }
     finally {
+      console.log(JSON.stringify({ case: 'legacy-cleanup-start', owner: 'host' }))
       try { await ctx.fiber.dispose() }
-      finally { await rm(root, { recursive: true, force: true }) }
+      finally {
+        console.log(JSON.stringify({ case: 'legacy-cleanup-start', owner: 'temp' }))
+        await rm(root, { recursive: true, force: true })
+      }
     }
   }
+  console.log(JSON.stringify({ case: 'legacy-cleanup-finished' }))
 }

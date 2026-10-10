@@ -39,6 +39,12 @@
 
 候选reader保留fetch/body/http/json/validation阶段、具体route和收到的httpStatus，右栏显示本地化阶段说明。完整单元314/314、完整Client26/26及新增已构建Client真实HTTP中断快照通过，见[display-phase-unit.log](display-phase-unit.log)、[display-phase-client.log](display-phase-client.log)。95源文件syntax与直接执行已安装构建器通过，Client已重新生成。实际部署ASAR主程序的scheme和转发函数下，64消息在相同观察期只读64次，三个故障正确区分fetch或body+HTTP200，见[candidate-deployed-asar-protocol-load64.log](candidate-deployed-asar-protocol-load64.log)。历史Host使用原0.8.1，reader为候选，测试不声称旧Host故障策略已经改变。
 
+23:17从公开提交e8ccd9c建立全新消费者及store，53包全部下载，pnpm再次只自动记录两个精确年龄豁免，见[public-phase-install-e8ccd9c.log](public-phase-install-e8ccd9c.log)。97个src/Client/manifest文件逐SHA256一致，见[public-phase-source-e8ccd9c.json](public-phase-source-e8ccd9c.json)。实际桌面引擎的独立入口、Client factory、原块、真实worker smoke通过，见[public-phase-consumer-electron-e8ccd9c.log](public-phase-consumer-electron-e8ccd9c.log)；读取此公开安装Client的正式右栏真实中断与无变动零读取2/2通过，见[public-phase-client-e8ccd9c.log](public-phase-client-e8ccd9c.log)。
+
+现场Host实际gzip/level1/1024阈值与早先默认none测试有差异，已补齐2679字节成功变换：原0.8.1 reader及公开安装候选均通过msedge和实际桌面协议，HTTP确认content-encoding=gzip，解压后原文与COPY完整。公开候选整组退出0，见[public-phase-deployed-asar-gzip-e8ccd9c.log](public-phase-deployed-asar-gzip-e8ccd9c.log)。旧版初跑在所有行为结果后出现PostQueuedCompletionStatus(6)，退出0x80000003，不能算整组通过；加清理阶段记录后复验所有行为和browser/desktop/Host/temp释放，退出0，见[legacy-deployed-asar-gzip-cleanup-diagnostic.log](legacy-deployed-asar-gzip-cleanup-diagnostic.log)。第一次原生错误具体触发未确定，两个结果均保留。
+
+只读进程出生信息确认当前真正Host PID33496于10:26:16创建，早于10:29截图且迄今未退出；可以排除整Host进程在截图时死亡后重新启动的解释。原会话10:27:55的session/end-seed对应restore标记，单独不能证明Host退出；10:29:28工具判定超时后对话继续一小步，10:30:00整轮matcher超时。没有把该时间线当成显示连接底层错误码。
+
 诊断脚本可明确选定部署main的ASAR路径；Electron引擎复制到测试临时目录，不复制生产app.asar或profile。隐藏renderer与独立socket通信，记录protocol异常、renderer网络码和原reader结果。故障由真实TCP端点产生，无fetch mock。合成负载与受控断连定位错误传播机制，不证明10:29的原始触发。目标保持active；不以缺旧日志标受阻。
 
 ## 现场剩余工作
