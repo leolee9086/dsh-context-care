@@ -1,0 +1,13 @@
+
+ RUN  v4.1.8 D:/dev/dsh-context-care
+
+ ↓ test/source-navigation.spec.js (6 tests | 6 skipped)
+ ↓ test/rule-runtime.spec.js (11 tests | 11 skipped)
+ ↓ test/care-ui.spec.js (6 tests | 6 skipped)
+ ✓ test/client-assembly.spec.js (2 tests) 6412ms
+   ✓ native slots show readable records, locate paged sources, isolate sessions and release navigation on unload  6398ms
+
+ Test Files  1 passed | 3 skipped (4)
+      Tests  2 passed | 23 skipped (25)
+   Start at  17:25:06
+   Duration  13.98s (transform 2.68s, setup 0ms, import 7.52s, tests 6.41s, environment 4.15s)

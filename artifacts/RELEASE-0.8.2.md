@@ -1,6 +1,6 @@
 # dsh-context-care 0.8.2 修复候选
 
-主包候选未发布、未部署；代码修复已提交推送，v0.8.0 与 v0.8.1 旧标签保持原位。以下公开消费验收对应提交 `6b37fa1b97e6b32e71fb2a98a993c213afc49838`。
+主包候选未发布、未部署；代码修复已提交推送，v0.8.0 与 v0.8.1 旧标签保持原位。初次公开消费验收对应提交 `6b37fa1b97e6b32e71fb2a98a993c213afc49838`；最新包含详情诊断修正的公开消费验收对应 `0c18c2981ee398ec59339b208de6aeae3ad51cb0`。
 
 消息区只为内容实际改变的消息显示轻量处理标记，点击后在右栏按需读取详情。逐消息显示对照卡和两秒详情轮询已移除；未命中、同文替换无标记，规则状态变化使旧标记失效。
 
@@ -27,11 +27,14 @@
 - 同一独立安装包在 Node24 下的8项真实 Host 检查通过：显示模板失败后两轮继续、有效变化标记、外部和内建增量检测器、输出故障持久化、并发显示超时、工具判定超时、必需请求匹配失败不派发，见 [public-fixed-installed-host-node24.log](public-fixed-installed-host-node24.log)。
 - 生产标记、右栏组件与 reader 已在真实 msedge 浏览器中读取真实鉴权 Host；点击标记只读取一次，断开 Host 后显式刷新可见真实 Failed to fetch，原生正文保持原文。没有 page.route、固定成功 fetch 或伪造服务响应。官方客户端装配此前25/25通过。
 - 此后补齐详情失败诊断：右栏显示具体请求路由，空或HTML的HTTP失败保留状态码。真实HTTP2/2、真实Host浏览器断开1/1、官方Client装配2/2通过，见 [display-http-diagnostic-fixed.log](display-http-diagnostic-fixed.log)、[display-sidebar-diagnostic-browser.log](display-sidebar-diagnostic-browser.log)、[display-sidebar-diagnostic-client.log](display-sidebar-diagnostic-client.log)。pnpm run build仍因发布时间政策失败；直接执行已安装构建器成功并更新已提交Client产物，没有更改安装政策。
+- 17:23从公开最新提交0c18c29再做全新消费者/全新store安装，53包全部下载，普通add再次只自动写入上述两个精确年龄豁免；依赖integrity与源锁一致，见 [public-current-install-0c18c29.log](public-current-install-0c18c29.log)。独立入口/Client factory/真实worker smoke通过，见 [public-current-consumer-0c18c29.log](public-current-consumer-0c18c29.log)。公开安装Host的8项真实故障检查及真实浏览器按需取数/断开共9/9通过，见 [public-current-host-node24-0c18c29.log](public-current-host-node24-0c18c29.log)；读取同一安装包已构建Client的官方装配2/2通过，见 [public-current-client-assembly-node24-0c18c29.log](public-current-client-assembly-node24-0c18c29.log)。浏览器fixture构建仍来自测试checkout生产组件，95个发布src及lib/client.js与此次公开安装逐SHA256一致，见 [public-current-source-0c18c29.json](public-current-source-0c18c29.json)。
 
 测试明确指定外部只读 Harness；生产运行时不导入该 checkout。LLM 使用测试适配器，未验证真实模型供应商行为。主包声明 AGPL-3.0-only；引擎依赖声明 AGPL-3.0-or-later，查询依赖声明 MIT。
 
 ## 现场剩余工作
 
-只读检查确认桌面安装目录仍为0.8.1，实际安装代码仍有旧的逐消息读取和两秒轮询。读取实际部署的桌面主程序代码确认，非静态 app 路径会转发到 Host；没有证据将 dsh-app 自定义协议认定为原 fetch 失败的原因。
+只读检查确认桌面安装目录仍为0.8.1，文件中的旧实现仍有逐消息读取和两秒轮询；当前profile bundle名册和有效Host组合已无照料插件。桌面旧boot图保留照料条目，但真实/plugins/events返回200后的当前图已无照料。对应display/actions/controls同源只读GET均为空404，页面没有自动详情请求；该状态不能当作10:29原失败的重现。
 
-当前 Playwright 的19387页停在鉴权提示，没有 context-care 请求记录；桌面正在另一个会话。实际DevTools保留大量 `/plugins/events` 的 `net::ERR_FAILED`，但未取得原显示请求的网络结果，不能认定为同一根因。旧crash日志也没有该请求的证据。未修改现场 Harness、profile、preset 或部署，也没有读取凭据。原现场 Failed to fetch 的具体网络原因仍未定位；隔离 Host 断开测试不代表该原因。整个修复目标尚未完成。
+已读取原始两张截图：显示卡片只有TypeError: Failed to fetch，没有当时请求URL或底层网络码；matcher异常进入工具提示和整轮UNKNOWN失败。原图保留在既有本地存储。实际部署桌面代码将非静态app路径转发到Host并移除连接encoding/length头，当前同源404也证明能拿到Response；不能直接归咎于自定义协议。fetch-router Client没有改写全局fetch。
+
+实际DevTools保留的 `/plugins/events` net::ERR_FAILED、旧crash日志与会话工作台记录均不足以证明原显示请求的失败原因。原现场Failed to fetch的具体传输根因仍缺当时URL、网络码或对应Host记录；隔离Host断开测试验证同类错误显示，不替代历史根因。未修改现场Harness/profile/preset/deploy，也未读取凭据。代码与标准依赖阶段通过，整个目标尚未完成。

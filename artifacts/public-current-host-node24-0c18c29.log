@@ -1,0 +1,30 @@
+ℹ entry: test/browser-display-entry.js
+ℹ target: es2022
+ℹ Build start
+ℹ Cleaning 1 files
+ℹ Hint: consider adding deps.onlyBundle option to avoid unintended bundling of dependencies, or set deps.onlyBundle: false to disable this hint.
+See more at https://tsdown.dev/options/dependencies#deps-onlybundle
+Detected dependencies in bundle:
+- react
+- scheduler
+- react-dom
+ℹ C:\Users\al765\AppData\Local\Temp\care-browser-production-ui-retIew\fixture.js  262.07 kB │ gzip: 70.39 kB
+ℹ 1 files, total: 262.07 kB
+✔ Build complete in 367ms
+✔ browser on-demand reader reaches authenticated real Host and shows disconnect as failure (6322.3678ms)
+✔ actual display template failure stays visible while two conversation turns complete (505.1482ms)
+✔ real display markers exclude unmatched and same-text replacements (304.8236ms)
+✔ Workbench v2 external detector finalizes a real stream once and exposes owned availability after disposal (456.8805ms)
+✔ real output matcher failure is durable and visible over HTTP while two turns continue (759.4633ms)
+✔ real concurrent display timeouts cannot consume request matching admission (447.8987ms)
+✔ real tool matcher timeout rejects only that tool assessment and the conversation continues (427.6313ms)
+✔ explicit required request matching reports failure and does not dispatch the unresolved request (352.8888ms)
+✔ Workbench v2 builtin incremental detector excludes closed-interval text in the real Host pipeline (346.2673ms)
+ℹ tests 9
+ℹ suites 0
+ℹ pass 9
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 11816.3677

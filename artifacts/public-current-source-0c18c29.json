@@ -1,0 +1,15 @@
+{
+  "commit": "0c18c2981ee398ec59339b208de6aeae3ad51cb0",
+  "consumer": "consumer-current-0c18c29",
+  "node": "24.21.0",
+  "pnpm": "11.7.0",
+  "sourceFiles": 95,
+  "allPublicSourcesMatchTestedCheckout": true,
+  "clientSHA256": "4E1B0AAE8A3712C7218637C20A6832955B5FD161C19DF94FCF65BE5B723BE428",
+  "automaticMinimumReleaseAgeExclude": [
+    "@leolee9086/dsh-rule-engine@0.3.0",
+    "dsh-better-session-query@0.1.1"
+  ],
+  "ruleEngineIntegrity": "sha512-VoPIZKxHjapSw66Fg45w6F06Uqg2nDv4eJ7loIO38JvyJw7bzcrfxS1+dtb/jWxDaoP7MQGRvKTEXtMpeweftA==",
+  "blockQueryIntegrity": "sha512-Q5gSjZKgzroy1EQd1mC0YR9G2bRS3Z37oPKvx4L5qYVCrUOOJzSwJkcqf9bHqu6pTzTI/rp/65AwkcomVvPAhQ=="
+}
