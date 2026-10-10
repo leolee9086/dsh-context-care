@@ -1,4 +1,5 @@
 import { parseDisplayResponse } from './display-response.js'
+import { httpFailure } from './http-failure.js'
 export { parseDisplayResponse } from './display-response.js'
 
 /** On-demand detail reads: no timer, no per-message subscription, no implicit retry. */
@@ -23,8 +24,9 @@ export function createDisplayRecords({ fetcher = fetch } = {}) {
       const route = `/context-care/display?sessionId=${encodeURIComponent(sessionId)}&seq=${seq}`
       try {
         const response = await fetcher(route, { signal: controller.signal, headers: { accept: 'application/json' } })
+        // Desktop forwarding can return an empty/HTML failure before the JSON route runs.
+        if (!response.ok) throw await httpFailure(response, route)
         const body = await response.json()
-        if (!response.ok) throw new Error(`${route}: HTTP ${response.status}: ${body.message ?? body.error ?? ''}`)
         const value = { status: 'ready', ...parseDisplayResponse(body, { seq }) }
         if (!controller.signal.aborted) publish(key, value)
         return value

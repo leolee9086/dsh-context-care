@@ -4,6 +4,30 @@ import { createServer } from 'node:http'
 import { createDisplayRecords } from '../src/display-records.js'
 
 const block = { id: 'copy', role: 'assistant', type: 'text', text: 'Safe copy' }
+
+test('failed real HTTP reads retain status and route for empty, HTML and JSON responses', async t => {
+  let reply
+  const server = createServer((_request, response) => {
+    response.writeHead(reply.status, reply.type ? { 'content-type': reply.type } : {})
+    response.end(reply.body)
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  const base = `http://127.0.0.1:${server.address().port}`
+  const records = createDisplayRecords({ fetcher: (path, options) => fetch(new URL(path, base), options) })
+  t.after(() => { records.dispose(); server.closeAllConnections(); server.close() })
+  for (reply of [
+    { status: 503, body: '' },
+    { status: 403, type: 'text/html', body: '<p>Forbidden</p>' },
+    { status: 503, type: 'application/json', body: JSON.stringify({ error: 'workbench-unavailable' }) },
+  ]) {
+    await records.read('s', 3, { refresh: true })
+    const failure = records.source.getSnapshot().get('s:0:3')
+    assert.equal(failure.status, 'error')
+    assert.match(failure.error, new RegExp(`HTTP ${reply.status}`))
+    assert.equal(failure.route, '/context-care/display?sessionId=s&seq=3')
+    if (reply.type === 'application/json') assert.match(failure.error, /workbench-unavailable/)
+  }
+})
 test('on-demand detail reader uses real HTTP, rejects malformed results, and exposes a real disconnected server', async t => {
   let body; let requests = 0
   const server = createServer((_request, response) => {

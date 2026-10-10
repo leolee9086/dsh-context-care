@@ -1,0 +1,10 @@
+
+ RUN  v4.1.8 D:/dev/dsh-context-care
+
+ ✓ test/client-assembly.spec.js (2 tests) 6672ms
+   ✓ native slots show readable records, locate paged sources, isolate sessions and release navigation on unload  6655ms
+
+ Test Files  1 passed (1)
+      Tests  2 passed (2)
+   Start at  16:11:45
+   Duration  13.54s (transform 3.05s, setup 0ms, import 5.17s, tests 6.67s, environment 1.47s)

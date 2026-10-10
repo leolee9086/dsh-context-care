@@ -2443,7 +2443,9 @@ test('browser on-demand reader reaches authenticated real Host and shows disconn
   await owned.close(ctx)
   await page.getByRole('button', { name: '刷新', exact: true }).click()
   await page.locator('aside [role="alert"]').waitFor()
-  assert.match(await page.locator('aside [role="alert"]').textContent(), /Failed to fetch/)
+  const failure = await page.locator('aside [role="alert"]').textContent()
+  assert.match(failure, /Failed to fetch/)
+  assert.ok(failure.includes(`/context-care/display?sessionId=${encodeURIComponent(agent.id)}&seq=${event.seq}`), 'The sidebar identifies the actual failed request')
   assert.equal(requests.length, 2, 'Disconnect produces one explicit attempt, without background retry')
 })
 

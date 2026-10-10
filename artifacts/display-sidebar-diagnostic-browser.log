@@ -1,0 +1,29 @@
+TAP version 13
+# ℹ entry: test/browser-display-entry.js
+# ℹ target: es2022
+# ℹ Build start
+# ℹ Cleaning 1 files
+# ℹ Hint: consider adding deps.onlyBundle option to avoid unintended bundling of dependencies, or set deps.onlyBundle: false to disable this hint.
+# See more at https://tsdown.dev/options/dependencies\#deps-onlybundle
+# Detected dependencies in bundle:
+# - react
+# - scheduler
+# - react-dom
+# ℹ C:\\Users\\al765\\AppData\\Local\\Temp\\care-browser-production-ui-Qq6kH6\\fixture.js  262.07 kB │ gzip: 70.39 kB
+# ℹ 1 files, total: 262.07 kB
+# ✔ Build complete in 380ms
+# Subtest: browser on-demand reader reaches authenticated real Host and shows disconnect as failure
+ok 1 - browser on-demand reader reaches authenticated real Host and shows disconnect as failure
+  ---
+  duration_ms: 4373.1774
+  type: 'test'
+  ...
+1..1
+# tests 1
+# suites 0
+# pass 1
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 6226.1579

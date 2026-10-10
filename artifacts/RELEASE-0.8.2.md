@@ -25,7 +25,8 @@
 - 公开下载依赖下独立单元套件311/311通过，见 [public-dependencies-unit-fixed.log](public-dependencies-unit-fixed.log)。Node22完整真实 Host 套件74/74通过，见 [public-dependencies-host.log](public-dependencies-host.log)，包括鉴权 HTTP、持久化重启、工具链、三会话并发与显示/请求池隔离。
 - 从公开提交独立安装后，在 Node24 下检查公开 Host 入口、纯声明、已构建 Client factory、依赖精确版本、原始块读取和实际 worker 匹配，全部通过，见 [public-fixed-consumer.log](public-fixed-consumer.log)。
 - 同一独立安装包在 Node24 下的8项真实 Host 检查通过：显示模板失败后两轮继续、有效变化标记、外部和内建增量检测器、输出故障持久化、并发显示超时、工具判定超时、必需请求匹配失败不派发，见 [public-fixed-installed-host-node24.log](public-fixed-installed-host-node24.log)。
-- 生产标记、右栏组件与 reader 已在真实 msedge 浏览器中读取真实鉴权 Host；点击标记只读取一次，断开 Host 后显式刷新可见真实 Failed to fetch，原生正文保持原文。没有 page.route、固定成功 fetch 或伪造服务响应。官方客户端装配此前25/25通过；本轮没有改变客户端代码。
+- 生产标记、右栏组件与 reader 已在真实 msedge 浏览器中读取真实鉴权 Host；点击标记只读取一次，断开 Host 后显式刷新可见真实 Failed to fetch，原生正文保持原文。没有 page.route、固定成功 fetch 或伪造服务响应。官方客户端装配此前25/25通过。
+- 此后补齐详情失败诊断：右栏显示具体请求路由，空或HTML的HTTP失败保留状态码。真实HTTP2/2、真实Host浏览器断开1/1、官方Client装配2/2通过，见 [display-http-diagnostic-fixed.log](display-http-diagnostic-fixed.log)、[display-sidebar-diagnostic-browser.log](display-sidebar-diagnostic-browser.log)、[display-sidebar-diagnostic-client.log](display-sidebar-diagnostic-client.log)。pnpm run build仍因发布时间政策失败；直接执行已安装构建器成功并更新已提交Client产物，没有更改安装政策。
 
 测试明确指定外部只读 Harness；生产运行时不导入该 checkout。LLM 使用测试适配器，未验证真实模型供应商行为。主包声明 AGPL-3.0-only；引擎依赖声明 AGPL-3.0-or-later，查询依赖声明 MIT。
 
@@ -33,4 +34,4 @@
 
 只读检查确认桌面安装目录仍为0.8.1，实际安装代码仍有旧的逐消息读取和两秒轮询。读取实际部署的桌面主程序代码确认，非静态 app 路径会转发到 Host；没有证据将 dsh-app 自定义协议认定为原 fetch 失败的原因。
 
-当前 Playwright 的19387页停在鉴权提示，没有 context-care 请求记录；桌面正在另一个会话，未取得原失败请求的网络结果。本轮未修改现场 Harness、profile、preset 或部署，也没有读取凭据。原现场 Failed to fetch 的具体网络原因仍未定位；隔离 Host 断开测试不代表该原因。整个修复目标保持 active。
+当前 Playwright 的19387页停在鉴权提示，没有 context-care 请求记录；桌面正在另一个会话。实际DevTools保留大量 `/plugins/events` 的 `net::ERR_FAILED`，但未取得原显示请求的网络结果，不能认定为同一根因。旧crash日志也没有该请求的证据。未修改现场 Harness、profile、preset 或部署，也没有读取凭据。原现场 Failed to fetch 的具体网络原因仍未定位；隔离 Host 断开测试不代表该原因。整个修复目标尚未完成。

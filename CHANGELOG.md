@@ -8,6 +8,7 @@
 - 修复可省略标题的规则导致管理 HTTP 响应校验 503。显示模板或显示预算规划失败单独记录为 display failed，不冒充匹配故障，也不结束对话。通过真实病态正则、Host重启、三会话负载、实际工具失败、缺字段模板和生产标记/右栏组件到鉴权Host的真实浏览器断开测试。
 - 撤销 v0.8.1 的源码内嵌方案，恢复 rule-engine 0.3.0 和 better-session-query 0.1.1 标准依赖。已验证公开 npm 归档与锁文件哈希一致，并在空目录从公开 Git 提交安装插件与 npm 依赖；pnpm 普通 add 自动记录的精确版本发布时间豁免与无豁免冻结安装失败分别记录，不再用隔离 registry 冒充公开安装。
 - 修复 worker 继承父进程启动参数导致 Node 24 的 ERR_WORKER_INVALID_EXEC_ARGV；已发布 JavaScript worker 使用独立的空 execArgv，真实子进程覆盖进程专属参数和 inline 模块入口。
+- 详情读取失败时右栏显示实际请求路由；空响应或 HTML 的 HTTP 失败保留状态码，不再被 JSON 解析错误掩盖。真实 HTTP 与浏览器断开检查覆盖错误信息，无自动重试。
 
 ## v0.8.1
 
