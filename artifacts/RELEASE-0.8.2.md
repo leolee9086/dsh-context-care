@@ -6,13 +6,13 @@
 
 撤销未获依据支持的源码内嵌，恢复标准依赖：
 
-| 发行包 | 版本 | 位置 |
+| 包 | 版本 | 来源 |
 | --- | --- | --- |
-| @leolee9086/dsh-rule-engine | 0.3.0 | dependency-packages/leolee9086-dsh-rule-engine-0.3.0.tgz |
-| dsh-better-session-query | 0.1.1 | dependency-packages/dsh-better-session-query-0.1.1.tgz |
-| dsh-context-care | 0.8.2 | candidate/dsh-context-care-0.8.2.tgz |
+| @leolee9086/dsh-rule-engine | 0.3.0 | https://registry.npmjs.org/@leolee9086/dsh-rule-engine |
+| dsh-better-session-query | 0.1.1 | https://registry.npmjs.org/dsh-better-session-query |
+| dsh-context-care | 0.8.2 候选 | 本仓库 main 的固定提交，客户端构建产物已入库 |
 
-最终主包 SHA-256：`AA19631FC6EE90FB4CD5111FFBF55ADDE8AF3F711CE4938B6C04B008501AB0F6`。
+12:44 阶段的主包 SHA-256 为 `AA19631FC6EE90FB4CD5111FFBF55ADDE8AF3F711CE4938B6C04B008501AB0F6`，它不含此后修正的 worker 启动参数，不能当作当前源码的发行产物。无需额外准备 tgz 才能进行公开 Git 消费验证。
 
 验证：
 

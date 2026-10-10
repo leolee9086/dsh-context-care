@@ -18,7 +18,8 @@ export function createBoundedMatcher({ timeoutMs = 250, startupMs = 10000, maxBy
   const active = new Set(); const idle = []
   function createWorker() {
     const worker = new Worker(new URL('./match-worker.js', import.meta.url), { resourceLimits: { maxOldGenerationSizeMb: 64, maxYoungGenerationSizeMb: 16 },
-      execArgv: process.execArgv.filter(arg => !arg.startsWith('--test')) })
+      // Published JavaScript needs no parent loaders, test flags or process-only V8 options.
+      execArgv: [] })
     workersStarted++
     const entry = { worker, ready: false, dead: false, receive: undefined, fail: undefined }
     worker.on('message', message => {

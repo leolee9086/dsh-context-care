@@ -1,5 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { createBoundedMatcher, MatcherFailure } from '../src/bounded-matcher.js'
 import { normalizeRuleV2 } from '@leolee9086/dsh-rule-engine'
 
@@ -8,6 +10,18 @@ const rule = pattern => normalizeRuleV2({ schemaVersion: 2, sourceId: 'failure-t
   match: { kind: 'regex', pattern }, actions: [{ id: 'notify', kind: 'notify', stage: 'output.complete', enabledDefault: true, template: 'match' }] })
 const input = pattern => ({ stage: 'output.complete', rules: [rule(pattern)],
   blocks: [{ id: 'b', sessionId: 's', role: 'assistant', view: 'original', type: 'text', text: 'a'.repeat(1000) + '!' }] })
+
+test('matching starts from a parent with process-only flags and an inline module entry', async () => {
+  // These flags belong to the parent process and Node rejects them in Worker.execArgv.
+  const source = `
+    import assert from 'node:assert/strict'
+    import { createBoundedMatcher } from ${JSON.stringify(new URL('../src/bounded-matcher.js', import.meta.url).href)}
+    const matcher = createBoundedMatcher()
+    try { assert.equal((await matcher.detect(${JSON.stringify(input('!$'))})).length, 1) }
+    finally { await matcher.close() }
+  `
+  await promisify(execFile)(process.execPath, ['--stack-trace-limit=10', '--input-type=module', '--eval', source], { timeout: 10000 })
+})
 
 test('an empty or unrelated stage performs no worker work, even with oversized history', async t => {
   const matcher = createBoundedMatcher({ maxBytes: 1 })

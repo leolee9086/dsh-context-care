@@ -34,5 +34,23 @@ for (const file of names.filter(name => name.endsWith('.js'))) {
   const source = await readFile(resolve(root, 'src', file), 'utf8')
   for (const [, target] of source.matchAll(/(?:from\s+|import\s*)['"]([^'"]+)['"]/g)) if (target.startsWith('.')) await readFile(resolve(root, 'src', target))
 }
-console.log(`Independently installed ${manifest.name}@${manifest.version}: public Host entries, declarations, Client factory and relative imports passed`)
+for (const name of ['@leolee9086/dsh-rule-engine', 'dsh-better-session-query']) {
+  const installed = JSON.parse(await readFile(packageRequire.resolve(`${name}/package.json`), 'utf8'))
+  assert.equal(installed.version, manifest.dependencies[name], name)
+}
+const engine = await import(pathToFileURL(packageRequire.resolve('@leolee9086/dsh-rule-engine')).href)
+const query = await import(pathToFileURL(packageRequire.resolve('dsh-better-session-query/blocks')).href)
+const event = { seq: 7, type: 'assistant/message', time: 1, data: { content: [{ type: 'text', text: '  ORIGINAL\n' }] } }
+const [block] = query.extractRawBlocks(event, { sessionId: 'public-consumer' })
+assert.equal(block.text, '  ORIGINAL\n')
+assert.equal(Object.isFrozen(block), true)
+const { createBoundedMatcher } = await import(pathToFileURL(resolve(root, 'src/bounded-matcher.js')).href)
+const matcher = createBoundedMatcher()
+try {
+  const rule = engine.normalizeRuleV2({ schemaVersion: 2, sourceId: 'public-consumer', id: 'match', revision: 1,
+    on: ['output.complete'], select: { view: 'original', roles: ['assistant'], blockTypes: ['text'] },
+    match: { kind: 'regex', pattern: 'ORIGINAL' }, actions: [{ id: 'notice', kind: 'notify', stage: 'output.complete', enabledDefault: true, template: 'matched' }] })
+  assert.equal((await matcher.detect({ stage: 'output.complete', rules: [rule], blocks: [{ ...block, view: 'original' }] })).length, 1)
+} finally { await matcher.close() }
+console.log(`Independently installed ${manifest.name}@${manifest.version}: public entries, Client factory, exact dependencies, raw blocks and matching worker passed`)
 console.log(root)
