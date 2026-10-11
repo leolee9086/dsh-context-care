@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { normalizeRuleV2 } from '@leolee9086/dsh-rule-engine'
-import { extractRawBlocks } from 'dsh-better-session-query/blocks'
+import { extractRawBlocks } from '@leolee9086/dsh-session-blocks'
 import { planDisplayV2 } from './display-plan.js'
 import { openWorkbenchStore, entryRule, variableSnapshot, variableKey, validateDocument, validateDocumentSet } from './workbench-store.js'
 import { createTemplates } from './templates.js'

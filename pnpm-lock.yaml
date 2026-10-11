@@ -11,12 +11,12 @@ importers:
       '@leolee9086/dsh-rule-engine':
         specifier: 0.3.0
         version: 0.3.0
+      '@leolee9086/dsh-session-blocks':
+        specifier: 0.1.0
+        version: 0.1.0
       ajv:
         specifier: ^8.20.0
         version: 8.20.0
-      dsh-better-session-query:
-        specifier: 0.1.1
-        version: 0.1.1
       handlebars:
         specifier: ^4.7.10
         version: 4.7.10
@@ -59,6 +59,10 @@ packages:
 
   '@leolee9086/dsh-rule-engine@0.3.0':
     resolution: {integrity: sha512-VoPIZKxHjapSw66Fg45w6F06Uqg2nDv4eJ7loIO38JvyJw7bzcrfxS1+dtb/jWxDaoP7MQGRvKTEXtMpeweftA==}
+
+  '@leolee9086/dsh-session-blocks@0.1.0':
+    resolution: {integrity: sha512-weUQ6Mx6oCT/d6wI8CmvrorODp9WAuzy8FwqWW0V3xrbt74SioLVBB48yu/3ZxTg3ZP172ZwFAHbNmovitNDuw==}
+    engines: {node: '>=18'}
 
   '@oxc-project/types@0.148.0':
     resolution: {integrity: sha512-Nm4s/jB+4FpFsPhWGEC4h7rzksesmtnMXomo6rCMcg/b8zLQuOziRgkCS1fxDCXOlJB/6Q8oABOZ/OP6RIPj9A==}
@@ -351,10 +355,6 @@ packages:
   devlop@1.1.0:
     resolution: {integrity: sha512-RWmIqhcFf1lRYBvNmr7qTNuyCt/7/ns2jbpp1+PalgE/rDQcBT0fioSMUpJ93irlUhC5hrg4cYqe6U+0ImW0rA==}
 
-  dsh-better-session-query@0.1.1:
-    resolution: {integrity: sha512-Q5gSjZKgzroy1EQd1mC0YR9G2bRS3Z37oPKvx4L5qYVCrUOOJzSwJkcqf9bHqu6pTzTI/rp/65AwkcomVvPAhQ==}
-    engines: {node: '>=22.19.0'}
-
   dts-resolver@3.0.0:
     resolution: {integrity: sha512-1T1f+z+4tl9XD+m+0HBgWoL/nm0bOIffyWaUuUSBlFg/86IWvfx+wjNaO/ybU0AJzG9/Mi5hBUgGV6zCmWEN7Q==}
     engines: {node: ^22.18.0 || >=24.0.0}
@@ -635,6 +635,8 @@ snapshots:
 
   '@leolee9086/dsh-rule-engine@0.3.0': {}
 
+  '@leolee9086/dsh-session-blocks@0.1.0': {}
+
   '@oxc-project/types@0.148.0': {}
 
   '@quansync/fs@1.0.0':
@@ -804,8 +806,6 @@ snapshots:
   devlop@1.1.0:
     dependencies:
       dequal: 2.0.3
-
-  dsh-better-session-query@0.1.1: {}
 
   dts-resolver@3.0.0: {}
 

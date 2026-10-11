@@ -68,7 +68,7 @@
   },
   "dependencies": {
     "@leolee9086/dsh-rule-engine": "0.3.0",
-    "dsh-better-session-query": "0.1.1",
+    "@leolee9086/dsh-session-blocks": "0.1.0",
     "ajv": "^8.20.0",
     "handlebars": "^4.7.10",
     "mdast-util-from-markdown": "^2.1.0",

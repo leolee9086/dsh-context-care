@@ -1,4 +1,4 @@
-import { extractRawBlocks, walkContentBlocks, parseToolArguments } from 'dsh-better-session-query/blocks'
+import { extractRawBlocks, walkContentBlocks, parseToolArguments } from '@leolee9086/dsh-session-blocks'
 
 /** Durable turn identities come from turn/start events, including inherited events after forks. */
 export function sessionTurn(session) {

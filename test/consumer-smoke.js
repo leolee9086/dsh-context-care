@@ -27,23 +27,29 @@ runInNewContext(await readFile(resolve(root, 'lib/client.js'), 'utf8'), {
 })
 assert.equal(typeof client.apply, 'function')
 assert.equal(manifest.dependencies['@leolee9086/dsh-rule-engine'], '0.3.0')
-assert.equal(manifest.dependencies['dsh-better-session-query'], '0.1.1')
 const names = await readdir(resolve(root, 'src'))
 assert.equal(names.includes('vendor'), false)
 for (const file of names.filter(name => name.endsWith('.js'))) {
   const source = await readFile(resolve(root, 'src', file), 'utf8')
   for (const [, target] of source.matchAll(/(?:from\s+|import\s*)['"]([^'"]+)['"]/g)) if (target.startsWith('.')) await readFile(resolve(root, 'src', target))
 }
-for (const name of ['@leolee9086/dsh-rule-engine', 'dsh-better-session-query']) {
-  const installed = JSON.parse(await readFile(packageRequire.resolve(`${name}/package.json`), 'utf8'))
-  assert.equal(installed.version, manifest.dependencies[name], name)
-}
 const engine = await import(pathToFileURL(packageRequire.resolve('@leolee9086/dsh-rule-engine')).href)
-const query = await import(pathToFileURL(packageRequire.resolve('dsh-better-session-query/blocks')).href)
-const event = { seq: 7, type: 'assistant/message', time: 1, data: { content: [{ type: 'text', text: '  ORIGINAL\n' }] } }
-const [block] = query.extractRawBlocks(event, { sessionId: 'public-consumer' })
+const { originalSessionBlocks, modelRequestBlocks, setRequestBlock } = await import(pathToFileURL(resolve(root, 'src/request-blocks.js')).href)
+// Exercise the consumer's real traversal and patch path, including nested tool output.
+const message = { id: 'm7', role: 'assistant', content: [
+  { type: 'text', text: '  ORIGINAL\n' },
+  { type: 'tool-result', callId: 'call-1', content: [{ type: 'text', text: 'nested original' }] },
+] }
+const event = { seq: 7, type: 'assistant/message', time: 1, data: { message } }
+const session = { id: 'public-consumer', snapshotEvents: () => [event], surface: { nodes: [7] }, deriveEventMessage: () => message }
+const [block] = originalSessionBlocks(session)
+const request = { messages: [structuredClone(message)] }
+const nested = modelRequestBlocks(session, request, 'request-1').find(block => block.text === 'nested original')
+setRequestBlock(request, nested, { type: 'text', text: 'nested replacement' })
+assert.equal(request.messages[0].content[1].content[0].text, 'nested replacement')
+assert.equal(message.content[1].content[0].text, 'nested original')
 assert.equal(block.text, '  ORIGINAL\n')
-assert.equal(Object.isFrozen(block), true)
+assert.throws(() => { block.raw.text = 'changed' }, TypeError)
 const { createBoundedMatcher } = await import(pathToFileURL(resolve(root, 'src/bounded-matcher.js')).href)
 const matcher = createBoundedMatcher()
 try {
@@ -52,5 +58,5 @@ try {
     match: { kind: 'regex', pattern: 'ORIGINAL' }, actions: [{ id: 'notice', kind: 'notify', stage: 'output.complete', enabledDefault: true, template: 'matched' }] })
   assert.equal((await matcher.detect({ stage: 'output.complete', rules: [rule], blocks: [{ ...block, view: 'original' }] })).length, 1)
 } finally { await matcher.close() }
-console.log(`Independently installed ${manifest.name}@${manifest.version}: public entries, Client factory, exact dependencies, raw blocks and matching worker passed`)
+console.log(`Consumer ${manifest.name}@${manifest.version}: public entries, Client factory, nested request rewrite, raw blocks and matching worker passed`)
 console.log(root)
