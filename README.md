@@ -52,6 +52,36 @@ Host 行 `dsh-context-care/requests` 通过官方 `llm/stream` waterfall 拦截�
 
 摘要构造与执行共用请求 builder，包含系统头、工具定义、完整选区与末尾指令。摘要路由按自己的容量和 compaction 政策选择能容纳的完整前缀；provider 或最终检查拒绝过大输入后，在配置次数内缩小完整选区重试。提交前核对输入仍相同，并以同一冻结 basis 比较完整主请求，包含检查点包裹文字；文本校准倍率不会被固定 shadow 价格代替。同一会话的摘要执行串行，失败闭合事务并保留历史。`summary` 可覆盖 `provider`、`model`、`maxTokens` 与 `maxRetries`；未覆盖的值取提供方对应会话路由的公开配置。Host 请求观察行还独占 `context_care_requests` 存储域。ready 先持久记录实际路由、完整输入指纹、计价依据与预算，再决定派发；dispatch 和真实输出结算按会话串行更新，保留是否确实派发、输出事件与 usage。摘要的 started、prepared、committed 或 failed 动作关联同一 compactionId。`contextCareRequests.list(sessionId?)` 按时间和 key 稳定排序，`flush(sessionId?)` 等待存储确认；卸载先移除监听再等待写入并关闭 handle。ready 另存完整实际输入的未校准文本价和视觉价；校准只选同输入配置的成功真实对话请求，以 usage 的输入与 cache tokens 减视觉价后除文本价，合法大倍率保留。一次性提示与工具已在分母中，图片视觉价仍独立。没有匹配的合格请求样本时使用倍率 1；旧会话的请求与输出合计压力不会代替输入校准；裁剪和深度替换也记录 started 与 completed/failed、来源 seq 和同依据前后输入价；失败后已提交的缩减仍在记录中标为部分进展。本地错误的 origin/budgetKind 目前属于运行时检查详情，终止 stream 保存稳定错误码与原始消息。普通维护的状态消息计价属于预测，最终 ready 检查完整实际请求。高负载与非常高负载文案保留落盘和维护步骤，只描述请求负载、正文替换及可核对的原记录，不从统计推导失忆、能力下降或身份改变。
 
+## 工具事件规则提醒
+
+已有 `/requests` Host 行提供 `reminderRules`，通过服务注册表复用先注册的实例。规则来源可来自思源或其它插件；无需增加基础运行插件。思源来源由思源插件内部订阅和读取，使用其已启用核心及凭据，不受模型工具的逐端点审批设置影响；模型主动调用思源工具仍按原有端点策略审批。成功的工具结果触发判定，下一自然模型请求的 pre-step 收集提醒，参与原有预算维护并经原生 `user/message` 提交。
+
+来源插件使用 `ctx.inject(['reminderRules'], ...)`，在 effect 中调用 `registerSource({ sourceId, plugin, revision, rules, sessionId? }, { acceptSession? })`，持有返回的 `replace` / `dispose` 句柄。`validateRule(rule)` 使用统一的 `reminder/v1` schema。每条规则声明 `on: tool.succeeded`、`when.tool`、可选参数正则、提醒 `text` 和 `deliver.model.once: surface`；`priority` 默认 0，同组 `exclusiveGroup` 按优先级选取。未知字段报错。
+
+`registerAnalyzer({ ref, revision, module, exportName? })` 注册本地 ESM 模块，默认导出 `analyze({ event, context })`，可以返回 Promise，结果为 JSON 对象。每个分析器每轮执行一次，读取相同基础输入；结果只在匹配阶段汇总到 `facts.<ref>`。例如返回 `{ language: 'ts' }` 的 `typescript` 分析器可以配合：
+
+```yaml
+when:
+  tool: read
+  condition:
+    kind: compare
+    field: facts.typescript.language
+    op: eq
+    value: ts
+```
+
+`registerDetector({ ref, revision, module, exportName? })` 默认调用 `judge({ event, params })`，等待 JSON `{ ok: boolean, facts? }`。规则用 `judge: { ref, revision, params?, timeoutMs? }` 绑定特定版本。两种注册均返回可等待的卸载函数。模块 URL 为本地 `file:`，代码属于已安装插件；Worker 是可终止执行单元，不是运行任意笔记代码的权限沙箱。外部服务事实 RPC 另行扩展，当前输入包括工具参数和有界上下文文本。
+
+在 `/requests` 原有 config 下的 `reminders` 中可设置：单条 `ruleTimeoutMs`（默认250ms）、整轮 `roundTimeoutMs`（1000ms）、`maxConcurrent`（4）、`maxQueued`（128）、初始总规则数 `maxRules`（0，不限）、单次执行及会话留存 `maxBytes`（1MiB）、每会话 `maxCandidates`（128）、`maxIdle`（4）、上下文采样 `maxContextMessages`（8）和 `maxContextChars`（32768）。整轮计时从事件接纳起，包含持久写入等待、排队和 Worker 启动。容量包含等待写入的任务；会话内串行、会话间轮转。
+
+规则目录默认不限条数，全部来源正文也不计入单次执行的 `maxBytes`。打开“会话规则 → 提醒容量”，可查看已注册数量、设置全局条数上限（0表示不限），以及查看最近因容量拒绝的来源与数量。界面设置在持久保存成功后生效，并优先于初始配置；降低上限保留已有规则，只拒绝后续超限增长。提高上限后，思源在下一次刷新时重试。保存失败保持原设置，多窗口修改冲突时刷新后重试。
+
+服务的 `capacitySnapshot()` 返回当前设置、注册数量和拒绝记录；`setCapacity({ revision, maxRules })` 使用全局版本号并等待持久写入。
+
+正则、分析器和异步判定均在真实 Worker 中执行。服务启动时预热并保留最多 `min(maxIdle, maxConcurrent)` 条线程，默认4条；单条预算从就绪线程接收派发时开始，`judge.timeoutMs` 可进一步收紧。冷启动仍受整轮期限和独立启动期限约束。单条超时终止该线程，池会自动补充；启动失败延迟重试，独立规则继续。准备线程不占真实任务接纳名额，实际任务可接手启动中的线程；卸载等待准备与执行线程清理。失败诊断持久保存启动、往返或执行阶段及各阶段耗时。整轮超时或显式取消使本轮候选失效，迟到结果不投递。来源更新、卸载及规则控制变更在投递前再次检查。`snapshot(sessionId)` 提供有界候选、诊断和存储错误状态。
+
+模型投递按来源和规则身份去重，revision 不重置额度。当前 surface 或本次待注入消息已有提醒时抑制重复；fork 继承提醒同样抑制。持久预留携带稳定 messageId，后续收集用会话日志确认提交；明确提交前失败可 rollback，提交情况未知则保留预留。重启后的旧 pending 需要新工具事件重新判定；已提交提醒继续按可见性去重，压缩移除后新事件可重新触发。保存失败会进入插件日志，正常模型请求继续。
+
 ## 模型作用域提醒
 
 `modelScopedPrompts` 按明确的 `provider`、`model` 和 `purposes` 匹配，规则含 `ruleId`、`version`、`text`、`trigger: static | model-switch | output-pattern`；purposes 默认仅 conversation。切换规则以同用途上次真实派发的路由为依据，`initialBind` 默认 false，可显式要求首次提醒。`{boundModelLabel}` 替换为本次路由名。未派发的请求不会更新上次路由；规则卸载后立即停止贡献。

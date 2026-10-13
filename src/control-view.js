@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { CareStyles } from './care-styles.js'
 import { h } from './care-ui.js'
 import { RuleRuntimePanel } from './rule-runtime-view.js'
+import { ReminderCapacityPanel } from './reminder-capacity-view.js'
 
 /** Render acknowledged state, explicit source attribution and independent action preferences. */
 export function ControlPanel({ value, sessionId, changeControls, refreshControls, t }) {
@@ -51,9 +52,9 @@ function SessionRuleManager(props) {
   const [mode, setMode] = useState('rules')
   const { sessionId, t, fetcher } = props
   return h('div', { 'data-care-manager': '', 'data-care-panel': '' }, h(CareStyles),
-    h('nav', { 'aria-label': t('runtimeNavigation') }, ...['rules', 'declarations', 'runs', 'preview'].map(view =>
+    h('nav', { 'aria-label': t('runtimeNavigation') }, ...['rules', 'declarations', 'runs', 'preview', 'capacity'].map(view =>
       h('button', { key: view, type: 'button', 'aria-pressed': mode === view, onClick: () => setMode(view) }, t(`runtime_${view}`)))),
-    mode === 'rules' ? h(ControlPanel, props) : h(RuleRuntimePanel, { key: `${sessionId}:${mode}`, sessionId, mode, t, fetcher }))
+    mode === 'rules' ? h(ControlPanel, props) : mode === 'capacity' ? h(ReminderCapacityPanel, { key: sessionId, sessionId, t, fetcher }) : h(RuleRuntimePanel, { key: `${sessionId}:${mode}`, sessionId, mode, t, fetcher }))
 }
 
 /** A direct opener keeps the controls discoverable from the conversation composer. */

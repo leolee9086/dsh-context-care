@@ -70,3 +70,68 @@ test('real concurrent overload reports admission failure without cancelling admi
   assert.equal(matcher.getStats().active, 0)
   assert.equal((await matcher.detect(input('!$'))).length, 1)
 })
+
+test('a warmed pool preserves four hot workers and replenishes a terminated CPU worker', async t => {
+  const matcher = createBoundedMatcher({ maxPending: 4, maxIdle: 4 })
+  t.after(() => matcher.close())
+  await matcher.warmup()
+  assert.equal(matcher.getStats().idle, 4)
+  const initial = matcher.getStats().workersStarted
+  let dispatches = 0
+  for (let i = 0; i < 8; i++) assert.equal((await matcher.detect(input('!$'), undefined,
+    { onDispatch: () => dispatches++, workTimeoutMs: 50 })).length, 1)
+  assert.equal(dispatches, 8)
+  assert.equal(matcher.getStats().workersStarted, initial)
+  await assert.rejects(matcher.detect(input('(a+)+$'), undefined, { workTimeoutMs: 50 }), error => {
+    assert.match(error.message, /work-timeout/)
+    assert.equal(error.diagnostic.phase, 'processing')
+    return true
+  })
+  const until = Date.now() + 10000
+  while (matcher.getStats().idle !== 4 && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(matcher.getStats().idle, 4)
+  assert.equal(matcher.getStats().workersStarted, initial + 1)
+  assert.equal((await matcher.detect(input('!$'))).length, 1)
+})
+
+test('cancellation while starting preserves startup diagnostic and closes all preparation work', async t => {
+  const matcher = createBoundedMatcher()
+  t.after(() => matcher.close())
+  const controller = new AbortController()
+  const pending = matcher.detect(input('!$'), controller.signal)
+  controller.abort(new Error('reminder-round-timeout'))
+  await assert.rejects(pending, error => {
+    assert.equal(error.diagnostic.phase, 'startup')
+    assert.equal(error.diagnostic.roundTripMs, null)
+    return true
+  })
+  await matcher.close()
+  assert.equal(matcher.getStats().active, 0)
+  assert.equal(matcher.getStats().idle, 0)
+})
+
+test('four real tasks can take over preparation without losing admission slots or creating extra workers', async t => {
+  const matcher = createBoundedMatcher({ maxPending: 4, maxIdle: 4 })
+  t.after(() => matcher.close())
+  const preparation = matcher.warmup()
+  await Promise.resolve()
+  assert.equal(matcher.getStats().preparing, 4)
+  assert.equal(matcher.getStats().active, 0)
+  const work = Array.from({ length: 4 }, () => matcher.detect(input('!$')))
+  const results = await Promise.all(work)
+  await preparation
+  assert.ok(results.every(result => result.length === 1))
+  assert.equal(matcher.getStats().workersStarted, 4)
+  assert.equal(matcher.getStats().idle, 4)
+})
+
+test('close drains workers still in preparation', async () => {
+  const matcher = createBoundedMatcher({ maxPending: 4, maxIdle: 4 })
+  const preparation = matcher.warmup().catch(error => error)
+  await Promise.resolve()
+  await matcher.close()
+  assert.match((await preparation).message, /closed/)
+  assert.equal(matcher.getStats().preparing, 0)
+  assert.equal(matcher.getStats().idle, 0)
+  assert.equal(matcher.getStats().active, 0)
+})

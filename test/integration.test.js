@@ -144,6 +144,64 @@ async function boot(root, completion = true, config = {}, completionConfig = {},
   }
 }
 
+test('reminder capacity API saves global settings and restores them through real storage', async t => {
+  const owned = await fixture(t, false)
+  const ctx = await owned.open()
+  const { base, cookie } = await controlCookie(ctx)
+  ctx.sessions.create('capacity-test')
+  const url = `${base}/context-care/rules?sessionId=capacity-test&scope=reminder-capacity`
+  assert.equal((await fetch(url)).status, 401)
+  const initial = await (await fetch(url, { headers: { cookie } })).json()
+  assert.equal(initial.maxRules, 0)
+  const patch = body => fetch(url, { method: 'PATCH', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body) })
+  const saved = await patch({ revision: initial.revision, maxRules: 1500 })
+  assert.equal(saved.status, 200)
+  assert.equal((await saved.json()).maxRules, 1500)
+  assert.equal(ctx.get('reminderRules').capacitySnapshot().maxRules, 1500)
+  assert.equal((await patch({ revision: initial.revision, maxRules: 0 })).status, 409)
+  assert.equal((await patch({ revision: initial.revision + 1, maxRules: -1 })).status, 400)
+  await owned.close(ctx)
+  const reopened = await owned.open()
+  assert.equal(reopened.get('reminderRules').capacitySnapshot().maxRules, 1500)
+  assert.equal(reopened.get('reminderRules').capacitySnapshot().revision, initial.revision + 1)
+  await owned.close(reopened)
+})
+
+test('reminder service connects tool results to logged pre-step messages through real Loader', async t => {
+  const owned = await fixture(t, false, {}, {}, { reminders: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
+  const ctx = await owned.open()
+  const service = ctx.get('reminderRules')
+  assert.ok(service)
+  const { ensureReminderService } = await pluginModule('reminder-runtime/index.js')
+  assert.equal(await ensureReminderService(ctx, {}, ctx.contextCareControls), service)
+  ctx.effect(() => service.registerSource({ sourceId: 'integration-reminder', plugin: 'test', revision: 1, rules: [{
+    format: 'reminder/v1', id: 'ts', on: 'tool.succeeded', text: '禁止使用 any',
+    when: { tool: 'reminder_read', arguments: { file_path: { regex: '\\.ts$' } } }, deliver: { model: { once: 'surface' } },
+  }] }).dispose)
+  ctx.effect(() => ctx.tools.register({ name: 'reminder_read', description: 'Read fixture text',
+    parameters: { type: 'object', properties: { file_path: { type: 'string' } }, required: ['file_path'] },
+    output: { schema: { type: 'object' }, render: () => [{ type: 'text', text: 'export const value = 1' }] },
+    async execute() { return { summary: 'export const value = 1' } } }))
+  class ReminderAdapter extends CompletionAdapter {
+    requests = []
+    async *stream(request) { this.requests.push(request); yield* super.stream(request) }
+  }
+  const adapter = new ReminderAdapter([
+    { blocks: [{ type: 'tool-call', id: 'reminder-1', name: 'reminder_read', arguments: JSON.stringify({ file_path: 'x.ts' }) }] },
+    { blocks: [{ type: 'tool-call', id: 'reminder-2', name: 'reminder_read', arguments: JSON.stringify({ file_path: 'y.ts' }) }] },
+    { blocks: [{ type: 'text', text: 'Read both files.' }] },
+  ])
+  ctx.llm.registerAdapter(['care-test'], adapter)
+  const agent = await ctx.agentLoop.create('reminder-integration', { provider: 'care-test', model: 'care-test' })
+  await completionTurn(ctx, agent)
+  const notices = agent.session.snapshotEvents().filter(event => event.type === 'user/message' && event.data.source?.kind === 'plugin:dsh-context-care:reminder')
+  assert.equal(notices.length, 1, JSON.stringify(service.snapshot(agent.id)))
+  assert.equal(notices[0].data.content[0].text, '禁止使用 any')
+  assert.match(JSON.stringify(adapter.requests.at(-1).messages), /禁止使用 any/)
+  await owned.close(ctx)
+  assert.equal(ctx.get('reminderRules'), undefined)
+})
+
 test('exported Host rows mount together, serve the journal, and remove routes and tools on unload', async t => {
   const owned = await fixture(t)
   const ctx = await owned.open()

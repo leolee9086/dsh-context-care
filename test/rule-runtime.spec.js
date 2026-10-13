@@ -2,6 +2,7 @@ import { test, expect, vi, afterEach } from 'vitest'
 import { createElement as h } from 'react'
 import { render, fireEvent, waitFor, cleanup, act } from '@testing-library/react'
 import { RuleRuntimePanel } from '../src/rule-runtime-view.js'
+import { ReminderCapacityPanel } from '../src/reminder-capacity-view.js'
 import { ContextCareControls } from '../src/control-view.js'
 import { controlCopy } from '../src/control-copy.js'
 const t = key => controlCopy.zh[key] ?? key
@@ -13,6 +14,36 @@ const page = (patch = {}) => ({ sessionId: 'one', snapshotId: 'snapshot-one', tu
 const preview = (patch = {}) => ({ sessionId: 'one', snapshotId: 'snapshot-one', injectedChars: 7, documents: [], records: [], scheduled: [],
   diff: { before: { messages: [{ role: 'user', content: 'original' }] }, after: { messages: [{ role: 'user', content: 'changed' }] } }, ...patch })
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks() })
+
+test('reminder capacity waits for acknowledgement and preserves effective limits after failed saves', async () => {
+  let finish, fail = false
+  const initial = { revision: 0, maxRules: 0, registeredRules: 2000, rejections: [] }
+  const fetcher = vi.fn(async (url, options) => {
+    expect(url).toContain('scope=reminder-capacity')
+    if (options.method !== 'PATCH') return reply(initial)
+    if (fail) return { ok: false, status: 503, headers: { get: () => 'application/json' }, json: async () => ({ error: 'disk-failed' }) }
+    return new Promise(resolve => { finish = () => resolve(reply({ ...initial, ...JSON.parse(options.body), revision: 1 })) })
+  })
+  const view = render(h(ReminderCapacityPanel, { sessionId: 'one', t, fetcher }))
+  await waitFor(() => expect(view.getByText('2000')).toBeTruthy())
+  const input = view.getByRole('spinbutton')
+  fireEvent.change(input, { target: { value: '1500' } })
+  fireEvent.click(view.getByRole('button', { name: '保存容量设置' }))
+  await waitFor(() => expect(finish).toBeTypeOf('function'))
+  expect(view.getByText('不限制')).toBeTruthy()
+  expect(view.getByRole('button', { name: '保存容量设置' }).disabled).toBe(true)
+  await act(async () => finish())
+  expect(view.getByText('已保存')).toBeTruthy()
+  expect(view.getByText('1500')).toBeTruthy()
+  expect(view.getByText(/现有规则超过新上限/)).toBeTruthy()
+  fail = true
+  fireEvent.change(input, { target: { value: '0' } })
+  fireEvent.click(view.getByRole('button', { name: '保存容量设置' }))
+  await waitFor(() => expect(view.getByRole('alert').textContent).toContain('disk-failed'))
+  expect(view.getByText('1500')).toBeTruthy()
+  expect(view.queryByText('已保存')).toBeNull()
+  expect(JSON.parse(fetcher.mock.calls.at(-1)[1].body)).toEqual({ revision: 1, maxRules: 0 })
+})
 
 test('declarations show foreign sources, templates and current variables without authoring controls; JSON mounts on demand', async () => {
   const data = page({ documents: [{ id: 'foreign', revision: 3, title: 'Foreign document', sourceId: 'foreign-source', plugin: 'memory', registration: 'memory/entry',

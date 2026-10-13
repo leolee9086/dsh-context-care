@@ -1,4 +1,5 @@
 import { ControlPatch, ControlError } from './rule-controls.js'
+import { CapacitySettings, CapacityError } from './reminder-capacity.js'
 
 /** Install authenticated session controls; authorization is required even on loopback. */
 export function installControlRoute(ctx) {
@@ -12,11 +13,15 @@ export function installControlRoute(ctx) {
     const rejected = connection.requestRejection(req)
     if (rejected !== undefined) { respond(rejected, { error: 'unauthorized' }); return }
     if (!['GET', 'PATCH'].includes(req.method)) { res.setHeader('allow', 'GET, PATCH'); respond(405, { error: 'method-not-allowed' }); return }
-    const sessionId = new URL(req.url, 'http://localhost').searchParams.get('sessionId')
+    const params = new URL(req.url, 'http://localhost').searchParams
+    const sessionId = params.get('sessionId')
+    const capacity = params.get('scope') === 'reminder-capacity'
     if (!sessionId || !ctx.sessions.get(sessionId)) { respond(404, { error: 'session-unavailable' }); return }
     const controls = ctx.contextCareRequests.controls
     try {
-      if (req.method === 'GET') { respond(200, controls.snapshot(sessionId)); return }
+      const reminders = capacity && ctx.get('reminderRules')
+      if (capacity && !reminders) { respond(503, { error: 'reminder-service-unavailable' }); return }
+      if (req.method === 'GET') { respond(200, capacity ? reminders.capacitySnapshot() : controls.snapshot(sessionId)); return }
       // A same-origin JSON write cannot be submitted by a cross-origin HTML form.
       const origin = req.headers.origin
       if (origin) {
@@ -37,13 +42,14 @@ export function installControlRoute(ctx) {
         parts.push(chunk)
       }
       let change
-      try { change = ControlPatch.parse(JSON.parse(Buffer.concat(parts.map(part => Buffer.from(part))).toString('utf8'))) }
+      try { change = (capacity ? CapacitySettings : ControlPatch).parse(JSON.parse(Buffer.concat(parts.map(part => Buffer.from(part))).toString('utf8'))) }
       catch (error) {
         if (!(error instanceof SyntaxError) && error?.name !== 'ZodError') throw error
         respond(400, { error: 'invalid-control-request' }); return
       }
-      respond(200, await controls.patch(sessionId, change))
+      respond(200, capacity ? await reminders.setCapacity(change) : await controls.patch(sessionId, change))
     } catch (error) {
+      if (error instanceof CapacityError) { respond(error.status, { error: error.message }); return }
       if (error instanceof ControlError) {
         if (error.status >= 500) ctx.logger.warn(`context-care: control save failed: ${String(error.cause ?? error)}`)
         respond(error.status, { error: error.code })

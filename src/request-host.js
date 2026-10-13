@@ -12,6 +12,7 @@ import { recordSecondaryFailure } from './secondary-failure.js'
 import { releaseResources } from './resource-cleanup.js'
 import { openWorkbenchHost } from './workbench-host.js'
 import { MatcherFailure } from './bounded-matcher.js'
+import { ensureReminderService, ReminderConfig } from './reminder-runtime/index.js'
 
 export const name = 'context-care-requests'
 export const inject = ['agents', 'sessions', 'tools', 'llm', 'tokenMeter', 'storageDomain']
@@ -33,6 +34,7 @@ export const Config = z.object({ ruleFiles: z.array(z.string().min(1).max(4096))
     maxBytes: z.number().int().min(1).max(33554432).default(4194304),
     maxPending: z.number().int().min(1).max(64).default(4),
     maxIdle: z.number().int().min(0).max(64).default(2) }).strict().prefault({}),
+  reminders: ReminderConfig,
   // Only an explicit requirement can stop dispatch on a failed request transformation.
   requiredStages: z.array(z.literal('request.assemble')).max(1).default([]),
 }).strict().prefault({})
@@ -76,6 +78,7 @@ export async function apply(ctx, config = {}) {
   }
   ctx.provide('contextCareWorkbench', workbench)
   ctx.effect(() => () => workbench.close())
+  await ensureReminderService(ctx, Config.parse(config).reminders, controls)
   let dispatchOrder = journal.list().reduce((latest, record) => Math.max(latest, record.data.dispatchOrder ?? 0), 0)
   const owners = new Set()
   const calls = new Map()

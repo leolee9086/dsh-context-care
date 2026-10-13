@@ -701,6 +701,12 @@ export function installContextCare(ctx, raw, compactionSource) {
 
   async function collectInputs(agent, signal, accepted, current) {
     const messages = [...accepted]
+    const reminders = ctx.get('reminderRules')
+    if (reminders) {
+      try { messages.push(...await reminders.collect({ sessionId: String(agent.session.id), visible: agent.session.deriveMessages(), accepted,
+        committedIds: agent.session.snapshotEvents().filter(event => event.type === 'user/message').map(event => event.data.id), signal })) }
+      catch (error) { if (signal.aborted) throw error; ctx.logger.warn(`context-care: 规则提醒收集失败: ${error.message}`) }
+    }
     try {
       messages.push(...noticeRules.collect({ agent, messages: accepted, facts: careFacts(current, agent.session) }))
     } catch (error) {
@@ -832,6 +838,8 @@ export function installContextCare(ctx, raw, compactionSource) {
         }
       }
     } catch (error) {
+      await ctx.get('reminderRules')?.rollback(String(agent.session.id), messages)
+        .catch(failure => ctx.logger.warn(`reminder rollback: ${failure.message}`))
       if (signal.aborted) throw error
       if (!requested) throw error
       ctx.logger.warn(`context-care: ${error instanceof Error ? error.message : String(error)}`)
@@ -839,6 +847,13 @@ export function installContextCare(ctx, raw, compactionSource) {
       current = { state: { fatigue: 'unknown', fatigueValue: null, wakefulness: 'unknown', wakefulnessValue: null } }
     }
     if (deepCompleted) messages = messages.filter(message => message !== restRequest)
+    const reminderService = ctx.get('reminderRules')
+    if (reminderService) {
+      const filtered = reminderService.filterMessages(String(agent.session.id), agent.session.deriveMessages(), messages)
+      await reminderService.rollback(String(agent.session.id), messages.filter(message => !filtered.includes(message)))
+        .catch(error => ctx.logger.warn(`reminder rollback: ${error.message}`))
+      messages = filtered
+    }
 
     controls.sample(String(agent.session.id), current.state)
     const text = stateText(agent, current.state, outcome, requested)
