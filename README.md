@@ -6,7 +6,7 @@
 
 参考 S-forge MAGI 的指标曲线和 Codex 的上下文生命周期设计，以独立 Cordis 插件接入，不修改 Harness、S-forge 或 Codex 源码。本文档以中文为主。
 
-> 发行版本：`v0.8.2`，面向官方 DSH `0.2.0-rc.2`。通过 GitHub 标签安装，客户端构建产物已入库。完整真实 Client 验收尚未完成，验证范围见[版本记录](artifacts/RELEASE-0.8.2.md)。
+> 发行版本：`v0.10.0`，面向官方 DSH `0.2.0-rc.2`。通过 GitHub 标签或 Release 发行包安装，标签包含客户端构建产物。晚间思源规则配合 `dsh-plugin-siyuan v0.5.0` 使用。
 
 ## 指标与行为
 
@@ -52,11 +52,23 @@ Host 行 `dsh-context-care/requests` 通过官方 `llm/stream` waterfall 拦截�
 
 摘要构造与执行共用请求 builder，包含系统头、工具定义、完整选区与末尾指令。摘要路由按自己的容量和 compaction 政策选择能容纳的完整前缀；provider 或最终检查拒绝过大输入后，在配置次数内缩小完整选区重试。提交前核对输入仍相同，并以同一冻结 basis 比较完整主请求，包含检查点包裹文字；文本校准倍率不会被固定 shadow 价格代替。同一会话的摘要执行串行，失败闭合事务并保留历史。`summary` 可覆盖 `provider`、`model`、`maxTokens` 与 `maxRetries`；未覆盖的值取提供方对应会话路由的公开配置。Host 请求观察行还独占 `context_care_requests` 存储域。ready 先持久记录实际路由、完整输入指纹、计价依据与预算，再决定派发；dispatch 和真实输出结算按会话串行更新，保留是否确实派发、输出事件与 usage。摘要的 started、prepared、committed 或 failed 动作关联同一 compactionId。`contextCareRequests.list(sessionId?)` 按时间和 key 稳定排序，`flush(sessionId?)` 等待存储确认；卸载先移除监听再等待写入并关闭 handle。ready 另存完整实际输入的未校准文本价和视觉价；校准只选同输入配置的成功真实对话请求，以 usage 的输入与 cache tokens 减视觉价后除文本价，合法大倍率保留。一次性提示与工具已在分母中，图片视觉价仍独立。没有匹配的合格请求样本时使用倍率 1；旧会话的请求与输出合计压力不会代替输入校准；裁剪和深度替换也记录 started 与 completed/failed、来源 seq 和同依据前后输入价；失败后已提交的缩减仍在记录中标为部分进展。本地错误的 origin/budgetKind 目前属于运行时检查详情，终止 stream 保存稳定错误码与原始消息。普通维护的状态消息计价属于预测，最终 ready 检查完整实际请求。高负载与非常高负载文案保留落盘和维护步骤，只描述请求负载、正文替换及可核对的原记录，不从统计推导失忆、能力下降或身份改变。
 
-## 工具事件规则提醒
+## 规则提醒与晚间休息
+
+`reminder/v1` 保留工具成功事件；`reminder/v2` 在 `request.before` 判定，纯聊天也能触发。v2 的 `when` 支持 `timeWindow: { start: "23:00", end: "06:00", timeZone: local }`、`humanActivity: { withinSeconds: 300 }` 和可选条件树 `condition`。时间采用 Host 本机时区，开始包含、结束不包含；两个时间必须不同。近期真人输入根据持久入队事件的 `source.kind: user` 与首次入队时间确定；插件消息、自动续跑和继承的 fork 历史不刷新在场时间。人工审批暂未作为在场证据。
+
+`deliver.model.once: window` 要求声明时间窗口，在当前会话、来源和规则身份内每个窗口最多投递一次。跨午夜按开始日期归属；正文编辑、压缩、候选清理和重启保留去重，次晚可重新提醒，即使上晚正文仍可见。窗口占额与候选一起持久确认；已知提交前失败可回滚，无法确定是否提交的交付保留占额。`surface` 沿用可见上下文去重。旧存储记录可由新增的可选 `windows` 字段直接读取；写过窗口记录的存储应使用支持 v2 的版本打开。
+
+当伙伴说“今晚不再提醒”，模型调用 `reminder_snooze`。空参数暂停当前会话所有正在生效的窗口提醒；同时传 `sourceId` 与 `ruleId` 可只暂停一条。暂缓持久到窗口结束，重启后仍有效。该工具也可在首次提醒前调用；窗口之外返回当前无可暂停提醒。领域服务提供 `snooze({ sessionId, sourceId?, ruleId? })`，返回被暂停的规则与结束时间。
+
+自然请求入口调用 `prepareRequest({ sessionId, events, visible, accepted, signal })`，读取会话事件后运行分析器与判定器，再按既有 `collect` / `filterMessages` / `rollback` 交付。分析器和判定器可以读取 `event.clock: { at, timeZone }` 与 `event.humanActivity: { at, evidence } | null`。时间和在场条件先由运行时判定，worker 事实不能覆盖它们；投递前再次检查时间和在场有效期。
+
+晚间规则的示例正文应明确：人类伙伴可能因晚睡影响健康；结合当前任务判断紧急程度，没有紧急任务时温和建议早点睡，尊重伙伴选择。示例窗口 23:00–06:00、在场有效期 300 秒均由规则显式声明，可以调整。规则只在自然请求前提醒，不创建后台对话、不停止任务。完整思源 callout 见[思源规则教程](https://github.com/leolee9086/dsh-plugin-siyuan/blob/main/docs/规则编写教程.md#11-自然请求与晚间休息提醒)。
+
+### 工具事件规则提醒
 
 已有 `/requests` Host 行提供 `reminderRules`，通过服务注册表复用先注册的实例。规则来源可来自思源或其它插件；无需增加基础运行插件。思源来源由思源插件内部订阅和读取，使用其已启用核心及凭据，不受模型工具的逐端点审批设置影响；模型主动调用思源工具仍按原有端点策略审批。成功的工具结果触发判定，下一自然模型请求的 pre-step 收集提醒，参与原有预算维护并经原生 `user/message` 提交。
 
-来源插件使用 `ctx.inject(['reminderRules'], ...)`，在 effect 中调用 `registerSource({ sourceId, plugin, revision, rules, sessionId? }, { acceptSession? })`，持有返回的 `replace` / `dispose` 句柄。`validateRule(rule)` 使用统一的 `reminder/v1` schema。每条规则声明 `on: tool.succeeded`、`when.tool`、可选参数正则、提醒 `text` 和 `deliver.model.once: surface`；`priority` 默认 0，同组 `exclusiveGroup` 按优先级选取。未知字段报错。
+来源插件使用 `ctx.inject(['reminderRules'], ...)`，在 effect 中调用 `registerSource({ sourceId, plugin, revision, rules, sessionId? }, { acceptSession? })`，持有返回的 `replace` / `dispose` 句柄。`validateRule(rule)` 统一校验 `reminder/v1` 与 `reminder/v2`；下面是 v1 工具事件格式。每条规则声明 `on: tool.succeeded`、`when.tool`、可选参数正则、提醒 `text` 和 `deliver.model.once: surface`；`priority` 默认 0，同组 `exclusiveGroup` 按优先级选取。未知字段报错。
 
 `registerAnalyzer({ ref, revision, module, exportName? })` 注册本地 ESM 模块，默认导出 `analyze({ event, context })`，可以返回 Promise，结果为 JSON 对象。每个分析器每轮执行一次，读取相同基础输入；结果只在匹配阶段汇总到 `facts.<ref>`。例如返回 `{ language: 'ts' }` 的 `typescript` 分析器可以配合：
 
@@ -287,11 +299,11 @@ UI 优先显示当前进程最近一次请求边界的独立数值采样，关�
 
 ## 安装
 
-运行环境需要 Node.js 22.19.0 或更新版本。开发树通过标准包依赖使用 `@leolee9086/dsh-rule-engine@0.3.0` 与独立分块库 `@leolee9086/dsh-session-blocks@0.1.0`，不再直接依赖查询插件，也没有内嵌分块副本。分块库 0.1.0 已发布到 npm，并已通过普通 `pnpm install` 安装及消费者分块/改写/匹配验证。下方安装命令仍指向已发布的 v0.8.2，该标签保留原有依赖；本次迁移属于后续开发提交。
+运行环境需要 Node.js 22.19.0 或更新版本。开发树通过标准包依赖使用 `@leolee9086/dsh-rule-engine@0.3.0` 与独立分块库 `@leolee9086/dsh-session-blocks@0.1.0`，不再直接依赖查询插件，也没有内嵌分块副本。分块库 0.1.0 已发布到 npm，并已通过普通 `pnpm install` 安装及消费者分块/改写/匹配验证。发行版本使用上述标准 npm 依赖。
 
 刚发布的依赖受 pnpm 的 `minimumReleaseAge` 政策约束。本机 pnpm 11.7.0 与 12.6.0 的冻结锁文件安装都因两个版本未满24小时而失败；pnpm 11.7.0 的普通 `add` 成功，但自动在消费目录记录了两个精确版本的 `minimumReleaseAgeExclude`。这与无豁免安装不同。保持该政策且没有精确版本批准的环境应等待其发布时间窗口满足后再安装；本仓库不分发豁免，不修改消费者的全局设置。
 
-GitHub 标签已包含客户端构建产物；包没有 `prepare`、`prepack` 或安装生命周期脚本。官方插件管理器的包来源可直接填写 `github:leolee9086/dsh-context-care#v0.8.2`。普通 pnpm 安装不需要 `allowBuilds`、`--ignore-scripts` 或 `blockExoticSubdeps` 例外。v0.8.0 的安装契约问题和历史验证限制保留在更新记录中。
+GitHub 标签已包含客户端构建产物；包没有 `prepare`、`prepack` 或安装生命周期脚本。官方插件管理器的包来源可直接填写 `github:leolee9086/dsh-context-care#v0.10.0`。普通 pnpm 安装不需要 `allowBuilds`、`--ignore-scripts` 或 `blockExoticSubdeps` 例外。v0.8.0 的安装契约问题和历史验证限制保留在更新记录中。
 
 ### 安装发行包
 
@@ -305,10 +317,10 @@ Host 代码更新后需要重启 DSH，再刷新页面；重新启用条目不�
 
 ### 从 GitHub 安装
 
-使用固定的 `v0.8.2` 标签：
+使用固定的 `v0.10.0` 标签：
 
 ```sh
-dsh plugin --profile web add "github:leolee9086/dsh-context-care#v0.8.2"
+dsh plugin --profile web add "github:leolee9086/dsh-context-care#v0.10.0"
 ```
 
 构建产物 `lib/` 已入库，装完即可用 —— 不需要额外构建，也不需要手工打包上传 tgz。带上标签安装，版本不会跟着分支漂。

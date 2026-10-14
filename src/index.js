@@ -615,6 +615,23 @@ export function installContextCare(ctx, raw, compactionSource) {
 
   ctx.effect(() => ctx.tools.register(contextStatusTool))
   ctx.effect(() => ctx.tools.register(contextRestTool))
+  ctx.effect(() => ctx.tools.register({
+    name: 'reminder_snooze',
+    description: '当人类伙伴说今晚不再提醒时，暂停当前会话的时间窗口提醒，窗口结束后自动恢复。不传标识时暂停所有当前窗口提醒；只暂停一条时同时传 sourceId 和 ruleId。',
+    parameters: { type: 'object', additionalProperties: false, properties: {
+      sourceId: { type: 'string', minLength: 1 }, ruleId: { type: 'string', minLength: 1 },
+    } },
+    output: { schema: { type: 'string' }, render: (_args, text) => [{ type: 'text', text }] },
+    async execute(args, exec) {
+      if (!exec.agent) throw new Error('reminder_snooze 需要一个所属会话')
+      exec.signal.throwIfAborted()
+      const reminders = ctx.get('reminderRules')
+      if (!reminders?.snooze) throw new Error('当前提醒服务不支持时间窗口暂缓')
+      const result = await reminders.snooze({ sessionId: String(exec.agent.session.id), sourceId: args.sourceId, ruleId: args.ruleId })
+      return result.length ? `已暂停 ${result.length} 条当前窗口提醒，窗口结束后自动恢复。` : '当前没有可暂停的时间窗口提醒。'
+    },
+    presentCall: () => ({ card: 'generic', title: '暂停当前窗口提醒', kind: 'other' }),
+  }))
 
   const requestOwner = {
     owns: agent => ctx.tools.get('context_rest', agent) === contextRestTool,
@@ -703,8 +720,12 @@ export function installContextCare(ctx, raw, compactionSource) {
     const messages = [...accepted]
     const reminders = ctx.get('reminderRules')
     if (reminders) {
-      try { messages.push(...await reminders.collect({ sessionId: String(agent.session.id), visible: agent.session.deriveMessages(), accepted,
-        committedIds: agent.session.snapshotEvents().filter(event => event.type === 'user/message').map(event => event.data.id), signal })) }
+      try {
+        const sessionId = String(agent.session.id), events = agent.session.snapshotEvents(), visible = agent.session.deriveMessages()
+        await reminders.prepareRequest?.({ sessionId, events, visible, accepted, signal })
+        messages.push(...await reminders.collect({ sessionId, visible, accepted,
+          committedIds: events.filter(event => event.type === 'user/message').map(event => event.data.id), signal }))
+      }
       catch (error) { if (signal.aborted) throw error; ctx.logger.warn(`context-care: 规则提醒收集失败: ${error.message}`) }
     }
     try {

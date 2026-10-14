@@ -5,6 +5,7 @@ import { createBoundedMatcher } from '../bounded-matcher.js'
 import { Source, ReminderConfig, compileRule } from './schema.js'
 import { CapacitySettings, CapacityError } from '../reminder-capacity.js'
 import { releaseResources } from '../resource-cleanup.js'
+import { localWindow, humanActivity, requestContext, requestEligible } from './request-context.js'
 export { ReminderConfig } from './schema.js'
 
 export const REMINDER_SERVICE = 'reminderRules'
@@ -16,14 +17,15 @@ const Detector = z.object({ ref: z.string().min(1), revision: z.number().int().p
   module: z.string().url().refine(value => new URL(value).protocol === 'file:', 'detector module must be a local file URL'),
   exportName: z.string().min(1).default('judge') }).strict()
 export const REMINDER_DOMAIN = { name: 'context_care_reminders', version: 1, layout: 'per-record',
-  tables: { sessions: { valueSchema: z.object({ seen: z.array(z.string()), candidates: z.array(z.json()), diagnostics: z.array(z.json()) }).strict() } } }
+  tables: { sessions: { valueSchema: z.object({ seen: z.array(z.string()), candidates: z.array(z.json()), diagnostics: z.array(z.json()),
+    windows: z.array(z.object({ key: z.string(), until: z.number(), messageId: z.string().optional() }).strict()).optional() }).strict() } } }
 
 /** One runtime owns source snapshots, evaluation lifetimes and durable candidate records.
  * save ACKs before publishing state; execute must settle cancellation after its worker stops.
  * No Cordis or live session objects enter the scheduler. */
 export function createReminderRuntime({ config: input, entries = [], save = async () => {}, execute,
   capacity, saveCapacity = async () => {}, dispatches = false,
-  now = () => performance.now(), eligible = () => true, epoch = () => 0, report = () => {} } = {}) {
+  wallNow = () => Date.now(), now = () => performance.now(), eligible = () => true, epoch = () => 0, report = () => {} } = {}) {
   const config = ReminderConfig.parse(input)
   let settings = CapacitySettings.parse(capacity ?? { revision: 0, maxRules: config.maxRules })
   let capacityWrite = Promise.resolve()
@@ -41,6 +43,11 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
   async function update(id, change) {
     return serial(id, async () => {
       const next = clone(records.get(id) ?? empty())
+      // Window claims outlive candidate eviction and surface compaction, but expire at the local window end.
+      next.windows = (next.windows ?? []).filter(item => item.until > wallNow())
+      for (const candidate of next.candidates) {
+        if (candidate.window && wallNow() >= candidate.window.end) candidate.status = 'discarded'
+      }
       const value = change(next)
       next.diagnostics = next.diagnostics.slice(-config.maxCandidates)
       next.seen = next.seen.slice(-config.maxQueued * 4)
@@ -56,6 +63,11 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
       records.set(id, next)
       return value
     })
+  }
+  function fresh(candidate) {
+    const at = wallNow()
+    if (candidate.window && (at < candidate.window.start || at >= candidate.window.end)) return false
+    return !candidate.request || requestEligible(candidate.rule, { ...candidate.request, clock: { at } })
   }
   function current(candidate) {
     const source = sources.get(candidate.sourceId)
@@ -132,9 +144,14 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
         if (result.ok) {
           if (rule.exclusiveGroup) winners.add(rule.exclusiveGroup)
           results.push({ id: randomUUID(), sessionId: event.sessionId, sourceId: source.sourceId, sourceToken: token, ruleId: rule.id,
-            key: keyOf(source.sourceId, rule.id), revision: source.revision, policy, text: rule.text,
+            key: item.window ? JSON.stringify([source.sourceId, rule.id, 'model', item.window.id]) : keyOf(source.sourceId, rule.id),
+            ...(item.window ? { window: item.window } : {}),
+            ...(rule.on === 'request.before' ? { request: { type: event.type, humanActivity: event.humanActivity } } : {}),
+            revision: source.revision, policy, text: rule.text,
             title: rule.title ?? rule.id, eventId: event.callId, rootCallId: event.rootCallId,
-            status: 'pending', evidence: result, rule: clone(source.rules.find(value => value.id === rule.id)) })
+            status: 'pending', evidence: rule.on === 'request.before'
+              ? { ...result, clock: event.clock, humanActivity: event.humanActivity } : result,
+            rule: clone(source.rules.find(value => value.id === rule.id)) })
         }
         diagnostics.push({ ruleId: rule.id, sourceId: source.sourceId, eventId: event.callId, status: result.ok ? 'matched' : 'unmatched' })
       } catch (error) {
@@ -149,6 +166,7 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
       for (const candidate of results) {
         if (controller.signal.aborted || closed || !current(candidate) || !eligible(event.sessionId, candidate.sourceId, candidate.ruleId)
           || epoch(event.sessionId, candidate.sourceId, candidate.ruleId) !== candidate.policy) continue
+        for (const old of state.candidates) if (old.status === 'pending' && !fresh(old)) old.status = 'discarded'
         if (!state.candidates.some(old => old.key === candidate.key && old.status === 'pending' && current(old))) state.candidates.push(candidate)
       }
     })
@@ -157,6 +175,36 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
   const capacitySnapshot = () => clone({ ...settings, registeredRules: registeredRules(), rejections: [...rejectedSources.values()] })
   return {
     capacitySnapshot,
+    /** Evaluate natural conversation at the same boundary that collects tool reminders. */
+    async prepareRequest({ sessionId, events, visible = [], accepted = [], signal }) {
+      if (![...sources.values()].some(source => source.compiled.some(rule => rule.on === 'request.before'))) return
+      const at = wallNow(), callId = `request:${randomUUID()}`
+      await this.submit({ type: 'request.before', sessionId, callId, rootCallId: callId,
+        clock: { at, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone },
+        humanActivity: humanActivity(events), context: requestContext([...visible, ...accepted], config) }, signal)
+    },
+    /** Persist suppression through the active calendar window; omitted identity selects all window rules. */
+    async snooze({ sessionId, sourceId, ruleId }) {
+      if (closed) throw new Error('reminder-runtime-closed')
+      if ((sourceId === undefined) !== (ruleId === undefined)) throw new Error('sourceId and ruleId must be supplied together')
+      const selected = [...sources.values()].filter(source => source.acceptSession(sessionId)
+        && (source.value.sessionId === undefined || source.value.sessionId === sessionId)
+        && (sourceId === undefined || source.value.sourceId === sourceId))
+        .flatMap(source => source.compiled.filter(rule => rule.deliver.model.once === 'window'
+          && (ruleId === undefined || rule.id === ruleId)).map(rule => ({ sourceId: source.value.sourceId, rule })))
+      return update(sessionId, state => {
+        const suppressed = []
+        for (const item of selected) {
+          const window = localWindow(item.rule.when.timeWindow, wallNow())
+          if (!window) continue
+          const key = JSON.stringify([item.sourceId, item.rule.id, 'model', window.id])
+          state.windows = state.windows.filter(claim => claim.key !== key)
+          state.windows.push({ key, until: window.end })
+          suppressed.push({ sourceId: item.sourceId, ruleId: item.rule.id, until: window.end })
+        }
+        return suppressed
+      })
+    },
     setCapacity(input) {
       const change = CapacitySettings.parse(input)
       const task = capacityWrite.catch(() => {}).then(async () => {
@@ -237,9 +285,10 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
       if (Buffer.byteLength(serialized) > config.maxBytes) return Promise.reject(new Error('reminder-input-budget-exceeded'))
       const event = JSON.parse(serialized)
       const items = [...sources.values()].filter(item => item.acceptSession(event.sessionId) && (item.value.sessionId === undefined || item.value.sessionId === event.sessionId))
-        .flatMap(item => item.compiled.filter(rule => rule.when.tool === event.name && eligible(event.sessionId, item.value.sourceId, rule.id))
+        .flatMap(item => item.compiled.filter(rule => requestEligible(rule, event) && eligible(event.sessionId, item.value.sourceId, rule.id))
           .map(rule => ({ rule, source: item.value, token: item.token, policy: epoch(event.sessionId, item.value.sourceId, rule.id),
-            judge: rule.judge && detectors.get(rule.judge.ref) })))
+            judge: rule.judge && detectors.get(rule.judge.ref),
+            window: rule.deliver.model.once === 'window' ? localWindow(rule.when.timeWindow, event.clock?.at) : undefined })))
         .sort((a, b) => b.rule.priority - a.rule.priority || a.source.sourceId.localeCompare(b.source.sourceId) || a.rule.id.localeCompare(b.rule.id))
       if (!items.length) return Promise.resolve()
       const admission = { sessionId: event.sessionId }
@@ -290,11 +339,12 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
         }
         for (const candidate of state.candidates) {
           if (candidate.status !== 'pending') continue
-          if (!current(candidate) || !eligible(sessionId, candidate.sourceId, candidate.ruleId)
+          if (!fresh(candidate) || !current(candidate) || !eligible(sessionId, candidate.sourceId, candidate.ruleId)
             || epoch(sessionId, candidate.sourceId, candidate.ruleId) !== candidate.policy) { candidate.status = 'discarded'; continue }
-          if (keys.has(candidate.key)) { candidate.status = 'discarded'; continue }
+          if (keys.has(candidate.key) || state.windows.some(item => item.key === candidate.key)) { candidate.status = 'discarded'; continue }
           keys.add(candidate.key)
           candidate.messageId = randomUUID(); candidate.status = 'reserved'
+          if (candidate.window) state.windows.push({ key: candidate.key, until: candidate.window.end, messageId: candidate.messageId })
           messages.push({ id: candidate.messageId, role: 'user', content: [{ type: 'text', text: candidate.text }],
             source: { kind: KIND, form: 'notice', summary: candidate.title,
               reminder: { key: candidate.key, candidateId: candidate.id },
@@ -307,7 +357,14 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
     async rollback(sessionId, messages) {
       const ids = new Set(messages.filter(message => message.source?.kind === KIND).map(message => message.id))
       if (!ids.size) return
-      await update(sessionId, state => { for (const candidate of state.candidates) if (candidate.status === 'reserved' && ids.has(candidate.messageId)) { candidate.status = 'pending'; delete candidate.messageId } })
+      await update(sessionId, state => {
+        for (const candidate of state.candidates) {
+          if (candidate.status !== 'reserved' || !ids.has(candidate.messageId)) continue
+          // An explicit snooze has no messageId and survives cancellation of this handoff.
+          state.windows = state.windows.filter(item => item.messageId !== candidate.messageId)
+          candidate.status = 'pending'; delete candidate.messageId
+        }
+      })
     },
     filterMessages(sessionId, visible, messages) {
       const keys = new Set(visible.filter(message => message.source?.kind === KIND).map(message => message.source.reminder.key))
@@ -315,7 +372,8 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
       return messages.filter(message => {
         if (message.source?.kind !== KIND) return true
         const candidate = state?.candidates.find(item => item.messageId === message.id)
-        if (!candidate || !current(candidate) || keys.has(candidate.key) || !eligible(sessionId, candidate.sourceId, candidate.ruleId)
+        if (!candidate || !fresh(candidate) || !current(candidate) || keys.has(candidate.key)
+          || state.windows?.some(item => item.key === candidate.key && item.messageId !== message.id) || !eligible(sessionId, candidate.sourceId, candidate.ruleId)
           || epoch(sessionId, candidate.sourceId, candidate.ruleId) !== candidate.policy) return false
         keys.add(candidate.key); return true
       })

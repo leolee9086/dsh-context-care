@@ -4,7 +4,7 @@ import { RuleLimit } from '../reminder-capacity.js'
 
 const Id = z.string().min(1).max(256)
 const Regex = z.object({ regex: z.string().min(1).max(4096), flags: z.string().regex(/^[gimsu]*$/).default('') }).strict()
-export const ReminderRule = z.object({
+const ToolRule = z.object({
   format: z.literal('reminder/v1'), id: Id, title: z.string().max(4096).optional(),
   on: z.literal('tool.succeeded'), priority: z.number().int().min(-100000).max(100000).default(0),
   exclusiveGroup: Id.optional(), text: z.string().min(1).max(16384),
@@ -14,6 +14,19 @@ export const ReminderRule = z.object({
     timeoutMs: z.number().int().min(1).max(60000).optional() }).strict().optional(),
   deliver: z.object({ model: z.object({ once: z.literal('surface') }).strict() }).strict(),
 }).strict()
+const ClockTime = z.string().regex(/^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/)
+const TimeWindow = z.object({ start: ClockTime, end: ClockTime, timeZone: z.literal('local').default('local') }).strict()
+  .refine(value => value.start !== value.end, 'timeWindow must have different start and end')
+const RequestRule = ToolRule.extend({
+  format: z.literal('reminder/v2'), on: z.literal('request.before'),
+  when: z.object({ timeWindow: TimeWindow.optional(),
+    humanActivity: z.object({ withinSeconds: z.number().int().min(1).max(86400) }).strict().optional(),
+    condition: z.json().optional() }).strict(),
+  deliver: z.object({ model: z.object({ once: z.enum(['surface', 'window']) }).strict() }).strict(),
+}).refine(rule => rule.deliver.model.once !== 'window' || rule.when.timeWindow !== undefined,
+  'window delivery requires when.timeWindow')
+export const ReminderRule = z.discriminatedUnion('format', [ToolRule, RequestRule])
+
 export const ReminderConfig = z.object({
   ruleTimeoutMs: z.number().int().min(1).max(60000).default(250),
   roundTimeoutMs: z.number().int().min(1).max(60000).default(1000),
@@ -34,8 +47,10 @@ export const Source = z.object({ sourceId: Id, plugin: Id, sessionId: Id.optiona
 /** Compile the readable reminder form to the existing engine's conditions. */
 export function compileRule(input, sourceId, revision) {
   const rule = ReminderRule.parse(input)
-  const conditions = [{ kind: 'compare', field: 'tool.name', op: 'eq', value: rule.when.tool }]
-  for (const [key, test] of Object.entries(rule.when.arguments)) {
+  const conditions = rule.on === 'tool.succeeded'
+    ? [{ kind: 'compare', field: 'tool.name', op: 'eq', value: rule.when.tool }]
+    : [{ kind: 'always' }]
+  for (const [key, test] of Object.entries(rule.when.arguments ?? {})) {
     const field = `tool.arguments.${key}`
     // The engine's all group short-circuits: missing optional tool arguments are an ordinary non-match.
     conditions.push({ kind: 'compare', field, op: 'exists' },
