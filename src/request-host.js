@@ -1,3 +1,12 @@
+// @ts-check
+/** @import { Context } from '@deepseek-ai/cordis' */
+/** @import { Agent } from '@deepseek-ai/dsh-agent' */
+/** @import { Session, SessionId } from '@deepseek-ai/dsh-session' */
+/** @import { GenerateOptions, LlmCallConfig, PreparedLlmCall, LlmAttemptId } from '@deepseek-ai/dsh-llm' */
+/** @import { RequestOwner, RequestCall, Workbench, PromptSegments, RequestIterator, Pricing } from './request-types.js' */
+/** @import {} from '@deepseek-ai/dsh-tools' */
+/** @import {} from '@deepseek-ai/dsh-token-meter' */
+/** @import {} from '@deepseek-ai/dsh-storage-domain' */
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
 import { RequestBudgetExceeded } from './context-budget.js'
@@ -40,38 +49,54 @@ export const Config = z.object({ ruleFiles: z.array(z.string().min(1).max(4096))
 }).strict().prefault({})
 
 /** prepareCall clones its config. Keep native cancellation and request data out
- * of that clone; only the public LlmCallConfig fields belong in it. */
+ * of that clone; only the public LlmCallConfig fields belong in it.
+ * @param {LlmCallConfig} request */
 function callConfig(request) {
-  return Object.fromEntries(['provider', 'model', 'reasoningEffort', 'temperature', 'maxTokens', 'stop']
-    .filter(key => request[key] !== undefined).map(key => [key, request[key]]))
+  const { provider, model, reasoningEffort, temperature, maxTokens, stop } = request
+  return { provider, model,
+    ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+    ...(temperature === undefined ? {} : { temperature }),
+    ...(maxTokens === undefined ? {} : { maxTokens }),
+    ...(stop === undefined ? {} : { stop }) }
 }
 
-/** Own request identities and journals using the official rc.2 stream waterfall. */
+/** Cordis apply returns only its lifecycle result, while the factory exposes the service type.
+ * @param {Context} ctx @param {import('zod').input<typeof Config>} config */
 export async function apply(ctx, config = {}) {
+  await openRequestHost(ctx, config)
+}
+
+/** Own request identities and journals using the official rc.2 stream waterfall.
+ * @param {Context} ctx @param {import('zod').input<typeof Config>} config */
+export async function openRequestHost(ctx, config = {}) {
   const journal = await openRequestJournal({ storageDomain: ctx.storageDomain,
-    report: error => ctx.logger.warn(`context-care: request journal failed: ${String(error)}`) })
+    report: /** @param {unknown} error */ error => ctx.logger.warn(`context-care: request journal failed: ${String(error)}`) })
+  /** @type {Awaited<ReturnType<typeof openRuleControls>> | undefined} */
   let controls
+  /** @type {Awaited<ReturnType<typeof openOutputFeedback>>} */
   let feedback
-  try { feedback = await openOutputFeedback(ctx.storageDomain, { eligible: (id, ruleId, seqs) => controls === undefined
+  try { feedback = await openOutputFeedback(ctx.storageDomain, { eligible: /** @param {string} id @param {string} ruleId @param {number[]} seqs */ (id, ruleId, seqs) => controls === undefined
     || (controls.enabled(id, 'dsh-context-care', `prompt:${ruleId}`, 'notice')
-      && seqs.every(seq => seq > controls.sinceSeq(id, 'dsh-context-care', `prompt:${ruleId}`))) }) }
+      && seqs.every(seq => seq > (controls?.sinceSeq(id, 'dsh-context-care', `prompt:${ruleId}`) ?? -1))) }) }
   catch (error) {
     await journal.close().catch(closeError => ctx.logger.warn(`context-care: journal rollback failed: ${String(closeError)}`))
     throw error
   }
-  try { controls = await openRuleControls(ctx.storageDomain, { boundary: id => (ctx.sessions.get(id)?.seq ?? 0) - 1 }) }
+  try { controls = await openRuleControls(ctx.storageDomain, { boundary: /** @param {string} id */ id => (ctx.sessions.get(/** @type {SessionId} */ (id))?.seq ?? 0) - 1 }) }
   catch (error) {
-    for (const [label, resource] of [['feedback', feedback], ['journal', journal]]) {
+    for (const [label, resource] of /** @type {const} */ ([['feedback', feedback], ['journal', journal]])) {
       await resource.close().catch(closeError => ctx.logger.warn(`context-care: ${label} rollback failed: ${String(closeError)}`))
     }
     throw error
   }
-  ctx.effect(() => () => controls.close())
+  const ruleControls = controls
+  ctx.effect(() => () => ruleControls.close())
   ctx.provide('contextCareControls', controls)
+  /** @type {Workbench} */
   let workbench
   try { workbench = await openWorkbenchHost(ctx, controls, Config.parse(config)) }
   catch (error) {
-    for (const [label, resource] of [['controls', controls], ['feedback', feedback], ['journal', journal]]) {
+    for (const [label, resource] of /** @type {const} */ ([['controls', controls], ['feedback', feedback], ['journal', journal]])) {
       try { await resource.close() } catch (secondary) { recordSecondaryFailure(error, secondary, `workbench-open-${label}`) }
     }
     throw error
@@ -80,14 +105,22 @@ export async function apply(ctx, config = {}) {
   ctx.effect(() => () => workbench.close())
   await ensureReminderService(ctx, Config.parse(config).reminders, controls)
   let dispatchOrder = journal.list().reduce((latest, record) => Math.max(latest, record.data.dispatchOrder ?? 0), 0)
+  /** @type {Set<RequestOwner>} */
   const owners = new Set()
+  /** @type {Map<string, RequestCall>} */
   const calls = new Map()
+  /** @type {WeakMap<GenerateOptions, {prepared: PreparedLlmCall, callId: string}>} */
   const preparedRequests = new WeakMap()
+  /** @type {WeakMap<GenerateOptions, RequestCall>} */
   const forwarded = new WeakMap()
+  /** @type {WeakMap<Agent, LlmAttemptId>} */
   const attempts = new WeakMap()
   const reconciled = new WeakSet()
+  /** @type {(() => void)[]} */
   const listeners = []
+  /** @param {Agent | undefined} agent */
   const ownerFor = agent => agent === undefined ? undefined : [...owners].find(owner => owner.owns(agent))
+  /** @param {RequestCall} call @param {string} phase @param {Record<string, unknown>} details */
   function persist(call, phase, details = {}) {
     const previous = call.record ?? { callId: call.callId, logRevision: call.logRevision, sourceSeqs: call.sourceSeqs,
       sourceHeader: call.measurement.pricingBasis.header, sourceMessagesHash: requestFingerprint(call.sourceMessages),
@@ -95,22 +128,31 @@ export async function apply(ctx, config = {}) {
     call.record = { ...previous, ...details, dispatched: call.dispatched, phase }
     return journal.put(`call_${call.callId}`, call.session.id, 'request', call.record)
   }
-  ctx.effect(() => controls.registerProvider(sessionId => ownerFor(ctx.agents.get(sessionId))?.controlSources?.(sessionId) ?? []))
+  ctx.effect(() => ruleControls.registerProvider(/** @param {SessionId} sessionId */ sessionId => ownerFor(ctx.agents.get(sessionId))?.controlSources?.(sessionId) ?? []))
   const service = {
-    controls,
+    controls: ruleControls,
+    /** @param {RequestOwner} owner */
     register(owner) { owners.add(owner); return () => { owners.delete(owner); for (const [id, call] of calls) if (call.owner === owner) calls.delete(id) } },
+    /** @param {string} callId */
     snapshot: callId => calls.get(callId),
+    /** @param {Agent} agent */
     failed(agent) { return [...calls.values()].findLast(call => call.agent === agent && call.settled && call.failure !== undefined && ['conversation', undefined].includes(call.original.purpose)) },
+    /** @param {string} callId */
     release: callId => calls.delete(callId),
+    /** @param {string} callId @param {Record<string, unknown>} details */
     settle(callId, details) { const call = calls.get(callId); return call === undefined ? Promise.resolve() : persist(call, 'settled', details) },
+    /** @param {Session} session @param {Record<string, unknown>} data */
     recordAction(session, data) { return journal.put(`action_${randomUUID()}`, session.id, 'maintenance', { logRevision: session.seq, ...data }) },
     // Auxiliary callers use this handle so their journal id never depends on a
     // nonexistent prepared.callId in the host. Each stream may be consumed once.
+    /** @param {LlmCallConfig} config @param {AbortSignal} [signal] */
     async prepareCall(config, signal) {
       const prepared = await ctx.llm.prepareCall(callConfig(config), signal)
       const callId = randomUUID()
       let consumed = false
-      return Object.freeze({ ...prepared, callId, stream(request) {
+      return Object.freeze({ ...prepared, callId,
+        /** @param {GenerateOptions} request */
+        stream(request) {
         if (consumed) throw new Error('context-care: prepared request already consumed')
         consumed = true
         preparedRequests.set(request, { prepared, callId })
@@ -119,22 +161,28 @@ export async function apply(ctx, config = {}) {
         return ctx.llm.stream(request)
       } })
     },
+    /** @param {Session} session
+     * @param {GenerateOptions} request
+     * @returns {{segments: PromptSegments, request: GenerateOptions}} */
     preview(session, request) {
       const owner = ownerFor(ctx.agents.get(session.id))
       const purpose = request.purpose ?? 'conversation'
       const previous = journal.list(session.id).filter(record => record.kind === 'request' && record.data.dispatched
         && record.data.purpose === purpose).sort((a, b) => (a.data.dispatchOrder ?? 0) - (b.data.dispatchOrder ?? 0)).at(-1)?.data.route
-      const segments = [...(owner?.prompts?.({ ...request, sessionId: String(session.id) }, previous) ?? []), ...feedback.collect(session, request, owner?.promptRulesFor?.(session.id) ?? owner?.promptRules ?? []),
+      const segments = [...(owner?.prompts?.({ ...request, sessionId: session.id }, previous) ?? []), ...feedback.collect(session, request, owner?.promptRulesFor?.(session.id) ?? []),
         ...(ctx.get('contextCareCompletion')?.collect(session, request) ?? [])]
       return { segments, request: withScopedPrompts(request, segments) }
     },
+    /** @param {Session} session @param {Parameters<typeof journalCalibration>[1]} header @param {Parameters<typeof journalCalibration>[2]} fallback */
     calibration: (session, header, fallback) => journalCalibration(journal.list(session.id), header, fallback),
     feedback: feedback.list,
     list: journal.list,
+    /** @param {string} [sessionId] */
     async flush(sessionId) { await journal.flush(sessionId); await feedback.flush(sessionId) },
   }
   ctx.provide('contextCareRequests', service)
-  const on = (event, callback) => listeners.push(ctx.on(event, callback))
+  /** @type {Context['on']} */
+  const on = (event, callback, options) => { const dispose = ctx.on(event, callback, options); listeners.push(dispose); return dispose }
   on('tools/pre-execute', async (exec, next) => {
     const previous = await next()
     if (previous.kind !== 'allow') return previous
@@ -158,9 +206,9 @@ export async function apply(ctx, config = {}) {
     const completed = event?.type === 'assistant/message' && !event.data.interrupted
     void persist(call, 'settled', { attemptId: frame.attemptId,
       outcome: completed ? 'completed' : event?.type === 'assistant/attempt' ? 'failed' : 'interrupted',
-      eventSeq: event?.seq, eventType: event?.type, usage: event?.data.usage })
+      eventSeq: event?.seq, eventType: event?.type, usage: event?.type === 'assistant/message' ? event.data.usage : undefined })
     if (completed && call.dispatched) {
-      void feedback.observe(call.session, event, call.record.route, call.owner.promptRulesFor?.(call.session.id) ?? call.owner.promptRules ?? [])
+      void feedback.observe(call.session, event, call.record?.route, call.owner.promptRulesFor?.(call.session.id) ?? [])
         .catch(error => ctx.logger.warn(`context-care: output observation failed: ${String(error)}`))
     }
     if (completed) service.release(call.callId)
@@ -173,20 +221,25 @@ export async function apply(ctx, config = {}) {
     if (forwarded.has(request)) { yield* delegated; return }
     const agent = request.sessionId === undefined ? undefined : ctx.agents.get(request.sessionId)
     const owner = ownerFor(agent)
-    if (owner === undefined) { yield* delegated; return }
+    if (owner === undefined || agent === undefined) { yield* delegated; return }
     const session = agent.session
     const handle = preparedRequests.get(request)
     const pricing = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session, requests: service })
+    /** @type {RequestCall} */
     const call = { callId: handle?.callId ?? randomUUID(), owner, agent, session,
       logRevision: session.seq, generation: session.surface.replaceGeneration,
       sourceSeqs: [...session.surface.nodes], sourceMessages: session.deriveMessages(), original: request,
       measurement: pricing.measure(), dispatched: false,
       attemptId: ['conversation', undefined].includes(request.purpose) ? attempts.get(agent) : undefined }
     calls.set(call.callId, call)
+    /** @type {Context['contextCareCompletion'] | undefined} */
     let completion
+    /** @type {RequestIterator | undefined} */
     let iterator
+    /** @type {ReturnType<Workbench['openDelta']> | undefined} */
     let delta
     let reservationsStarted = false
+    /** @type {unknown} */
     let primaryError
     try {
       await service.flush(session.id)
@@ -196,7 +249,7 @@ export async function apply(ctx, config = {}) {
           && record.data.outcome === 'completed' && record.data.purpose === 'conversation').sort((a, b) => a.data.eventSeq - b.data.eventSeq)
         for (const record of records) {
           const event = session.eventAt(record.data.eventSeq)
-          if (event?.type === 'assistant/message' && !event.data.interrupted) await feedback.observe(session, event, record.data.route, owner.promptRulesFor?.(session.id) ?? owner.promptRules ?? [])
+          if (event?.type === 'assistant/message' && !event.data.interrupted) await feedback.observe(session, event, record.data.route, owner.promptRulesFor?.(session.id) ?? [])
         }
         await completion?.reconcile(session)
         reconciled.add(session)
@@ -210,25 +263,29 @@ export async function apply(ctx, config = {}) {
       call.workbenchPlan = await workbench.assemble(agent, promptRequest)
       const composed = call.workbenchPlan.request
       if (call.workbenchPlan.records.length) {
-        const decision = session.append('request/header', {
-          header: session.requestHeader() ?? { config: prepared.config, ...(request.tools === undefined ? {} : { tools: request.tools }) }, reason: 'series',
+        const data = {
+          header: session.requestHeader() ?? { config: prepared.config, ...(request.tools === undefined ? {} : { tools: request.tools }) }, reason: /** @type {const} */ ('series'),
           contextCareWorkbench: JSON.parse(JSON.stringify({ callId: call.callId, token: call.workbenchPlan.token, documents: call.workbenchPlan.documents,
             records: call.workbenchPlan.records, diff: call.workbenchPlan.diff,
             injectionBudget: call.workbenchPlan.injectionBudget, impact: call.workbenchPlan.impact })),
-        })
+        }
+        const decision = session.append('request/header', data)
         call.workbenchDecision = { seq: decision.seq, records: call.workbenchPlan.records, documents: call.workbenchPlan.documents }
       }
       if (segments.length) {
-        const decision = session.append('request/header', {
-          header: session.requestHeader() ?? { config: prepared.config, ...(request.tools === undefined ? {} : { tools: request.tools }) }, reason: 'series',
+        const data = {
+          header: session.requestHeader() ?? { config: prepared.config, ...(request.tools === undefined ? {} : { tools: request.tools }) }, reason: /** @type {const} */ ('series'),
           contextCarePrompt: { callId: call.callId, segments, message: composed.messages.at(-1) },
-        })
+        }
+        const decision = session.append('request/header', data)
         call.promptDecision = { seq: decision.seq, segments, message: composed.messages.at(-1) }
       }
       const model = await ctx.llm.resolveModelInfo(composed.provider, composed.model, request.signal)
       call.ready = { request: composed, model: { ...model, ...(prepared.context ? { context: prepared.context } : {}) },
         imageRequestPricing: ctx.llm.imageRequestPricing(composed.provider, composed.model) }
-      call.dispatchBudget = await owner.check(call, call.ready)
+      const admission = await owner.check(call, call.ready)
+      call.dispatchBudget = admission.budget
+      call.dispatchPricing = admission.pricing
       const careInstructions = requestCareInstructions(composed)
       const summaryInstruction = careInstructions.find(instruction => instruction.kind === 'summary-instruction')
       const systemSeq = call.sourceSeqs.find(seq => session.eventAt(seq)?.type === 'system/message')
@@ -284,7 +341,7 @@ export async function apply(ctx, config = {}) {
         if (item.result.done) break
         const chunk = item.result.value
         await delta?.feed(chunk, request.signal)
-        if (chunk.type === 'finish' && ['error', 'aborted'].includes(chunk.reason.kind)) {
+        if (chunk.type === 'finish' && (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted')) {
           call.failure = chunk.reason.failure
           await persist(call, 'failed', { failure: call.failure })
         }
@@ -297,12 +354,12 @@ export async function apply(ctx, config = {}) {
         if (reservationsStarted) {
           try { await workbench.rollback(agent, call.callId) }
           catch (secondary) { recordSecondaryFailure(error, secondary, 'rule action reservation rollback') }
-          for (const [label, resource] of [['feedback', feedback], ['completion', completion]]) {
+          for (const [label, resource] of /** @type {const} */ ([['feedback', feedback], ['completion', completion]])) {
             try { await resource?.rollback(session, call.callId) }
             catch (secondary) { recordSecondaryFailure(error, secondary, `${label} reservation rollback`) }
           }
         }
-        call.failure = { code: error.code ?? 'REQUEST_PREFLIGHT_FAILED', message: error.message }
+        call.failure = { code: error instanceof Error && 'code' in error && typeof error.code === 'string' ? error.code : 'REQUEST_PREFLIGHT_FAILED', message: error instanceof Error ? error.message : String(error) }
         try { await persist(call, 'failed', { failure: call.failure, outcome: 'not-dispatched' }) }
         catch (secondary) { recordSecondaryFailure(error, secondary, 'preflight failure audit') }
       }
@@ -322,14 +379,15 @@ export async function apply(ctx, config = {}) {
       await releaseResources([['request detectors', () => delta?.close()], ['request stream', () => iterator?.return?.()]], primaryError)
     }
   })
-  on('agent/idle', ({ agent }) => {
+  on('agent/status', ({ agent, status }) => {
+    if (status !== 'idle') return
     attempts.delete(agent)
     for (const [id, call] of calls) if (call.agent === agent) calls.delete(id)
   })
   ctx.effect(() => async () => {
     for (const dispose of listeners) dispose()
     let primary
-    for (const [label, resource] of [['request journal', journal], ['output feedback', feedback]]) {
+    for (const [label, resource] of /** @type {const} */ ([['request journal', journal], ['output feedback', feedback]])) {
       try { await resource.close() }
       catch (error) {
         if (primary === undefined) primary = error
@@ -339,4 +397,5 @@ export async function apply(ctx, config = {}) {
     calls.clear(); owners.clear()
     if (primary !== undefined) throw primary
   })
+  return service
 }

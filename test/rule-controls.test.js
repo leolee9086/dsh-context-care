@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createRuleControls, ControlPatch } from '../src/rule-controls.js'
+import { createReminderRuntime } from '../src/reminder-runtime/index.js'
 import { createStreamWatch } from '../src/stream-watch.js'
 import { createNoticeChannel } from '../src/notice-channel.js'
 import { controlledGuidance, controlledState, controlledEngineRules } from '../src/control-catalog.js'
@@ -8,6 +9,36 @@ import { GUIDANCE, renderState } from '../src/policy.js'
 const source = (id = 'external') => ({ sourceId: id, plugin: 'example-plugin', registration: 'plugin-entry', executor: 'dsh-context-care',
   rules: [{ id: 'shared-id', actions: [{ id: 'notice' }, { id: 'abort' }, { id: 'resume', requires: ['abort'] }] }] })
 const patch = (controls, input) => controls.patch('session-one', { revision: controls.snapshot('session-one').revision, sourceId: 'external', ruleId: 'shared-id', ...input })
+
+test('reminder catalogs preserve scoped recipients and string policy epochs across recovery', async t => {
+  const controls = createRuleControls({ save: async () => {} })
+  t.after(() => controls.close())
+  const entries = new Map()
+  const ports = { config: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 },
+    execute: async () => ({ ok: true }), resolvePreset: id => id === 'included' ? 'alpha' : 'beta',
+    eligible: (id, source, rule) => controls.enabled(id, source, rule, 'model'),
+    epoch: (id, source, rule) => controls.epoch(id, source, rule),
+    save: async (id, value) => { entries.set(id, JSON.parse(JSON.stringify(value))) } }
+  let runtime = createReminderRuntime(ports)
+  t.after(() => runtime.close())
+  const unregister = controls.registerProvider(id => runtime.catalog(id))
+  t.after(unregister)
+  const definition = { sourceId: 'scoped', plugin: 'test', revision: 1, scope: { agentPresets: ['alpha'] }, rules: [{
+    format: 'reminder/v1', id: 'notice', on: 'tool.succeeded', text: 'SCOPED_NOTICE',
+    when: { tool: 'probe' }, deliver: { model: { once: 'surface' } },
+  }] }
+  runtime.registerSource(definition)
+  assert.deepEqual(controls.snapshot('included').sources[0].scope, { agentPresets: ['alpha'] })
+  assert.deepEqual(controls.catalog('excluded'), [])
+  assert.equal(controls.enabled('included', 'scoped', 'notice', 'model'), true)
+  assert.equal(controls.enabled('excluded', 'scoped', 'notice', 'model'), false)
+  await runtime.submit({ sessionId: 'included', callId: 'probe', rootCallId: 'probe', name: 'probe' })
+  assert.equal(entries.get('included').candidates[0].policy, controls.epoch('included', 'scoped', 'notice'))
+  await runtime.close()
+  runtime = createReminderRuntime({ ...ports, entries })
+  runtime.registerSource({ ...definition, revision: 2 })
+  assert.equal((await runtime.collect({ sessionId: 'included', visible: [] }))[0].content[0].text, 'SCOPED_NOTICE')
+})
 
 test('session CAS, independent actions, pause and reset survive restart without publishing unacknowledged writes', async () => {
   const entries = new Map()

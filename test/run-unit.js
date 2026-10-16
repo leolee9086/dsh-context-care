@@ -5,7 +5,7 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawnSync } from 'node:child_process'
 const directory = dirname(fileURLToPath(import.meta.url))
-const suites = readdirSync(directory).filter(name => name.endsWith('.test.js') && name !== 'integration.test.js').sort()
+const suites = readdirSync(directory).filter(name => /\.test\.(?:js|ts)$/.test(name) && name !== 'integration.test.js').sort()
 const result = spawnSync(process.execPath, ['--import', pathToFileURL(resolve(directory, 'shared-packages.js')).href, '--test', '--test-concurrency=4', ...suites.map(name => resolve(directory, name))],
   { cwd: resolve(directory, '..'), stdio: 'inherit', env: process.env })
 if (result.error) throw result.error

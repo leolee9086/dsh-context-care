@@ -634,16 +634,21 @@ export function installContextCare(ctx, raw, compactionSource) {
   }))
 
   const requestOwner = {
+    /** @param {import('@deepseek-ai/dsh-agent').Agent} agent */
     owns: agent => ctx.tools.get('context_rest', agent) === contextRestTool,
+    /** @param {import('@deepseek-ai/dsh-session').SessionId} sessionId */
     controlSources(sessionId) {
       const agent = ctx.agents.get(sessionId)
       return [runtimeControlSource({ prompts: spec.modelScopedPrompts, cleanupActive,
         pruner: resolvePruner(agent) !== undefined, compaction: resolveCompaction(agent) !== undefined }),
       legacyControlSource(ctx.get('memoryNoticeRules') ?? [], cleanupActive), ...noticeChannel.catalog()]
     },
+    /** @param {string} sessionId */
     promptRulesFor: sessionId => spec.modelScopedPrompts.filter(rule => enabled(sessionId, `prompt:${rule.ruleId}`, 'notice')),
-    prompts: spec.modelScopedPrompts.length === 0 ? undefined : (request, previousRoute) =>
-      selectScopedPrompts(requestOwner.promptRulesFor(request.sessionId), request, previousRoute),
+    prompts: spec.modelScopedPrompts.length === 0 ? undefined :
+      /** @param {import('@deepseek-ai/dsh-llm').GenerateOptions} request @param {import('@deepseek-ai/dsh-llm').LlmCallConfig | undefined} previousRoute */
+      (request, previousRoute) => selectScopedPrompts(requestOwner.promptRulesFor(request.sessionId), request, previousRoute),
+    /** @param {import('./request-types.js').RequestCall} call @param {import('./request-types.js').ReadyRequest} ready */
     check(call, ready) {
       const request = ready.request
       const { provider, model, reasoningEffort, temperature, maxTokens } = request
@@ -654,20 +659,19 @@ export function installContextCare(ctx, raw, compactionSource) {
       const pricing = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: call.session, header,
         imageRequestPricing: ready.imageRequestPricing, requests: ctx.contextCareRequests })
       const inputTokens = pricing.priceRequest(request)
-      call.dispatchPricing = pricing
       const policy = budgetPolicy(spec, request, request.purpose ?? 'conversation')
-      return contextBudget({ inputTokens, physicalCapacity: ready.model.context?.contextWindow, policyCapacity: policy.contextBudgetTokens,
+      return { pricing, budget: contextBudget({ inputTokens, physicalCapacity: ready.model.context?.contextWindow, policyCapacity: policy.contextBudgetTokens,
         billingInputCeilingTokens: policy.billingInputCeilingTokens, maxTokens: request.maxTokens, defaultMaxTokens: ready.model.defaultMaxTokens,
         safetyTokens: request.purpose === 'compaction' ? (spec.summarySafetyTokens ?? spec.safetyTokens) : spec.safetyTokens,
         burstTokens: request.purpose === 'compaction' ? 0 : spec.burstTokens, releaseMarginTokens: 0,
         softRatio: spec.budgetRatio, retainRatio: request.purpose === 'compaction' ? 0 : spec.retainRatio,
-        retainTokens: request.purpose === 'compaction' ? 0 : spec.retainTokens })
+        retainTokens: request.purpose === 'compaction' ? 0 : spec.retainTokens }) }
     },
   }
   ctx.effect(() => ctx.contextCareRequests.register(requestOwner))
 
   const overflowRetries = new WeakMap()
-  ctx.on('agent/idle', ({ agent }) => overflowRetries.delete(agent))
+  ctx.on('agent/status', ({ agent, status }) => { if (status === 'idle') overflowRetries.delete(agent) })
   ctx.on('agent/assistant-stream', ({ agent, frame }) => {
     if (frame.type !== 'end' || frame.outcome.kind !== 'committed') return
     const event = agent.session.eventAt(frame.outcome.seq)
@@ -891,5 +895,5 @@ export function installContextCare(ctx, raw, compactionSource) {
 
   // 交给 host 入口去注册路由 —— 客户端卡片靠它拿到「哪些内容被改写过」。
   // 记录本身与路由分开:记录在改写路径上,路由是纯读取。
-  return { rewriteJournal }
+  return { rewriteJournal, requestOwner }
 }

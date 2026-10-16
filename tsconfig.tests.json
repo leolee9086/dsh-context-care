@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.reminders.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true,
+    "allowImportingTsExtensions": true
+  },
+  "include": ["test/**/*.ts"]
+}

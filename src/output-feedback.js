@@ -16,7 +16,9 @@ export const OUTPUT_FEEDBACK_DOMAIN = {
 
 function keyFor(sessionId, rule) { return requestFingerprint({ sessionId: String(sessionId), rule }) }
 
-/** Open durable episodes, then serialize each session's observations and delivery decisions. */
+/** Open durable episodes, then serialize each session's observations and delivery decisions.
+ * @param {import('@deepseek-ai/cordis').Context['storageDomain']} storageDomain
+ * @param {{eligible?: (sessionId: string, ruleId: string, sourceSeqs: number[]) => boolean}} options */
 export async function openOutputFeedback(storageDomain, { eligible = () => true } = {}) {
   const handle = await storageDomain.open(OUTPUT_FEEDBACK_DOMAIN)
   const table = handle.table('episodes')

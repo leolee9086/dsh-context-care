@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { normalizeRule, normalizeRuleV2 } from '@leolee9086/dsh-rule-engine'
 import { recordSecondaryFailure } from './secondary-failure.js'
+import { ReminderScope } from './reminder-runtime/index.js'
 
 const Id = z.string().min(1).max(256)
 const Action = z.object({ id: Id, title: z.string().optional(), defaultEnabled: z.boolean().default(true),
@@ -8,7 +9,7 @@ const Action = z.object({ id: Id, title: z.string().optional(), defaultEnabled: 
 const Rule = z.object({ id: Id, title: z.string().optional(), description: z.string().optional(),
   actions: z.array(Action).min(1), definition: z.json().optional() }).strict()
 const Source = z.object({ sourceId: Id, plugin: z.string().nullable(), registration: z.string(), executor: z.string(),
-  sessionId: Id.optional(), readOnly: z.boolean().optional(), rules: z.array(Rule) }).strict()
+  sessionId: Id.optional(), scope: ReminderScope.optional(), readOnly: z.boolean().optional(), rules: z.array(Rule) }).strict()
 const Preference = z.object({ sourceId: Id, ruleId: Id, paused: z.boolean().default(false),
   actions: z.record(z.string(), z.boolean()).default({}), sinceSeq: z.number().int().default(-1), epoch: z.number().int().nonnegative().default(0) }).strict()
 const Stored = z.object({ revision: z.number().int().nonnegative(), preferences: z.array(Preference) }).strict()

@@ -19,7 +19,10 @@ import { readRuleFiles, assertFileRevision } from './rule-files.js'
 const actionKey = (event, action) => JSON.stringify([event.sourceId, event.ruleId, event.ruleRevision, action.id])
 const dispatchKey = (event, action) => `$dispatch:${actionKey(event, action)}`
 const dispatchItems = planned => [...new Map([...planned.applied, ...(planned.entryTransitions ?? [])].map(item => [dispatchKey(item.event, item.action), item])).values()]
-/** Single Request Host contribution: durable documents, shared matching, execution controls and jobs. */
+/** Single Request Host contribution: durable documents, shared matching, execution controls and jobs.
+ * @param {import('@deepseek-ai/cordis').Context} ctx
+ * @param {Awaited<ReturnType<import('./rule-controls.js').openRuleControls>>} controls
+ * @param {import('zod').input<typeof import('./request-host.js').Config>} options */
 export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executors: configuredExecutors = [], maxCascadePasses = 4, maxInjectedChars = 65536, maxInjectedTokens = 65536, maxCacheChangedBytes, maxRequestBytes = 8388608, maxQueued = 128, maxConcurrent = 8, maxDeltaChars = 32768, maxDeltaBlocks = 16, matcher: matcherOptions = {}, requiredStages = [] } = {}) {
   const report = error => ctx.logger.warn(`context-care: workbench failed: ${String(error)}`)
   const templates = createTemplates()
@@ -604,6 +607,8 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
       observations.set(id, operation)
       try { await operation } finally { observations.delete(id) }
     },
+    /** @param {import('@deepseek-ai/dsh-tools').ToolExecution} exec
+     * @returns {Promise<import('@deepseek-ai/dsh-tools').PreToolDecision | undefined>} */
     async beforeExecute(exec) {
       const agent = exec.agent
       if (!agent) return undefined

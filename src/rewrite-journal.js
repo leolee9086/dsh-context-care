@@ -159,7 +159,7 @@ export function changedBlocks(before, after) {
  * @param {() => object|undefined} deps.store 取索引插件服务;每次现取(它可能晚于本插件注册)。
  * @param {{put: Function, list: Function}} [deps.durable] Host 持久写入及 ACK 后读取；正式 runtime 提供。
  * @param {(message: string) => void} [deps.warn] 旧属性表的诊断输出。
- * @returns {{record: Function, list: Function}} 记录与查询。
+ * @returns 记录、查询和持久格式标识。
  */
 export function createRewriteJournal({ store, durable, warn = () => {} }) {
   /** 进程内的那份。sessionId → 记录数组。 */

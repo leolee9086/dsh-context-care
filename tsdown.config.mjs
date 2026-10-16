@@ -2,6 +2,8 @@ import { defineConfig } from 'tsdown'
 
 export default defineConfig({
   entry: { client: 'src/client.js' }, outDir: 'lib', format: 'cjs', platform: 'browser',
+  // Host TS artifacts share this directory and supply client-side validation too.
+  clean: false,
   // Nested wire validation bundles Zod; minify its parser machinery while
   // retaining source maps and readable authored source for review.
   target: 'es2022', dts: false, sourcemap: true, minify: true,

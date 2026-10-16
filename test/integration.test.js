@@ -17,6 +17,10 @@ import { createSummaryExecutor } from '../src/summary-executor.js'
 import { buildSummaryRequest, frameSummary } from '../src/summary-request.js'
 import { resolveConfig } from '../src/policy.js'
 import { detectorFixture } from './fixtures/detector.js'
+import { registerReminderHostCases } from './reminder-host-cases.ts'
+import { registerTimeoutHostCases } from './reminder-timeout-cases.ts'
+import { registerRecoveryHostCases } from './reminder-recovery-cases.ts'
+import { registerScopeHostCases } from './reminder-scope-host-cases.ts'
 
 // This explicitly selected test acts as an external Host. The plugin itself never
 // locates or imports a Harness checkout, and the default test suite is standalone.
@@ -200,6 +204,162 @@ test('reminder service connects tool results to logged pre-step messages through
   assert.match(JSON.stringify(adapter.requests.at(-1).messages), /禁止使用 any/)
   await owned.close(ctx)
   assert.equal(ctx.get('reminderRules'), undefined)
+})
+
+registerRecoveryHostCases({ async exercise(t, scenario) {
+  const owned = await fixture(t, false, {}, {}, { reminders: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
+  let ctx = await owned.open()
+  const source = { sourceId: 'recovery', plugin: 'test', revision: 1, rules: [{
+    format: 'reminder/v1', id: 'notice', on: 'tool.succeeded', text: 'RECOVERED_NOTICE',
+    when: { tool: 'probe' }, deliver: { model: { once: 'surface' } },
+  }] }
+  let service = ctx.get('reminderRules'), handle = service.registerSource(source)
+  await service.submit({ sessionId: 'recovery-session', callId: 'probe', rootCallId: 'probe', name: 'probe', arguments: {} })
+  assert.equal(service.snapshot('recovery-session').candidates.length, 1)
+  if (scenario.restart) {
+    await owned.close(ctx)
+    ctx = await owned.open(); service = ctx.get('reminderRules')
+    handle = service.registerSource({ ...source, revision: 2,
+      rules: scenario.changed ? [{ ...source.rules[0], text: 'CHANGED_NOTICE' }] : source.rules })
+  }
+  if (scenario.replace) {
+    handle.replace({ ...source, revision: 3, rules: [{ ...source.rules[0], text: 'TEMPORARY_NOTICE' }] })
+    handle.replace({ ...source, revision: 4 })
+  }
+  const messages = await service.collect({ sessionId: 'recovery-session', visible: [] })
+  return { notices: messages.length, text: messages[0]?.content[0]?.text }
+} })
+
+registerTimeoutHostCases({ async exercise(t, outcome, execute) {
+  const owned = await fixture(t, false, {}, {}, { reminders: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
+  const ctx = await owned.open()
+  const policy = await load('packages/guard/timeout-policy/lib/index.js', '@deepseek-ai/dsh-tool-call-timeout-policy')
+  modules.set('@care-test/timeout-policy', policy)
+  await ctx.loader.create({ name: '@care-test/timeout-policy' })
+  await ctx.loader.await()
+  ctx.effect(() => ctx.get('reminderRules').registerSource({ sourceId: 'timeout-test', plugin: 'test', revision: 1,
+    rules: [{ format: 'reminder/v1', id: 'timeout', on: 'tool.failed', text: 'TIMEOUT_ONLY_NOTICE',
+      when: { tool: 'timeout_probe', error: { code: 'TOOL_TIMEOUT' } }, deliver: { model: { once: 'surface' } } }] }).dispose)
+  ctx.effect(() => ctx.tools.register({ name: 'timeout_probe', description: 'Exercise tool completion',
+    parameters: { type: 'object' }, timeoutMs: outcome === 'cancel' ? 10000 : 30,
+    output: { schema: { type: 'string' }, render: (_args, text) => [{ type: 'text', text }] },
+    async execute(args, exec) {
+      if (outcome === 'cancel') setTimeout(() => exec.agent.cancel({ kind: 'hook', reason: 'timeout negative case' }), 10)
+      return execute(args, exec)
+    } }))
+  class TimeoutAdapter extends CompletionAdapter {
+    requests = []
+    async *stream(request) { this.requests.push(JSON.stringify(request.messages)); yield* super.stream(request) }
+  }
+  const adapter = new TimeoutAdapter([
+    { blocks: [{ type: 'tool-call', id: 'timeout-probe', name: 'timeout_probe', arguments: '{}' }] },
+    { blocks: [{ type: 'text', text: 'Continue.' }] },
+  ])
+  ctx.llm.registerAdapter(['care-test'], adapter)
+  const agent = await ctx.agentLoop.create(`timeout-${outcome}`, { provider: 'care-test', model: 'care-test' })
+  await completionTurn(ctx, agent)
+  await ctx.get('reminderRules').settle(agent.id)
+  const events = agent.session.snapshotEvents()
+  return { errorCode: events.find(event => event.type === 'tool/result')?.data.error?.code,
+    notices: events.filter(event => event.type === 'user/message' && event.data.source?.kind === 'plugin:dsh-context-care:reminder').length,
+    requests: adapter.requests }
+} })
+
+test('shared reminder quota limits real concurrent sessions and survives Host restart and source edits', async t => {
+  const owned = await fixture(t, false, {}, {}, { reminders: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
+  const source = { sourceId: 'shared-life', plugin: 'test', revision: 1, rules: [{
+    format: 'reminder/v2', id: 'notice', on: 'request.before', text: 'SHARED_LIFETIME_NOTICE', when: {},
+    deliver: { model: { once: 'surface', shared: { reset: 'lifetime', lifetime: 'campaign-1', limit: 2 } } },
+  }] }
+  const ctx = await owned.open()
+  ctx.effect(() => ctx.get('reminderRules').registerSource(source).dispose)
+  class RecordingAdapter extends CompletionAdapter {
+    requests = []
+    async *stream(request) { this.requests.push(request); yield* super.stream(request) }
+  }
+  const adapter = new RecordingAdapter(Array.from({ length: 4 }, () => ({ blocks: [{ type: 'text', text: 'Done.' }] })))
+  ctx.llm.registerAdapter(['care-test'], adapter)
+  const agents = await Promise.all(['one', 'two', 'three', 'four'].map(id => ctx.agentLoop.create(`quota-${id}`, { provider: 'care-test', model: 'care-test' })))
+  await Promise.all(agents.map(agent => completionTurn(ctx, agent)))
+  const notices = agents.flatMap(agent => agent.session.snapshotEvents().filter(event =>
+    event.type === 'user/message' && event.data.source?.kind === 'plugin:dsh-context-care:reminder'))
+  assert.equal(notices.length, 2)
+  assert.equal(adapter.requests.filter(request => JSON.stringify(request.messages).includes('SHARED_LIFETIME_NOTICE')).length, 2)
+  const book = ctx.storageDomain.get('context_care_reminder_claims').table('claims').get('global')
+  assert.equal(book.buckets[0].claims.length, 2)
+  await owned.close(ctx)
+
+  const resumed = await owned.open()
+  resumed.effect(() => resumed.get('reminderRules').registerSource({ ...source, revision: 2,
+    rules: [{ ...source.rules[0], text: 'EDITED_SHARED_NOTICE' }] }).dispose)
+  const resumedAdapter = new RecordingAdapter([{ blocks: [{ type: 'text', text: 'Still done.' }] }])
+  resumed.llm.registerAdapter(['care-test'], resumedAdapter)
+  const newcomer = await resumed.agentLoop.create('quota-newcomer', { provider: 'care-test', model: 'care-test' })
+  await completionTurn(resumed, newcomer)
+  assert.doesNotMatch(JSON.stringify(resumedAdapter.requests[0].messages), /EDITED_SHARED_NOTICE/)
+  assert.equal(resumed.storageDomain.get('context_care_reminder_claims').table('claims').get('global').buckets[0].claims.length, 2)
+})
+
+test('shared reminder reservations compensate failed session saves and retry failed rollback release using real storage', async t => {
+  const owned = await fixture(t, false)
+  const ctx = await owned.open()
+  const { createReminderRuntime } = await pluginModule('reminder-runtime/index.js')
+  const table = ctx.storageDomain.get('context_care_reminder_claims').table('claims')
+  const sessions = ctx.storageDomain.get('context_care_reminders').table('sessions')
+  let failSession = false, failClaim = false
+  const runtime = createReminderRuntime({ execute: async () => ({ ok: true }),
+    save: (id, state) => { if (failSession) throw new Error('session-disk'); return sessions.put(id, state) },
+    updateClaims: change => { if (failClaim) throw new Error('claim-disk'); return table.update('global', change) } })
+  t.after(() => runtime.close())
+  runtime.registerSource({ sourceId: 'fault-quota', plugin: 'test', revision: 1, rules: [{
+    format: 'reminder/v1', id: 'one', on: 'tool.succeeded', text: 'One shared notice', when: { tool: 'read' },
+    deliver: { model: { once: 'surface', shared: { reset: 'lifetime', lifetime: 'one', limit: 1 } } },
+  }] })
+  for (const sessionId of ['a', 'b']) await runtime.submit({ sessionId, callId: sessionId, rootCallId: sessionId, name: 'read', arguments: {} })
+  failSession = true
+  await assert.rejects(runtime.collect({ sessionId: 'a', visible: [] }), /session-disk/)
+  assert.equal(table.get('global').buckets.length, 0)
+  failSession = false
+  const messages = await runtime.collect({ sessionId: 'a', visible: [] })
+  assert.equal(messages.length, 1)
+  assert.deepEqual(await runtime.collect({ sessionId: 'b', visible: [] }), [])
+  failClaim = true
+  await assert.rejects(runtime.rollback('a', messages), /claim-disk/)
+  assert.equal(sessions.get('a').candidates[0].status, 'pending')
+  assert.equal(sessions.get('a').candidates[0].messageId, messages[0].id)
+  assert.deepEqual(runtime.filterMessages('a', [], messages), [])
+  failClaim = false
+  await runtime.rollback('a', messages)
+  const second = await runtime.collect({ sessionId: 'b', visible: [] })
+  assert.equal(second.length, 1)
+  await runtime.collect({ sessionId: 'b', visible: second })
+  await runtime.rollback('b', second)
+  assert.equal(table.get('global').buckets[0].claims[0].status, 'consumed')
+  assert.deepEqual(await runtime.collect({ sessionId: 'a', visible: [] }), [])
+})
+
+test('shared reminder window grants a new quota on the next night', async t => {
+  const owned = await fixture(t, false)
+  const ctx = await owned.open()
+  const { createReminderRuntime } = await pluginModule('reminder-runtime/index.js')
+  const table = ctx.storageDomain.get('context_care_reminder_claims').table('claims')
+  let at = new Date(2026, 9, 14, 23).getTime()
+  const runtime = createReminderRuntime({ wallNow: () => at, execute: async () => ({ ok: true }),
+    updateClaims: change => table.update('global', change) })
+  t.after(() => runtime.close())
+  runtime.registerSource({ sourceId: 'shared-night', plugin: 'test', revision: 1, rules: [{
+    format: 'reminder/v2', id: 'night', on: 'request.before', text: 'Night reminder',
+    when: { timeWindow: { start: '23:00', end: '06:00' } },
+    deliver: { model: { once: 'window', shared: { reset: 'window', limit: 1 } } },
+  }] })
+  const prepare = sessionId => runtime.prepareRequest({ sessionId, events: [] })
+  await Promise.all(['a', 'b'].map(prepare))
+  const first = await Promise.all(['a', 'b'].map(sessionId => runtime.collect({ sessionId, visible: [] })))
+  assert.equal(first.flat().length, 1)
+  at = new Date(2026, 9, 15, 23).getTime()
+  await prepare('c')
+  assert.equal((await runtime.collect({ sessionId: 'c', visible: [] })).length, 1)
+  assert.equal(table.get('global').buckets.length, 1)
 })
 
 test('exported Host rows mount together, serve the journal, and remove routes and tools on unload', async t => {
@@ -872,6 +1032,74 @@ class CompletionAdapter extends LlmAdapter {
     yield { type: 'finish', reason: output.reason ?? { kind: 'stop' } }
   }
 }
+
+registerScopeHostCases({ async exercise(t, scenario) {
+  const owned = await fixture(t, false, {}, {}, { reminders: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
+  const ctx = await owned.open(), service = ctx.get('reminderRules')
+  ctx.effect(() => service.registerSource({ sourceId: 'scope-case', plugin: 'test', revision: 1,
+    ...(scenario.sourceScope ? { scope: scenario.sourceScope } : {}), rules: [{
+      format: 'reminder/v1', id: 'notice', on: 'tool.succeeded', text: 'SCOPED_HEADER_NOTICE',
+      ...(scenario.ruleScope ? { scope: scenario.ruleScope } : {}), when: { tool: 'scope_probe' },
+      deliver: { model: { once: 'surface', ...(scenario.sharedLimit === undefined ? {} : {
+        shared: { reset: 'lifetime', lifetime: 'scope-campaign', limit: scenario.sharedLimit },
+      }) } },
+    }] }).dispose)
+  class ScopeAdapter extends CompletionAdapter {
+    requests = new Map()
+    async *stream(request) { this.requests.set(request.sessionId, JSON.stringify(request.messages)); yield* super.stream(request) }
+  }
+  const adapter = new ScopeAdapter(Array.from({ length: 4 }, () => ({ blocks: [{ type: 'text', text: 'Done.' }] })))
+  ctx.llm.registerAdapter(['care-test'], adapter)
+  const definitions = [{ id: 'scope-alpha-one', preset: 'alpha' }, { id: 'scope-alpha-two', preset: 'alpha' },
+    { id: 'scope-beta', preset: 'beta' }, { id: 'scope-unassigned' }]
+  const handles = await Promise.all(definitions.map(({ id, preset }) => ctx.agents.create({
+    sessionId: id, agentOptions: { provider: 'care-test', model: 'care-test' },
+    ...(preset === undefined ? {} : { meta: { agentPreset: preset } }),
+  })))
+  const agents = handles.map(handle => handle.agent)
+  // Contradictory event hints exercise the Host resolver, not a fabricated header.
+  await Promise.all(agents.map(agent => service.submit({ sessionId: agent.id,
+    agentPreset: agent.session.header.agentPreset === 'alpha' ? 'beta' : 'alpha',
+    callId: `scope:${agent.id}`, rootCallId: `scope:${agent.id}`, name: 'scope_probe', arguments: {},
+  })))
+  const pending = new Map(agents.map(agent => [agent.id, service.snapshot(agent.id).candidates
+    .filter(candidate => candidate.status === 'pending').length]))
+  await Promise.all(agents.map(agent => completionTurn(ctx, agent)))
+  const recipients = agents.map(agent => {
+    assert.equal(ctx.sessions.get(agent.id), agent.session)
+    const request = adapter.requests.get(agent.id)
+    assert.equal(typeof request, 'string', `Missing request for ${agent.id}`)
+    return { id: agent.id, preset: agent.session.header.agentPreset,
+      catalogRules: service.catalog(agent.id).reduce((total, source) => total + source.rules.length, 0),
+      pendingBeforeTurn: pending.get(agent.id),
+      notices: agent.session.snapshotEvents().filter(event => event.type === 'user/message'
+        && event.data.source?.kind === 'plugin:dsh-context-care:reminder').length,
+      requestHasNotice: request.includes('SCOPED_HEADER_NOTICE') }
+  })
+  const claims = ctx.storageDomain.get('context_care_reminder_claims').table('claims').get('global').buckets
+    .reduce((total, bucket) => total + bucket.claims.length, 0)
+  await owned.close(ctx)
+  return { recipients, claims }
+} })
+
+registerReminderHostCases({ async create(t, stream, maxInterrupts = 1) {
+  const owned = await fixture(t, false, {}, {}, { reminders: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000,
+    streamFlushMs: 5, streamEveryChars: 256, maxInterruptsPerTurn: maxInterrupts } })
+  const ctx = await owned.open()
+  class OutputAdapter extends CompletionAdapter { async *stream(request) { yield* stream(request) } }
+  ctx.llm.registerAdapter(['care-test'], new OutputAdapter([]))
+  const agent = await ctx.agentLoop.create('output-reminder-case', { provider: 'care-test', model: 'care-test' })
+  const runtime = ctx.get('reminderRules')
+  return {
+    register(rules) { ctx.effect(() => runtime.registerSource({ sourceId: 'output-case', plugin: 'test', revision: 1, rules }).dispose) },
+    turn: () => completionTurn(ctx, agent), settle: () => runtime.settle(agent.session.id),
+    pending: () => runtime.snapshot(agent.session.id).candidates.filter(item => item.status === 'pending').length,
+    notices: () => agent.session.snapshotEvents().filter(event => event.type === 'user/message'
+      && event.data.source?.kind === 'plugin:dsh-context-care:reminder').length,
+    claims: () => ctx.storageDomain.get('context_care_reminder_claims').table('claims').get('global').buckets
+      .reduce((total, bucket) => total + bucket.claims.length, 0),
+  }
+} })
 
 async function completionTurn(ctx, agent, text = 'Continue the requested task.') {
   agent.followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))

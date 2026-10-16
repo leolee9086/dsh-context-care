@@ -10,8 +10,14 @@ export const Config = z.object({ cooldownMs: z.number().int().nonnegative().defa
   maxObservedChars: z.number().int().positive().default(65536), notifications: z.boolean().default(true),
   maxDeliveries: z.number().int().positive().default(2) }).strict().prefault({})
 
-/** Observe authoritative text blocks once and settle from committed output, with bounded parsing. */
+/** @param {import('@deepseek-ai/cordis').Context} ctx @param {import('zod').output<typeof Config>} config */
 export async function apply(ctx, config) {
+  await openCompletionHost(ctx, config)
+}
+
+/** Observe authoritative text blocks once and settle from committed output, with bounded parsing.
+ * @param {import('@deepseek-ai/cordis').Context} ctx @param {import('zod').output<typeof Config>} config */
+export async function openCompletionHost(ctx, config) {
   const store = createCompletionStateStore({ storageDomain: ctx.storageDomain })
   await store.ready
   let notices
@@ -166,4 +172,5 @@ export async function apply(ctx, config) {
     }
     if (primary !== undefined) throw primary
   })
+  return service
 }

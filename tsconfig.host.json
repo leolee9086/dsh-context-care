@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.reminders.json",
+  "compilerOptions": {
+    "allowJs": true,
+    "noEmit": true,
+    "rootDir": ".",
+    "lib": ["ES2023"]
+  },
+  "include": ["src/host-services.d.ts", "src/reminder-runtime/**/*.ts", "src/reminder-runtime/index.js", "src/host.js", "src/request-host.js"]
+}

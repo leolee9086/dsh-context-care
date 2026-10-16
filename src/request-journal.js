@@ -14,7 +14,10 @@ export function requestFingerprint(value) { return createHash('sha256').update(J
 /**
  * Open a Host-owned journal. Per-session writes serialize, and flush reports
  * the original storage failure even when an emitted event cannot await it.
- * @param options storage-domain provider, clock and write-failure reporter
+ * @param {object} options storage-domain provider, clock and write-failure reporter
+ * @param {import('@deepseek-ai/cordis').Context['storageDomain']} options.storageDomain
+ * @param {() => number} [options.now]
+ * @param {(error: unknown) => void} [options.report]
  * @returns durable put/list/flush/close methods after opening acknowledgement
  */
 export async function openRequestJournal({ storageDomain, now = () => Date.now(), report = () => {} }) {

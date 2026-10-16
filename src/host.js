@@ -1,3 +1,12 @@
+// @ts-check
+/** @import { Context } from '@deepseek-ai/cordis' */
+/** @import { Agent } from '@deepseek-ai/dsh-agent' */
+/** @import { SessionId } from '@deepseek-ai/dsh-session' */
+/** @import { IncomingMessage, ServerResponse } from 'node:http' */
+/** @import {} from '@deepseek-ai/dsh-host-webserver' */
+/** @import {} from '@deepseek-ai/dsh-client-connection' */
+/** @import {} from '@deepseek-ai/dsh-agent-preset-registry' */
+/** @import {} from '@deepseek-ai/dsh-compaction' */
 import { installContextCare, Config } from './index.js'
 import { contextCareActions } from './action-view-data.js'
 import { contextCarePrompts } from './prompt-view-data.js'
@@ -28,11 +37,12 @@ export const inject = ['agents', 'sessions', 'sessionProjections', 'tools', 'sys
  */
 const JOURNAL_ROUTE = '/context-care/rewrite-journal'
 
+/** @param {Context} ctx @param {import('zod').input<typeof Config>} config */
 export function apply(ctx, config = {}) {
   const care = installContextCare(
     ctx,
     config,
-    agent => ctx.get('agentPresets')?.serviceFor(agent, 'compaction') ?? ctx.get('compaction'),
+    /** @param {Agent} agent */ agent => ctx.get('agentPresets')?.serviceFor(agent, 'compaction') ?? ctx.get('compaction'),
   )
   ctx.effect(() => installDisplayRoute(ctx))
   ctx.effect(() => installControlRoute(ctx))
@@ -45,6 +55,7 @@ export function apply(ctx, config = {}) {
   // 未声明的可选服务才用 ctx.get**(见 packages/AGENTS.md 的 Optional services 那条)。
   const server = ctx.webServer
   // Authentication may mount after this plugin. Absence denies access without blocking model tools.
+  /** @param {IncomingMessage} req @param {ServerResponse} res */
   function authorized(req, res) {
     res.setHeader('cache-control', 'no-store')
     const connection = ctx.get('connection')
@@ -57,8 +68,10 @@ export function apply(ctx, config = {}) {
   for (const collection of ['actions', 'prompts']) ctx.effect(() => server.register({ kind: 'exact', path: `/context-care/${collection}`, async handler(req, res) {
     if (!authorized(req, res)) return
     if (req.method !== 'GET') { res.writeHead(405, { allow: 'GET' }); res.end(); return }
+    if (!req.url) { res.writeHead(400); res.end(); return }
     const query = new URL(req.url, 'http://localhost').searchParams
-    const sessionId = query.get('sessionId')
+    // The query transports an opaque session identity; sessions.get checks existence.
+    const sessionId = /** @type {SessionId | null} */ (query.get('sessionId'))
     const limit = Number(query.get('limit'))
     const offset = Number(query.get('offset') ?? 0)
     // The panel requests one session page; cap each response at 200 actions.
@@ -72,8 +85,8 @@ export function apply(ctx, config = {}) {
       const session = ctx.sessions.get(sessionId)
       if (collection === 'prompts' && !session) { res.writeHead(404); res.end(JSON.stringify({ error: 'session-unavailable' })); return }
       const records = ctx.contextCareRequests.list(sessionId)
-      const view = collection === 'actions' ? contextCareActions(records, session) : { prompts: contextCarePrompts(records, session) }
-      const items = view[collection]
+      const actions = collection === 'actions' ? contextCareActions(records, session) : undefined
+      const items = actions?.actions ?? contextCarePrompts(records, session)
       const selectedSeq = query.has('seq') ? Number(query.get('seq')) : undefined
       if (selectedSeq !== undefined && (!Number.isSafeInteger(selectedSeq) || selectedSeq < 0)) { res.writeHead(400); res.end(JSON.stringify({ error: 'invalid-sequence' })); return }
       const selectedIndex = selectedSeq === undefined ? -1 : items.findIndex(item => item.seq === selectedSeq)
@@ -81,13 +94,17 @@ export function apply(ctx, config = {}) {
       const page = items.slice(pageOffset, pageOffset + limit)
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
       const runtime = ctx.get('contextCareWorkbench')?.store.read(sessionId)?.runtime
-      const matchingFailures = collection === 'actions' ? (runtime?.runs ?? []).filter(run => ['matching', 'display'].includes(run.kind)).map(run => ({
-        id: run.id, kind: run.kind, status: run.status, reason: run.reason, count: run.count, updatedAt: run.updatedAt, sourceSeqs: run.sourceSeqs, diagnostic: run.result,
-      })) : undefined
+      const matchingFailures = collection === 'actions' ? (runtime?.runs ?? []).flatMap(run => {
+        if (run === null || typeof run !== 'object' || Array.isArray(run) || (run.kind !== 'matching' && run.kind !== 'display')) return []
+        return [{ id: run.id, kind: run.kind, status: run.status, reason: run.reason, count: run.count,
+          updatedAt: run.updatedAt, sourceSeqs: run.sourceSeqs, diagnostic: run.result }]
+      }) : undefined
       const workbench = ctx.get('contextCareWorkbench'); const agent = ctx.agents.get(sessionId)
-      const displayMarkers = collection === 'actions' ? (runtime?.state['$displayMarkers'] ?? [])
-        .filter(value => agent && value.token === workbench.token(agent)).map(value => value.seq) : undefined
-      res.end(JSON.stringify({ admission: view.admission, currentState: ctx.contextCareRequests.controls.currentSample(sessionId), matchingFailures, displayMarkers, [collection]: page, total: items.length, offset: pageOffset,
+      const markers = runtime && '$displayMarkers' in runtime.state ? runtime.state.$displayMarkers : undefined
+      const displayMarkers = collection === 'actions' ? (Array.isArray(markers) && agent && workbench ? markers.flatMap(value =>
+        value !== null && typeof value === 'object' && !Array.isArray(value) && typeof value.seq === 'number'
+          && value.token === workbench.token(agent, undefined) ? [value.seq] : []) : []) : undefined
+      res.end(JSON.stringify({ admission: actions?.admission, currentState: ctx.contextCareRequests.controls.currentSample(sessionId), matchingFailures, displayMarkers, [collection]: page, total: items.length, offset: pageOffset,
         selectedFound: selectedSeq === undefined ? undefined : selectedIndex >= 0,
         nextOffset: pageOffset + page.length < items.length ? pageOffset + page.length : null }))
     } catch (error) {
@@ -104,7 +121,8 @@ export function apply(ctx, config = {}) {
         res.setHeader('x-context-care-journal-format', journal.format ?? 'legacy')
         if (!authorized(req, res)) return
         if (req.method !== 'GET') { res.writeHead(405, { allow: 'GET' }); res.end(); return }
-        const sessionId = new URL(req.url, 'http://localhost').searchParams.get('sessionId')
+        if (!req.url) { res.writeHead(400); res.end(); return }
+        const sessionId = /** @type {SessionId | null} */ (new URL(req.url, 'http://localhost').searchParams.get('sessionId'))
         if (!sessionId) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid-query' })); return }
         if (!ctx.sessions.get(sessionId)) { res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'session-unavailable' })); return }
         try {

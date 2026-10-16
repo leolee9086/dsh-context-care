@@ -15,6 +15,19 @@ function fixture(t, options = {}) {
   return runtime
 }
 
+test('tool timeout rules match only TOOL_TIMEOUT failure results', async t => {
+  const runtime = fixture(t)
+  const timeoutRule = { format: 'reminder/v1', id: 'timeout', on: 'tool.failed', text: '工具调用超时，请检查结果',
+    when: { tool: 'read', error: { code: 'TOOL_TIMEOUT' } }, deliver: { model: { once: 'surface' } } }
+  runtime.registerSource({ ...source, rules: [timeoutRule] })
+  await runtime.submit({ ...event('other-failure'), type: 'tool.failed', error: { code: 'TOOL_FAILURE' } })
+  assert.equal((await runtime.collect({ sessionId: 's', visible: [] })).length, 0)
+  await runtime.submit({ ...event('timeout'), type: 'tool.failed', error: { code: 'TOOL_TIMEOUT' } })
+  const messages = await runtime.collect({ sessionId: 's', visible: [] })
+  assert.equal(messages.length, 1)
+  assert.equal(messages[0].content[0].text, '工具调用超时，请检查结果')
+})
+
 test('actual TS reads match; different input text does not reset visible reminder identity', async t => {
   const runtime = fixture(t)
   runtime.registerSource(source)
@@ -243,4 +256,59 @@ test('production deadlines execute short async judges on hot workers and retain 
   assert.equal(failure.diagnostic.phase, 'processing')
   assert.equal(failure.diagnostic.timeoutMs, 50)
   assert.ok(matcher.getStats().workersStarted <= initial + 1)
+})
+
+test('session and preset scopes apply to catalog, submission and delivery', async t => {
+  const runtime = fixture(t, { execute: async () => ({ ok: true }) })
+  const scopedRule = { ...rule, id: 'scoped-rule', scope: { agentPresets: ['preset-a'] } }
+  runtime.registerSource({ ...source, sourceId: 'scoped-source',
+    scope: { sessionIds: ['s'], agentPresets: ['preset-a'] }, rules: [scopedRule] })
+
+  assert.deepEqual(runtime.catalog('s'), [])
+  assert.equal(runtime.catalog('s', 'preset-b').length, 0)
+  assert.equal(runtime.catalog('s', 'preset-a')[0].rules.length, 1)
+
+  await runtime.submit({ ...event('without-preset'), sessionId: 's' })
+  assert.equal(runtime.snapshot('s').candidates.length, 0)
+  await runtime.submit({ ...event('with-preset'), sessionId: 's', agentPreset: 'preset-a' })
+  assert.equal(runtime.snapshot('s').candidates.length, 1)
+  assert.equal((await runtime.collect({ sessionId: 's', visible: [] })).length, 0)
+  assert.equal(runtime.snapshot('s').candidates[0].status, 'discarded')
+  await runtime.submit({ ...event('new-hit'), agentPreset: 'preset-a' })
+  const messages = await runtime.collect({ sessionId: 's', agentPreset: 'preset-a', visible: [] })
+  assert.equal(messages.length, 1)
+  assert.deepEqual(runtime.filterMessages('s', [], messages), [])
+  assert.deepEqual(runtime.filterMessages('s', [], messages, 'preset-b'), [])
+  assert.deepEqual(runtime.filterMessages('s', [], messages, 'preset-a'), messages)
+})
+
+test('authoritative preset lookup applies on every boundary and overrides event metadata', async t => {
+  let preset
+  const runtime = fixture(t, { resolvePreset: () => preset })
+  runtime.registerSource({ ...source, rules: [{ ...rule, scope: { agentPresets: ['p'] } }] })
+  assert.equal(runtime.catalog('s', 'p')[0].rules.length, 0)
+  await runtime.submit({ ...event('forged'), agentPreset: 'p' })
+  assert.equal(runtime.snapshot('s').candidates.length, 0)
+  preset = 'p'
+  await runtime.submit(event('matched'))
+  const messages = await runtime.collect({ sessionId: 's', visible: [] })
+  assert.equal(messages.length, 1)
+  preset = undefined
+  assert.deepEqual(runtime.filterMessages('s', [], messages, 'p'), [])
+  await runtime.rollback('s', messages)
+  assert.deepEqual(await runtime.collect({ sessionId: 's', visible: [] }), [])
+})
+
+test('legacy source identity, source scope, rule scope and callback intersect', async t => {
+  let accepted = true
+  const runtime = fixture(t, { resolvePreset: () => 'p' })
+  runtime.registerSource({ ...source, sessionId: 's', scope: { sessionIds: ['s', 'other'] },
+    rules: [{ ...rule, scope: { sessionIds: ['s'], agentPresets: ['p'] } }] },
+  { acceptSession: () => accepted })
+  await runtime.submit(event('other', 'code.ts', 'other'))
+  assert.deepEqual(runtime.catalog('other'), [])
+  assert.equal(runtime.snapshot('other').candidates.length, 0)
+  await runtime.submit(event('accepted'))
+  accepted = false
+  assert.deepEqual(await runtime.collect({ sessionId: 's', visible: [] }), [])
 })
