@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createRuleControls, ControlPatch } from '../src/rule-controls.js'
 import { createReminderRuntime } from '../src/reminder-runtime/index.js'
+import { visibleReminderControls } from '../lib/reminder-runtime/control-view.js'
 import { createStreamWatch } from '../src/stream-watch.js'
 import { createNoticeChannel } from '../src/notice-channel.js'
 import { controlledGuidance, controlledState, controlledEngineRules } from '../src/control-catalog.js'
@@ -21,7 +22,7 @@ test('reminder catalogs preserve scoped recipients and string policy epochs acro
     save: async (id, value) => { entries.set(id, JSON.parse(JSON.stringify(value))) } }
   let runtime = createReminderRuntime(ports)
   t.after(() => runtime.close())
-  const unregister = controls.registerProvider(id => runtime.catalog(id))
+  const unregister = controls.registerProvider(id => runtime.controlCatalog(id))
   t.after(unregister)
   const definition = { sourceId: 'scoped', plugin: 'test', revision: 1, scope: { agentPresets: ['alpha'] }, rules: [{
     format: 'reminder/v1', id: 'notice', on: 'tool.succeeded', text: 'SCOPED_NOTICE',
@@ -29,9 +30,12 @@ test('reminder catalogs preserve scoped recipients and string policy epochs acro
   }] }
   runtime.registerSource(definition)
   assert.deepEqual(controls.snapshot('included').sources[0].scope, { agentPresets: ['alpha'] })
-  assert.deepEqual(controls.catalog('excluded'), [])
+  assert.deepEqual(visibleReminderControls(controls.snapshot('excluded').sources, await runtime.catalog('excluded')), [])
+  assert.equal(visibleReminderControls(controls.snapshot('included').sources, await runtime.catalog('included'))[0].rules[0].actions[0].enabled, true)
+  // Policy preferences retain definitions; the runtime separately enforces recipient eligibility.
   assert.equal(controls.enabled('included', 'scoped', 'notice', 'model'), true)
-  assert.equal(controls.enabled('excluded', 'scoped', 'notice', 'model'), false)
+  await runtime.submit({ sessionId: 'excluded', callId: 'excluded', rootCallId: 'excluded', name: 'probe' })
+  assert.equal(runtime.snapshot('excluded').candidates.length, 0)
   await runtime.submit({ sessionId: 'included', callId: 'probe', rootCallId: 'probe', name: 'probe' })
   assert.equal(entries.get('included').candidates[0].policy, controls.epoch('included', 'scoped', 'notice'))
   await runtime.close()

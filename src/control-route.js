@@ -1,5 +1,6 @@
 import { ControlPatch, ControlError } from './rule-controls.js'
 import { CapacitySettings, CapacityError } from './reminder-capacity.js'
+import { visibleReminderControls } from '../lib/reminder-runtime/control-view.js'
 
 /** Install authenticated session controls; authorization is required even on loopback. */
 export function installControlRoute(ctx) {
@@ -19,9 +20,11 @@ export function installControlRoute(ctx) {
     if (!sessionId || !ctx.sessions.get(sessionId)) { respond(404, { error: 'session-unavailable' }); return }
     const controls = ctx.contextCareRequests.controls
     try {
-      const reminders = capacity && ctx.get('reminderRules')
+      const reminders = ctx.get('reminderRules')
+      const present = async snapshot => reminders
+        ? { ...snapshot, sources: visibleReminderControls(snapshot.sources, await reminders.catalog(sessionId)) } : snapshot
       if (capacity && !reminders) { respond(503, { error: 'reminder-service-unavailable' }); return }
-      if (req.method === 'GET') { respond(200, capacity ? reminders.capacitySnapshot() : controls.snapshot(sessionId)); return }
+      if (req.method === 'GET') { respond(200, capacity ? reminders.capacitySnapshot() : await present(controls.snapshot(sessionId))); return }
       // A same-origin JSON write cannot be submitted by a cross-origin HTML form.
       const origin = req.headers.origin
       if (origin) {
@@ -47,7 +50,13 @@ export function installControlRoute(ctx) {
         if (!(error instanceof SyntaxError) && error?.name !== 'ZodError') throw error
         respond(400, { error: 'invalid-control-request' }); return
       }
-      respond(200, capacity ? await reminders.setCapacity(change) : await controls.patch(sessionId, change))
+      if (!capacity) {
+        const snapshot = await present(controls.snapshot(sessionId))
+        if (!snapshot.sources.some(source => source.sourceId === change.sourceId && source.rules.some(rule => rule.id === change.ruleId))) {
+          throw new ControlError(404, 'rule-unavailable')
+        }
+      }
+      respond(200, capacity ? await reminders.setCapacity(change) : await present(await controls.patch(sessionId, change)))
     } catch (error) {
       if (error instanceof CapacityError) { respond(error.status, { error: error.message }); return }
       if (error instanceof ControlError) {

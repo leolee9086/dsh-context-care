@@ -6,7 +6,7 @@
 
 参考 S-forge MAGI 的指标曲线和 Codex 的上下文生命周期设计，以独立 Cordis 插件接入，不修改 Harness、S-forge 或 Codex 源码。本文档以中文为主。
 
-> 发行版本：`v0.11.0`，面向官方 DSH `0.2.0-rc.2`。通过 GitHub 标签或 Release 发行包安装，标签包含客户端及提醒运行时构建产物。思源规则配合 `dsh-plugin-siyuan v0.6.0` 使用，支持会话/预设范围、跨会话共享次数、输出模式及工具超时提醒。
+> 版本：`v0.12.0`，面向官方 DSH `0.2.0-rc.2`。配合 DSH 思源对接插件 `dsh-plugin-siyuan v0.7.0`，支持独立规则来源、当前预设名称与模型条件，以及跨会话共享次数。通过固定 GitHub 标签安装，标签携带客户端及提醒运行时构建产物。
 
 ## 指标与行为
 
@@ -76,7 +76,38 @@ TypeScript 来源插件可从 `dsh-context-care/reminders` 导入 `ReminderServi
 
 ### 接收范围与跨会话额度
 
-来源与规则均可声明 `scope: { sessionIds: ['session-a'], agentPresets: ['writing'] }`。各列表内取并集，两种维度及来源/规则范围间取交集；未声明维度不限，空列表拒绝。Host 每次从持久会话头读取预设身份，避免事件中的旧身份覆盖真实接收范围。旧 `source.sessionId` 与 `acceptSession` 继续生效。
+来源与规则均可声明 `scope: { sessionIds: ['session-a'], agentPresets: ['writing'] }`。各列表内取并集，列表、条件及来源/规则范围间取交集；未声明维度不限，空列表拒绝。旧 `source.sessionId` 与 `acceptSession` 继续生效。思源插件的会话规则来源核心决定候选来源，与会话默认操作核心独立。
+
+`scope.condition` 可按当前预设名称与模型组合筛选：
+
+```yaml
+scope:
+  condition:
+    kind: all
+    conditions:
+      - kind: compare
+        field: session.agentPresetName
+        op: eq
+        value: 织
+      - kind: compare
+        field: session.model
+        op: contains
+        value: gpt-
+```
+
+| 条件字段 | 取值 |
+| --- | --- |
+| `session.sessionId` | 当前会话 ID |
+| `session.agentPreset` | 当前预设 ID |
+| `session.agentPresetName` | 注册表中当前预设的名称 |
+| `session.provider` | 当前模型的提供方 ID |
+| `session.model` | 当前模型 ID |
+
+条件沿用规则引擎的 `all` / `any` / `not` 与 `compare` 语法，比较支持 `eq`、`ne`、`contains`、`exists`，区分大小写。`exists` 不带 `value`，其它比较带字符串 `value`。缺失事实不满足比较（包括 `ne`）；可用 `not` 包裹 `exists` 明确匹配缺失。每组 1–64 项，整棵树最多 128 节点、深度 16，比较文本最多 4096 字符。`sessionIds` / `agentPresets` 列表最多 128 项，每项最多 256 字符。
+
+Host 从当前预设投影读取选择，再从注册表读取真实名称；模型按待生效选择、最近请求、当前默认模型的顺序读取。匹配、候选保存、额度预留及最终交付都会重新核对，事件附带的身份不覆盖 Host 事实。`scope.condition` 筛接收会话，`when.condition` 筛触发事件及分析器事实。
+
+服务的 `catalog` 和 `filterMessages` 返回 Promise，调用方必须 `await`；界面通过异步目录显示当前适用规则。同步 `controlCatalog` 只为开关系统提供规则定义，投递仍由运行时按当前会话条件判定。
 
 在 `deliver.model` 中添加 `shared: { reset: 'lifetime', lifetime: 'campaign-1', limit: 2 }`，可让符合范围的多个会话合计消费两次提醒。`limit: 1` 表示合计一次；v2/v3 也可用 `shared: { reset: 'window', limit: 1 }`，要求声明 `when.timeWindow`。`once` 控制会话内去重，`shared` 控制跨会话总次数。共享身份包含来源、规则和生命周期名或窗口；编辑正文/revision、压缩和重启保留已消费次数。更换生命周期名或进入下一窗口才获得新额度。
 
@@ -340,7 +371,7 @@ UI 优先显示当前进程最近一次请求边界的独立数值采样，关�
 
 刚发布的依赖受 pnpm 的 `minimumReleaseAge` 政策约束。本机 pnpm 11.7.0 与 12.6.0 的冻结锁文件安装都因两个版本未满24小时而失败；pnpm 11.7.0 的普通 `add` 成功，但自动在消费目录记录了两个精确版本的 `minimumReleaseAgeExclude`。这与无豁免安装不同。保持该政策且没有精确版本批准的环境应等待其发布时间窗口满足后再安装；本仓库不分发豁免，不修改消费者的全局设置。
 
-GitHub 标签已包含客户端构建产物；包没有 `prepare`、`prepack` 或安装生命周期脚本。官方插件管理器的包来源可直接填写 `github:leolee9086/dsh-context-care#v0.11.0`。普通 pnpm 安装不需要 `allowBuilds`、`--ignore-scripts` 或 `blockExoticSubdeps` 例外。v0.8.0 的安装契约问题和历史验证限制保留在更新记录中。
+GitHub 标签已包含客户端构建产物；包没有 `prepare`、`prepack` 或安装生命周期脚本。官方插件管理器的包来源可直接填写 `github:leolee9086/dsh-context-care#v0.12.0`。普通 pnpm 安装不需要 `allowBuilds`、`--ignore-scripts` 或 `blockExoticSubdeps` 例外。v0.8.0 的安装契约问题和历史验证限制保留在更新记录中。
 
 ### 安装发行包
 
@@ -354,10 +385,10 @@ Host 代码更新后需要重启 DSH，再刷新页面；重新启用条目不�
 
 ### 从 GitHub 安装
 
-使用固定的 `v0.11.0` 标签：
+使用固定的 `v0.12.0` 标签：
 
 ```sh
-dsh plugin --profile web add "github:leolee9086/dsh-context-care#v0.11.0"
+dsh plugin --profile web add "github:leolee9086/dsh-context-care#v0.12.0"
 ```
 
 构建产物 `lib/` 已入库，装完即可用 —— 不需要额外构建，也不需要手工打包上传 tgz。带上标签安装，版本不会跟着分支漂。

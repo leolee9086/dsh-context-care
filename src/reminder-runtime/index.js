@@ -8,6 +8,7 @@
 import { createReminderRuntime, ReminderConfig, REMINDER_DOMAIN, REMINDER_SERVICE } from '../../lib/reminder-runtime/runtime.js'
 import { createOutputStream } from './output-stream.js'
 import { createOutputInterrupt } from '../../lib/reminder-runtime/interrupt.js'
+import { createSessionIdentityResolver } from '../../lib/reminder-runtime/session-identity.js'
 import { createBoundedMatcher } from '../bounded-matcher.js'
 import { CapacitySettings } from '../reminder-capacity.js'
 import { releaseResources } from '../resource-cleanup.js'
@@ -65,8 +66,7 @@ async function startReminderService(ctx, input, controls, facility) {
     await matcher.warmup()
     const runtime = createReminderRuntime({ config, entries: [...table.entries()], save: (id, value) => table.put(id, value),
       capacity: settings.get('global'), saveCapacity: value => settings.put('global', value),
-      // Runtime keys originate from session IDs; restore their platform identity at this seam.
-      resolvePreset: id => ctx.sessions.get(/** @type {SessionId} */ (id))?.header.agentPreset,
+      resolveIdentity: createSessionIdentityResolver(ctx),
       updateClaims: change => claimTable.update('global', change),
       dispatches: true, execute: (input, signal, timing) => matcher.detect(input, signal, timing), report: error => ctx.logger.warn(`reminder: ${error instanceof Error ? error.message : String(error)}`),
       eligible: (id, source, rule) => controls.enabled(id, source, rule, 'model'),
@@ -88,11 +88,11 @@ async function startReminderService(ctx, input, controls, facility) {
       submit: event => runtime.submit(event),
       afterSubmit: interrupt,
       report: error => ctx.logger.warn(`reminder: ${error instanceof Error ? error.message : String(error)}`),
-      enabled: id => runtime.catalog(id).some(source => source.rules.some(rule => rule.definition?.format === 'reminder/v3')) })
+      enabled: id => runtime.controlCatalog(id).some(source => source.rules.some(rule => rule.definition?.format === 'reminder/v3')) })
     resources.unshift(['reminder-output-stream', () => outputStream.close()])
     ctx.effect(() => () => releaseResources(resources, undefined))
     ctx.provide(REMINDER_SERVICE, runtime)
-    ctx.effect(() => controls.registerProvider((/** @type {string} */ id) => runtime.catalog(id)))
+    ctx.effect(() => controls.registerProvider((/** @type {string} */ id) => runtime.controlCatalog(id)))
     ctx.on('tools/result', (exec, result) => {
       if (!exec.agent) return
       const visible = exec.agent.session.deriveMessages()

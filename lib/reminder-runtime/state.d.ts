@@ -3,6 +3,7 @@ import { ReminderRule, Source, compileRule } from './schema.js';
 import { CapacitySettings, CapacityWire } from './capacity.js';
 import type { ClaimBookValue } from './claims.js';
 import type { HistoryEvent, MessageView } from './request-context.js';
+import type { RecipientFacts } from './scope.js';
 export declare const Detector: z.ZodObject<{
     ref: z.ZodString;
     revision: z.ZodNumber;
@@ -11,10 +12,10 @@ export declare const Detector: z.ZodObject<{
 }, z.core.$strict>;
 export declare const Event: z.ZodObject<{
     type: z.ZodOptional<z.ZodEnum<{
-        "assistant.output": "assistant.output";
         "tool.succeeded": "tool.succeeded";
         "tool.failed": "tool.failed";
         "request.before": "request.before";
+        "assistant.output": "assistant.output";
     }>>;
     sessionId: z.ZodString;
     agentPreset: z.ZodOptional<z.ZodString>;
@@ -114,9 +115,11 @@ declare const Candidate: z.ZodObject<{
         scope: z.ZodOptional<z.ZodPipe<z.ZodObject<{
             sessionIds: z.ZodOptional<z.ZodArray<z.ZodString>>;
             agentPresets: z.ZodOptional<z.ZodArray<z.ZodString>>;
+            condition: z.ZodOptional<z.ZodJSONSchema>;
         }, z.core.$strict>, z.ZodTransform<import("./scope.js").RecipientScope, {
             sessionIds?: string[] | undefined;
             agentPresets?: string[] | undefined;
+            condition?: z.core.util.JSONType | undefined;
         }>>>;
         text: z.ZodString;
         judge: z.ZodOptional<z.ZodObject<{
@@ -158,9 +161,11 @@ declare const Candidate: z.ZodObject<{
         scope: z.ZodOptional<z.ZodPipe<z.ZodObject<{
             sessionIds: z.ZodOptional<z.ZodArray<z.ZodString>>;
             agentPresets: z.ZodOptional<z.ZodArray<z.ZodString>>;
+            condition: z.ZodOptional<z.ZodJSONSchema>;
         }, z.core.$strict>, z.ZodTransform<import("./scope.js").RecipientScope, {
             sessionIds?: string[] | undefined;
             agentPresets?: string[] | undefined;
+            condition?: z.core.util.JSONType | undefined;
         }>>>;
         text: z.ZodString;
         judge: z.ZodOptional<z.ZodObject<{
@@ -206,9 +211,11 @@ declare const Candidate: z.ZodObject<{
         scope: z.ZodOptional<z.ZodPipe<z.ZodObject<{
             sessionIds: z.ZodOptional<z.ZodArray<z.ZodString>>;
             agentPresets: z.ZodOptional<z.ZodArray<z.ZodString>>;
+            condition: z.ZodOptional<z.ZodJSONSchema>;
         }, z.core.$strict>, z.ZodTransform<import("./scope.js").RecipientScope, {
             sessionIds?: string[] | undefined;
             agentPresets?: string[] | undefined;
+            condition?: z.core.util.JSONType | undefined;
         }>>>;
         text: z.ZodString;
         judge: z.ZodOptional<z.ZodObject<{
@@ -322,9 +329,11 @@ export declare const SessionState: z.ZodObject<{
             scope: z.ZodOptional<z.ZodPipe<z.ZodObject<{
                 sessionIds: z.ZodOptional<z.ZodArray<z.ZodString>>;
                 agentPresets: z.ZodOptional<z.ZodArray<z.ZodString>>;
+                condition: z.ZodOptional<z.ZodJSONSchema>;
             }, z.core.$strict>, z.ZodTransform<import("./scope.js").RecipientScope, {
                 sessionIds?: string[] | undefined;
                 agentPresets?: string[] | undefined;
+                condition?: z.core.util.JSONType | undefined;
             }>>>;
             text: z.ZodString;
             judge: z.ZodOptional<z.ZodObject<{
@@ -366,9 +375,11 @@ export declare const SessionState: z.ZodObject<{
             scope: z.ZodOptional<z.ZodPipe<z.ZodObject<{
                 sessionIds: z.ZodOptional<z.ZodArray<z.ZodString>>;
                 agentPresets: z.ZodOptional<z.ZodArray<z.ZodString>>;
+                condition: z.ZodOptional<z.ZodJSONSchema>;
             }, z.core.$strict>, z.ZodTransform<import("./scope.js").RecipientScope, {
                 sessionIds?: string[] | undefined;
                 agentPresets?: string[] | undefined;
+                condition?: z.core.util.JSONType | undefined;
             }>>>;
             text: z.ZodString;
             judge: z.ZodOptional<z.ZodObject<{
@@ -414,9 +425,11 @@ export declare const SessionState: z.ZodObject<{
             scope: z.ZodOptional<z.ZodPipe<z.ZodObject<{
                 sessionIds: z.ZodOptional<z.ZodArray<z.ZodString>>;
                 agentPresets: z.ZodOptional<z.ZodArray<z.ZodString>>;
+                condition: z.ZodOptional<z.ZodJSONSchema>;
             }, z.core.$strict>, z.ZodTransform<import("./scope.js").RecipientScope, {
                 sessionIds?: string[] | undefined;
                 agentPresets?: string[] | undefined;
+                condition?: z.core.util.JSONType | undefined;
             }>>>;
             text: z.ZodString;
             judge: z.ZodOptional<z.ZodObject<{
@@ -560,6 +573,8 @@ export interface RuntimeOptions {
     saveCapacity?: (value: z.infer<typeof CapacitySettings>) => Promise<unknown> | void;
     dispatches?: boolean;
     resolvePreset?: (sessionId: string) => string | undefined;
+    /** Authoritative current session facts; supplied event metadata is ignored when present. */
+    resolveIdentity?: (sessionId: string, signal?: AbortSignal) => RecipientFacts | Promise<RecipientFacts>;
     updateClaims?: (change: (book: ClaimBookValue) => ClaimBookValue) => Promise<ClaimBookValue>;
     wallNow?: () => number;
     now?: () => number;

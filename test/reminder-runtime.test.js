@@ -174,7 +174,7 @@ test('session scope and global rule capacity apply across sources', async t => {
   assert.throws(() => runtime.registerSource({ ...source, sourceId: 'other' }), { code: 'reminder-capacity-exceeded' })
   await runtime.submit(event('1'))
   accepted = false
-  assert.deepEqual(runtime.catalog('s'), [])
+  assert.deepEqual(await runtime.catalog('s'), [])
   assert.deepEqual(await runtime.collect({ sessionId: 's', visible: [] }), [])
 })
 
@@ -184,7 +184,7 @@ test('default catalog accepts thousands of rules exceeding the execution byte bu
   runtime.registerSource({ ...source, rules })
   assert.equal(runtime.capacitySnapshot().registeredRules, 2000)
   assert.equal(runtime.capacitySnapshot().maxRules, 0)
-  assert.equal(runtime.catalog('s')[0].rules.length, 2000)
+  assert.equal((await runtime.catalog('s'))[0].rules.length, 2000)
 })
 
 test('capacity changes persist before publication, retain existing rules and recover unlimited registration', async t => {
@@ -264,9 +264,9 @@ test('session and preset scopes apply to catalog, submission and delivery', asyn
   runtime.registerSource({ ...source, sourceId: 'scoped-source',
     scope: { sessionIds: ['s'], agentPresets: ['preset-a'] }, rules: [scopedRule] })
 
-  assert.deepEqual(runtime.catalog('s'), [])
-  assert.equal(runtime.catalog('s', 'preset-b').length, 0)
-  assert.equal(runtime.catalog('s', 'preset-a')[0].rules.length, 1)
+  assert.deepEqual(await runtime.catalog('s'), [])
+  assert.equal((await runtime.catalog('s', 'preset-b')).length, 0)
+  assert.equal((await runtime.catalog('s', 'preset-a'))[0].rules.length, 1)
 
   await runtime.submit({ ...event('without-preset'), sessionId: 's' })
   assert.equal(runtime.snapshot('s').candidates.length, 0)
@@ -277,16 +277,16 @@ test('session and preset scopes apply to catalog, submission and delivery', asyn
   await runtime.submit({ ...event('new-hit'), agentPreset: 'preset-a' })
   const messages = await runtime.collect({ sessionId: 's', agentPreset: 'preset-a', visible: [] })
   assert.equal(messages.length, 1)
-  assert.deepEqual(runtime.filterMessages('s', [], messages), [])
-  assert.deepEqual(runtime.filterMessages('s', [], messages, 'preset-b'), [])
-  assert.deepEqual(runtime.filterMessages('s', [], messages, 'preset-a'), messages)
+  assert.deepEqual(await runtime.filterMessages('s', [], messages), [])
+  assert.deepEqual(await runtime.filterMessages('s', [], messages, 'preset-b'), [])
+  assert.deepEqual(await runtime.filterMessages('s', [], messages, 'preset-a'), messages)
 })
 
 test('authoritative preset lookup applies on every boundary and overrides event metadata', async t => {
   let preset
   const runtime = fixture(t, { resolvePreset: () => preset })
   runtime.registerSource({ ...source, rules: [{ ...rule, scope: { agentPresets: ['p'] } }] })
-  assert.equal(runtime.catalog('s', 'p')[0].rules.length, 0)
+  assert.equal((await runtime.catalog('s', 'p'))[0].rules.length, 0)
   await runtime.submit({ ...event('forged'), agentPreset: 'p' })
   assert.equal(runtime.snapshot('s').candidates.length, 0)
   preset = 'p'
@@ -294,7 +294,7 @@ test('authoritative preset lookup applies on every boundary and overrides event 
   const messages = await runtime.collect({ sessionId: 's', visible: [] })
   assert.equal(messages.length, 1)
   preset = undefined
-  assert.deepEqual(runtime.filterMessages('s', [], messages, 'p'), [])
+  assert.deepEqual(await runtime.filterMessages('s', [], messages, 'p'), [])
   await runtime.rollback('s', messages)
   assert.deepEqual(await runtime.collect({ sessionId: 's', visible: [] }), [])
 })
@@ -306,7 +306,7 @@ test('legacy source identity, source scope, rule scope and callback intersect', 
     rules: [{ ...rule, scope: { sessionIds: ['s'], agentPresets: ['p'] } }] },
   { acceptSession: () => accepted })
   await runtime.submit(event('other', 'code.ts', 'other'))
-  assert.deepEqual(runtime.catalog('other'), [])
+  assert.deepEqual(await runtime.catalog('other'), [])
   assert.equal(runtime.snapshot('other').candidates.length, 0)
   await runtime.submit(event('accepted'))
   accepted = false

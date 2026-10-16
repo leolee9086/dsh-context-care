@@ -3,6 +3,7 @@
 declare module '@leolee9086/dsh-rule-engine' {
   import type { z } from 'zod'
   type JsonValue = z.infer<ReturnType<typeof z.json>>
+  export function matchConditionV2(condition: JsonValue, snapshot: JsonValue, freshSeq?: number): { ok: boolean }
   export function normalizeRuleV2(input: {
     schemaVersion: 2
     sourceId: string

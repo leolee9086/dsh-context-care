@@ -4,6 +4,7 @@ import { ReminderRule, Source, compileRule } from './schema.js'
 import { CapacitySettings, CapacityWire } from './capacity.js'
 import type { ClaimBookValue } from './claims.js'
 import type { HistoryEvent, MessageView } from './request-context.js'
+import type { RecipientFacts } from './scope.js'
 
 export const Detector = z.object({ ref: z.string().min(1), revision: z.number().int().positive(),
   module: z.string().url().refine(value => new URL(value).protocol === 'file:', 'detector module must be a local file URL'),
@@ -89,6 +90,8 @@ export interface RuntimeOptions {
   saveCapacity?: (value: z.infer<typeof CapacitySettings>) => Promise<unknown> | void
   dispatches?: boolean
   resolvePreset?: (sessionId: string) => string | undefined
+  /** Authoritative current session facts; supplied event metadata is ignored when present. */
+  resolveIdentity?: (sessionId: string, signal?: AbortSignal) => RecipientFacts | Promise<RecipientFacts>
   updateClaims?: (change: (book: ClaimBookValue) => ClaimBookValue) => Promise<ClaimBookValue>
   wallNow?: () => number
   now?: () => number

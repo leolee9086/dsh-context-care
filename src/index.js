@@ -874,10 +874,15 @@ export function installContextCare(ctx, raw, compactionSource) {
     if (deepCompleted) messages = messages.filter(message => message !== restRequest)
     const reminderService = ctx.get('reminderRules')
     if (reminderService) {
-      const filtered = reminderService.filterMessages(String(agent.session.id), agent.session.deriveMessages(), messages)
-      await reminderService.rollback(String(agent.session.id), messages.filter(message => !filtered.includes(message)))
-        .catch(error => ctx.logger.warn(`reminder rollback: ${error.message}`))
-      messages = filtered
+      for (;;) {
+        const filtered = await reminderService.filterMessages(String(agent.session.id), agent.session.deriveMessages(), messages)
+        const denied = messages.filter(message => !filtered.includes(message))
+        messages = filtered
+        if (!denied.length) break
+        await reminderService.rollback(String(agent.session.id), denied)
+          .catch(error => ctx.logger.warn(`reminder rollback: ${error.message}`))
+        // 回滚会让出执行权；再次筛选剩余消息，直至最后一次核对后可直接交付。
+      }
     }
 
     controls.sample(String(agent.session.id), current.state)

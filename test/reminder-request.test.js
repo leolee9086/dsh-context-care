@@ -81,7 +81,7 @@ test('snooze after reservation filters handoff; rollback cannot erase the explic
   const f = fixture(t)
   await f.prepare(); const messages = await f.collect()
   await f.runtime.snooze({ sessionId: 's', sourceId: 'notes', ruleId: 'night' })
-  assert.deepEqual(f.runtime.filterMessages('s', [], messages), [])
+  assert.deepEqual(await f.runtime.filterMessages('s', [], messages), [])
   await f.runtime.rollback('s', messages)
   await f.prepare(); assert.deepEqual(await f.collect(), [])
 })

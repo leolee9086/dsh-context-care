@@ -172,7 +172,7 @@ declare module '@deepseek-ai/dsh-llm' {
 /** One runtime owns source snapshots, evaluation lifetimes and durable candidate records.
  * save ACKs before publishing state; execute must settle cancellation after its worker stops.
  * No Cordis or live session objects enter the scheduler. */
-export declare function createReminderRuntime({ config: input, entries, save, execute, capacity, saveCapacity, dispatches, resolvePreset, updateClaims, wallNow, now, eligible, epoch, report }?: RuntimeOptions): {
+export declare function createReminderRuntime({ config: input, entries, save, execute, capacity, saveCapacity, dispatches, resolvePreset, resolveIdentity, updateClaims, wallNow, now, eligible, epoch, report }?: RuntimeOptions): {
     capacitySnapshot: () => {
         registeredRules: number;
         rejections: {
@@ -345,7 +345,154 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
     };
     registerDetector(input: unknown): () => Promise<void>;
     registerAnalyzer(input: unknown): () => Promise<void>;
-    catalog(sessionId: string, agentPreset?: string): {
+    /** Resolve current recipient facts before presenting the applicable rules. */
+    catalog(sessionId: string, agentPreset?: string): Promise<{
+        readOnly: boolean;
+        rules: {
+            id: string;
+            title: string;
+            description: string;
+            definition: {
+                format: "reminder/v1";
+                id: string;
+                priority: number;
+                text: string;
+                deliver: {
+                    model: {
+                        once: "surface";
+                        shared?: {
+                            reset: "lifetime";
+                            lifetime: string;
+                            limit: number;
+                        } | undefined;
+                    };
+                };
+                on: "tool.succeeded" | "tool.failed";
+                when: {
+                    tool: string;
+                    arguments: Record<string, {
+                        regex: string;
+                        flags: string;
+                    }>;
+                    error?: {
+                        code: string;
+                    } | undefined;
+                    condition?: import("zod").JSONType | undefined;
+                };
+                title?: string | undefined;
+                exclusiveGroup?: string | undefined;
+                scope?: import("./scope.js").RecipientScope | undefined;
+                judge?: {
+                    ref: string;
+                    revision: number;
+                    params?: import("zod").JSONType | undefined;
+                    timeoutMs?: number | undefined;
+                } | undefined;
+            } | {
+                id: string;
+                priority: number;
+                text: string;
+                format: "reminder/v2";
+                on: "request.before";
+                when: {
+                    timeWindow?: {
+                        start: string;
+                        end: string;
+                        timeZone: "local";
+                    } | undefined;
+                    humanActivity?: {
+                        withinSeconds: number;
+                    } | undefined;
+                    condition?: import("zod").JSONType | undefined;
+                };
+                deliver: {
+                    model: {
+                        once: "window" | "surface";
+                        shared?: {
+                            reset: "lifetime";
+                            lifetime: string;
+                            limit: number;
+                        } | {
+                            reset: "window";
+                            limit: number;
+                        } | undefined;
+                    };
+                };
+                title?: string | undefined;
+                exclusiveGroup?: string | undefined;
+                scope?: import("./scope.js").RecipientScope | undefined;
+                judge?: {
+                    ref: string;
+                    revision: number;
+                    params?: import("zod").JSONType | undefined;
+                    timeoutMs?: number | undefined;
+                } | undefined;
+            } | {
+                id: string;
+                priority: number;
+                text: string;
+                format: "reminder/v3";
+                on: "assistant.output";
+                when: {
+                    blockTypes: ("text" | "reasoning")[];
+                    pattern: {
+                        kind: "literal";
+                        text: string;
+                    } | {
+                        kind: "keywords";
+                        values: string[];
+                        mode: "any" | "all";
+                    } | {
+                        regex: string;
+                        flags: string;
+                        kind: "regex";
+                    };
+                    timeWindow?: {
+                        start: string;
+                        end: string;
+                        timeZone: "local";
+                    } | undefined;
+                    condition?: import("zod").JSONType | undefined;
+                };
+                deliver: {
+                    model: {
+                        once: "window" | "surface";
+                        shared?: {
+                            reset: "lifetime";
+                            lifetime: string;
+                            limit: number;
+                        } | {
+                            reset: "window";
+                            limit: number;
+                        } | undefined;
+                        interrupt?: "abort-resume" | undefined;
+                    };
+                };
+                title?: string | undefined;
+                exclusiveGroup?: string | undefined;
+                scope?: import("./scope.js").RecipientScope | undefined;
+                judge?: {
+                    ref: string;
+                    revision: number;
+                    params?: import("zod").JSONType | undefined;
+                    timeoutMs?: number | undefined;
+                } | undefined;
+            };
+            actions: {
+                id: string;
+                title: string;
+                defaultEnabled: boolean;
+            }[];
+        }[];
+        scope?: import("./scope.js").RecipientScope | undefined;
+        sessionId?: string | undefined;
+        sourceId: string;
+        plugin: string;
+        registration: string;
+        executor: string;
+    }[]>;
+    /** Synchronous action definitions for policy lookup; delivery and UI use catalog/recipient checks. */
+    controlCatalog(sessionId: string): {
         readOnly: boolean;
         rules: {
             id: string;
@@ -964,6 +1111,6 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
         };
     }[]>;
     rollback(sessionId: string, messages: MessageView[]): Promise<void>;
-    filterMessages<Message extends MessageView>(sessionId: string, visible: MessageView[], messages: Message[], agentPreset?: string): Message[];
+    filterMessages<Message extends MessageView>(sessionId: string, visible: MessageView[], messages: Message[], agentPreset?: string): Promise<Message[]>;
     close(): Promise<void>;
 };

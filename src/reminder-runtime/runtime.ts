@@ -58,7 +58,7 @@ function reminderMessage(candidate: CandidateValue, messageId: string) {
  * save ACKs before publishing state; execute must settle cancellation after its worker stops.
  * No Cordis or live session objects enter the scheduler. */
 export function createReminderRuntime({ config: input, entries = [], save = async () => {}, execute = async () => { throw new Error('reminder-executor-unavailable') },
-  capacity, saveCapacity = async () => {}, dispatches = false, resolvePreset, updateClaims,
+  capacity, saveCapacity = async () => {}, dispatches = false, resolvePreset, resolveIdentity, updateClaims,
   wallNow = () => Date.now(), now = () => performance.now(), eligible = () => true, epoch = () => 0, report = () => {} }: RuntimeOptions = {}) {
   const config = ReminderConfig.parse(input)
   let settings = CapacitySettings.parse(capacity ?? { revision: 0, maxRules: config.maxRules })
@@ -69,7 +69,7 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
   const recovered = new Set([...records.values()].flatMap(state => state.candidates.map(candidate => candidate.id)))
   const sources = new Map<string, RegisteredSource>(), detectors = new Map<string, DetectorValue>(), analyzers = new Map<string, DetectorValue>()
   const chains = new Map<string, Promise<unknown>>(), queues = new Map<string, Run[]>(), running = new Map<string, Run>()
-  const failures = new Map<string, unknown>(), admissions = new Set<{ sessionId: string; task?: Promise<void> }>()
+  const failures = new Map<string, unknown>(), admissions = new Set<{ sessionId: string; controller: AbortController; task?: Promise<void> }>()
   let closed = false, pumping = false
   const empty = (): StateValue => ({ seen: [], candidates: [], diagnostics: [], windows: [] })
   const serial = <T>(id: string, fn: () => T | Promise<T>) => {
@@ -119,8 +119,14 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
     if (candidate.window && (at < candidate.window.start || at >= candidate.window.end)) return false
     return !candidate.request || requestEligible(candidate.rule, { ...candidate.request, clock: { at } })
   }
-  function identity(sessionId: string, agentPreset?: string) {
+  async function identity(sessionId: string, agentPreset?: string, signal?: AbortSignal): Promise<RecipientIdentity> {
     // Host identity is read afresh at each boundary; event metadata never overrides it.
+    signal?.throwIfAborted()
+    if (resolveIdentity) {
+      const facts = await resolveIdentity(sessionId, signal)
+      signal?.throwIfAborted()
+      return { ...facts, sessionId }
+    }
     const preset = resolvePreset ? resolvePreset(sessionId) : agentPreset
     return { sessionId, ...(preset === undefined ? {} : { agentPreset: preset }) }
   }
@@ -133,7 +139,7 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
   function ruleAccepts(rule: RuleValue, target: RecipientIdentity) {
     return matchesScope(target, rule.scope ?? {})
   }
-  function current(candidate: CandidateValue, target = identity(candidate.sessionId, candidate.agentPreset)) {
+  function current(candidate: CandidateValue, target: RecipientIdentity) {
     const source = sources.get(candidate.sourceId)
     const rule = source?.value.rules.find(value => value.id === candidate.ruleId)
     if (!source || !rule) return false
@@ -240,15 +246,24 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
           ...errorDetail(error) })
       } finally { clearTimeout(timer); controller.signal.removeEventListener('abort', abort) }
     }
-    await update(event.sessionId, state => {
+    await update(event.sessionId, async state => {
       state.diagnostics.push(...diagnostics.map(detail => AnalysisFacts.parse(jsonCopy(detail))))
+      if (controller.signal.aborted || closed) return
+      const target = await identity(event.sessionId, event.agentPreset, controller.signal)
       for (const candidate of results) {
-        if (controller.signal.aborted || closed || !current(candidate) || !eligible(event.sessionId, candidate.sourceId, candidate.ruleId)
+        if (controller.signal.aborted || closed || !current(candidate, target) || !eligible(event.sessionId, candidate.sourceId, candidate.ruleId)
           || epoch(event.sessionId, candidate.sourceId, candidate.ruleId) !== candidate.policy) continue
         for (const old of state.candidates) if (old.status === 'pending' && !fresh(old)) old.status = 'discarded'
-        if (!state.candidates.some(old => old.key === candidate.key && old.status === 'pending' && current(old))) state.candidates.push(candidate)
+        if (!state.candidates.some(old => old.key === candidate.key && old.status === 'pending' && current(old, target))) state.candidates.push(candidate)
       }
     })
+  }
+  function catalogFor(acceptSource: (item: RegisteredSource) => boolean, acceptRule: (rule: RuleValue) => boolean) {
+    return [...sources.values()].filter(acceptSource).map(item => item.value)
+      .map(source => ({ sourceId: source.sourceId, plugin: source.plugin, registration: 'reminderRules', executor: 'context-care',
+        ...(source.sessionId ? { sessionId: source.sessionId } : {}), ...(source.scope ? { scope: source.scope } : {}), readOnly: true,
+        rules: source.rules.filter(acceptRule).map(rule => ({ id: rule.id, title: rule.title ?? rule.id, description: rule.text,
+          definition: rule, actions: [{ id: 'model', title: '模型提醒', defaultEnabled: true }] })) }))
   }
   const registeredRules = () => [...sources.values()].reduce((count, item) => count + item.compiled.length, 0)
   const capacitySnapshot = () => structuredClone({ ...settings, registeredRules: registeredRules(), rejections: [...rejectedSources.values()] })
@@ -266,7 +281,7 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
     async snooze({ sessionId, agentPreset, sourceId, ruleId }: RecipientIdentity & { sourceId?: string; ruleId?: string }) {
       if (closed) throw new Error('reminder-runtime-closed')
       if ((sourceId === undefined) !== (ruleId === undefined)) throw new Error('sourceId and ruleId must be supplied together')
-      const target = identity(sessionId, agentPreset)
+      const target = await identity(sessionId, agentPreset)
       const selected = [...sources.values()].filter(source => sourceAccepts(source, target)
         && (sourceId === undefined || source.value.sourceId === sourceId))
         .flatMap(source => source.compiled.filter(rule => rule.deliver.model.once === 'window'
@@ -352,13 +367,14 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
         await Promise.allSettled(affected.map(run => run.task))
       }
     },
-    catalog(sessionId: string, agentPreset?: string) {
-      const target = identity(sessionId, agentPreset)
-      return [...sources.values()].filter(item => sourceAccepts(item, target)).map(item => item.value)
-        .map(source => ({ sourceId: source.sourceId, plugin: source.plugin, registration: 'reminderRules', executor: 'context-care',
-          ...(source.sessionId ? { sessionId: source.sessionId } : {}), ...(source.scope ? { scope: source.scope } : {}), readOnly: true,
-          rules: source.rules.filter(rule => ruleAccepts(rule, target)).map(rule => ({ id: rule.id, title: rule.title ?? rule.id, description: rule.text,
-            definition: rule, actions: [{ id: 'model', title: '模型提醒', defaultEnabled: true }] })) }))
+    /** Resolve current recipient facts before presenting the applicable rules. */
+    async catalog(sessionId: string, agentPreset?: string) {
+      const target = await identity(sessionId, agentPreset)
+      return catalogFor(item => sourceAccepts(item, target), rule => ruleAccepts(rule, target))
+    },
+    /** Synchronous action definitions for policy lookup; delivery and UI use catalog/recipient checks. */
+    controlCatalog(sessionId: string) {
+      return catalogFor(item => item.value.sessionId === undefined || item.value.sessionId === sessionId, () => true)
     },
     submit(rawEvent: unknown, signal?: AbortSignal) {
       if (closed || signal?.aborted) return Promise.resolve()
@@ -367,21 +383,12 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
       const admittedAt = now(), serialized = JSON.stringify(rawEvent)
       if (Buffer.byteLength(serialized) > config.maxBytes) return Promise.reject(new Error('reminder-input-budget-exceeded'))
       const event = Event.parse(JSON.parse(serialized))
-      const target = identity(event.sessionId, event.agentPreset)
-      const items = [...sources.values()].filter(item => sourceAccepts(item, target))
-        .flatMap(item => item.compiled.filter(rule => ruleAccepts(rule, target) && requestEligible(rule, event) && eligible(event.sessionId, item.value.sourceId, rule.id))
-          .map(rule => ({ rule, source: item.value, token: item.token, policy: epoch(event.sessionId, item.value.sourceId, rule.id),
-            judge: rule.judge ? detectors.get(rule.judge.ref) : undefined,
-            window: rule.deliver.model.once === 'window' || rule.deliver.model.shared?.reset === 'window'
-              ? localWindow('timeWindow' in rule.when ? rule.when.timeWindow : undefined, event.clock?.at) : undefined })))
-        .sort((a, b) => b.rule.priority - a.rule.priority || a.source.sourceId.localeCompare(b.source.sourceId) || a.rule.id.localeCompare(b.rule.id))
-      if (!items.length) return Promise.resolve()
-      const admission: { sessionId: string; task?: Promise<void> } = { sessionId: event.sessionId }
+      const admission: { sessionId: string; controller: AbortController; task?: Promise<void> } = { sessionId: event.sessionId, controller: new AbortController() }
       admissions.add(admission)
       // Promise invokes its executor synchronously before this resolver is read.
       let resolve!: () => void
       const done = new Promise<void>(finish => { resolve = finish })
-      const run: Run = { event, items, analyzers: [...analyzers.values()], controller: new AbortController(), deadline: admittedAt + config.roundTimeoutMs, resolve, done }
+      const run: Run = { event, items: [], analyzers: [...analyzers.values()], controller: admission.controller, deadline: admittedAt + config.roundTimeoutMs, resolve, done }
       const abort = () => {
         run.controller.abort(signal?.reason ?? new Error('reminder-round-timeout'))
         const queue = queues.get(event.sessionId), index = queue?.indexOf(run) ?? -1
@@ -392,13 +399,28 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
       }
       signal?.addEventListener('abort', abort, { once: true })
       run.timer = setTimeout(abort, Math.max(0, run.deadline - now()))
-      admission.task = update(event.sessionId, state => {
-        if (run.controller.signal.aborted || state.seen.includes(event.callId)) return false
-        state.seen.push(event.callId); return true
+      // Identity lookup occupies admission capacity and uses the same round deadline as matching.
+      admission.task = identity(event.sessionId, event.agentPreset, run.controller.signal).then(target => {
+        if (closed || run.controller.signal.aborted) return false
+        run.items = [...sources.values()].filter(item => sourceAccepts(item, target))
+          .flatMap(item => item.compiled.filter(rule => ruleAccepts(rule, target) && requestEligible(rule, event) && eligible(event.sessionId, item.value.sourceId, rule.id))
+            .map(rule => ({ rule, source: item.value, token: item.token, policy: epoch(event.sessionId, item.value.sourceId, rule.id),
+              judge: rule.judge ? detectors.get(rule.judge.ref) : undefined,
+              window: rule.deliver.model.once === 'window' || rule.deliver.model.shared?.reset === 'window'
+                ? localWindow('timeWindow' in rule.when ? rule.when.timeWindow : undefined, event.clock?.at) : undefined })))
+          .sort((a, b) => b.rule.priority - a.rule.priority || a.source.sourceId.localeCompare(b.source.sourceId) || a.rule.id.localeCompare(b.rule.id))
+        if (!run.items.length) return false
+        return update(event.sessionId, state => {
+          if (run.controller.signal.aborted || state.seen.includes(event.callId)) return false
+          state.seen.push(event.callId); return true
+        })
       }).then(admitted => {
         if (!admitted || closed || run.controller.signal.aborted || now() >= run.deadline) return
         const queue = queues.get(event.sessionId) ?? []; queue.push(run); queues.set(event.sessionId, queue); pump()
         return done
+      }).catch(async error => {
+        if (!run.controller.signal.aborted) throw error
+        await diagnostic(event.sessionId, { eventId: event.callId, status: signal?.aborted ? 'cancelled' : 'queue-timeout' })
       }).finally(() => {
         clearTimeout(run.timer); signal?.removeEventListener('abort', abort); admissions.delete(admission)
       })
@@ -416,7 +438,6 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
       await this.settle(sessionId); signal?.throwIfAborted()
       const reserved: string[] = []
       return update(sessionId, async state => {
-        const target = identity(sessionId, agentPreset)
         const messages: ReturnType<typeof reminderMessage>[] = [], present = [...visible, ...accepted]
         const keys = new Set(present.flatMap(reminderKeys))
         // Accepted inbox entries are not committed yet; pre-step filtering still owns their handoff.
@@ -438,7 +459,8 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
             await claims({ release: [candidate.messageId] })
             delete candidate.messageId
           }
-          if (!fresh(candidate) || !current(candidate, target) || !eligible(sessionId, candidate.sourceId, candidate.ruleId)
+          const target = await identity(sessionId, agentPreset, signal)
+          if (closed || !fresh(candidate) || !current(candidate, target) || !eligible(sessionId, candidate.sourceId, candidate.ruleId)
             || epoch(sessionId, candidate.sourceId, candidate.ruleId) !== candidate.policy) { candidate.status = 'discarded'; continue }
           if (keys.has(candidate.key) || state.windows.some(item => item.key === candidate.key)) { candidate.status = 'discarded'; continue }
           const messageId = randomUUID(), quota = quotaFor(candidate)
@@ -447,6 +469,14 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
             // Losing sessions retain a pending hit: a known rollback may make room on their next request.
             if (!hasClaim(book, quota.key, messageId)) continue
             reserved.push(messageId)
+            // A model/preset/source switch while the shared slot is being saved must release the slot.
+            const latest = await identity(sessionId, agentPreset, signal)
+            if (closed || !fresh(candidate) || !current(candidate, latest) || !eligible(sessionId, candidate.sourceId, candidate.ruleId)
+              || epoch(sessionId, candidate.sourceId, candidate.ruleId) !== candidate.policy) {
+              await claims({ release: [messageId] })
+              candidate.status = 'discarded'
+              continue
+            }
           }
           signal?.throwIfAborted()
           keys.add(candidate.key)
@@ -474,14 +504,15 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
       })
       if (release.length) await claims({ release })
     },
-    filterMessages<Message extends MessageView>(sessionId: string, visible: MessageView[], messages: Message[], agentPreset?: string) {
-      const target = identity(sessionId, agentPreset)
+    async filterMessages<Message extends MessageView>(sessionId: string, visible: MessageView[], messages: Message[], agentPreset?: string) {
+      if (!messages.some(message => message.source?.kind === KIND)) return messages
+      const target = await identity(sessionId, agentPreset)
       const keys = new Set(visible.flatMap(reminderKeys))
       const state = records.get(sessionId)
       return messages.filter(message => {
         if (message.source?.kind !== KIND) return true
         const candidate = state?.candidates.find(item => item.messageId === message.id)
-        if (!state || !candidate || candidate.status !== 'reserved' || !fresh(candidate) || !current(candidate, target) || keys.has(candidate.key)
+        if (closed || !state || !candidate || candidate.status !== 'reserved' || !fresh(candidate) || !current(candidate, target) || keys.has(candidate.key)
           || state.windows?.some(item => item.key === candidate.key && item.messageId !== message.id) || !eligible(sessionId, candidate.sourceId, candidate.ruleId)
           || epoch(sessionId, candidate.sourceId, candidate.ruleId) !== candidate.policy) return false
         keys.add(candidate.key); return true
@@ -489,6 +520,7 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
     },
     async close() {
       closed = true
+      for (const admission of admissions) admission.controller.abort(new Error('reminder-runtime-closed'))
       for (const queue of queues.values()) for (const run of queue) { clearTimeout(run.timer); run.resolve() }
       queues.clear()
       for (const run of running.values()) run.controller.abort(new Error('reminder-runtime-closed'))

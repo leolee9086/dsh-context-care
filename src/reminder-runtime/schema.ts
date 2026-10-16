@@ -5,8 +5,15 @@ import { normalizeScope } from './scope.js'
 
 const Id = z.string().min(1).max(256)
 const ScopeList = z.array(Id).min(1).max(128)
-export const ReminderScope = z.object({ sessionIds: ScopeList.optional(), agentPresets: ScopeList.optional() }).strict()
-  .transform(value => normalizeScope(value))
+export const ReminderScope = z.object({ sessionIds: ScopeList.optional(), agentPresets: ScopeList.optional(), condition: z.json().optional() }).strict()
+  .transform((value, context) => {
+    try { return normalizeScope(value) }
+    catch (error) {
+      if (!(error instanceof TypeError)) throw error
+      context.addIssue({ code: 'custom', message: error.message })
+      return z.NEVER
+    }
+  })
 const Regex = z.object({ regex: z.string().min(1).max(4096), flags: z.string().regex(/^[gimsu]*$/).default('') }).strict()
 const LifetimeQuota = z.object({ reset: z.literal('lifetime'), lifetime: Id,
   limit: z.number().int().min(1).max(10000) }).strict()

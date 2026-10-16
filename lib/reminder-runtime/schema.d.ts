@@ -2,9 +2,11 @@ import { z } from 'zod';
 export declare const ReminderScope: z.ZodPipe<z.ZodObject<{
     sessionIds: z.ZodOptional<z.ZodArray<z.ZodString>>;
     agentPresets: z.ZodOptional<z.ZodArray<z.ZodString>>;
+    condition: z.ZodOptional<z.ZodJSONSchema>;
 }, z.core.$strict>, z.ZodTransform<import("./scope.js").RecipientScope, {
     sessionIds?: string[] | undefined;
     agentPresets?: string[] | undefined;
+    condition?: z.core.util.JSONType | undefined;
 }>>;
 export declare const ReminderRule: z.ZodDiscriminatedUnion<[z.ZodObject<{
     format: z.ZodLiteral<"reminder/v1">;
@@ -15,9 +17,11 @@ export declare const ReminderRule: z.ZodDiscriminatedUnion<[z.ZodObject<{
     scope: z.ZodOptional<z.ZodPipe<z.ZodObject<{
         sessionIds: z.ZodOptional<z.ZodArray<z.ZodString>>;
         agentPresets: z.ZodOptional<z.ZodArray<z.ZodString>>;
+        condition: z.ZodOptional<z.ZodJSONSchema>;
     }, z.core.$strict>, z.ZodTransform<import("./scope.js").RecipientScope, {
         sessionIds?: string[] | undefined;
         agentPresets?: string[] | undefined;
+        condition?: z.core.util.JSONType | undefined;
     }>>>;
     text: z.ZodString;
     judge: z.ZodOptional<z.ZodObject<{
@@ -59,9 +63,11 @@ export declare const ReminderRule: z.ZodDiscriminatedUnion<[z.ZodObject<{
     scope: z.ZodOptional<z.ZodPipe<z.ZodObject<{
         sessionIds: z.ZodOptional<z.ZodArray<z.ZodString>>;
         agentPresets: z.ZodOptional<z.ZodArray<z.ZodString>>;
+        condition: z.ZodOptional<z.ZodJSONSchema>;
     }, z.core.$strict>, z.ZodTransform<import("./scope.js").RecipientScope, {
         sessionIds?: string[] | undefined;
         agentPresets?: string[] | undefined;
+        condition?: z.core.util.JSONType | undefined;
     }>>>;
     text: z.ZodString;
     judge: z.ZodOptional<z.ZodObject<{
@@ -107,9 +113,11 @@ export declare const ReminderRule: z.ZodDiscriminatedUnion<[z.ZodObject<{
     scope: z.ZodOptional<z.ZodPipe<z.ZodObject<{
         sessionIds: z.ZodOptional<z.ZodArray<z.ZodString>>;
         agentPresets: z.ZodOptional<z.ZodArray<z.ZodString>>;
+        condition: z.ZodOptional<z.ZodJSONSchema>;
     }, z.core.$strict>, z.ZodTransform<import("./scope.js").RecipientScope, {
         sessionIds?: string[] | undefined;
         agentPresets?: string[] | undefined;
+        condition?: z.core.util.JSONType | undefined;
     }>>>;
     text: z.ZodString;
     judge: z.ZodOptional<z.ZodObject<{
@@ -192,9 +200,11 @@ export declare const Source: z.ZodObject<{
     scope: z.ZodOptional<z.ZodPipe<z.ZodObject<{
         sessionIds: z.ZodOptional<z.ZodArray<z.ZodString>>;
         agentPresets: z.ZodOptional<z.ZodArray<z.ZodString>>;
+        condition: z.ZodOptional<z.ZodJSONSchema>;
     }, z.core.$strict>, z.ZodTransform<import("./scope.js").RecipientScope, {
         sessionIds?: string[] | undefined;
         agentPresets?: string[] | undefined;
+        condition?: z.core.util.JSONType | undefined;
     }>>>;
     revision: z.ZodNumber;
     rules: z.ZodArray<z.ZodDiscriminatedUnion<[z.ZodObject<{
@@ -206,9 +216,11 @@ export declare const Source: z.ZodObject<{
         scope: z.ZodOptional<z.ZodPipe<z.ZodObject<{
             sessionIds: z.ZodOptional<z.ZodArray<z.ZodString>>;
             agentPresets: z.ZodOptional<z.ZodArray<z.ZodString>>;
+            condition: z.ZodOptional<z.ZodJSONSchema>;
         }, z.core.$strict>, z.ZodTransform<import("./scope.js").RecipientScope, {
             sessionIds?: string[] | undefined;
             agentPresets?: string[] | undefined;
+            condition?: z.core.util.JSONType | undefined;
         }>>>;
         text: z.ZodString;
         judge: z.ZodOptional<z.ZodObject<{
@@ -250,9 +262,11 @@ export declare const Source: z.ZodObject<{
         scope: z.ZodOptional<z.ZodPipe<z.ZodObject<{
             sessionIds: z.ZodOptional<z.ZodArray<z.ZodString>>;
             agentPresets: z.ZodOptional<z.ZodArray<z.ZodString>>;
+            condition: z.ZodOptional<z.ZodJSONSchema>;
         }, z.core.$strict>, z.ZodTransform<import("./scope.js").RecipientScope, {
             sessionIds?: string[] | undefined;
             agentPresets?: string[] | undefined;
+            condition?: z.core.util.JSONType | undefined;
         }>>>;
         text: z.ZodString;
         judge: z.ZodOptional<z.ZodObject<{
@@ -298,9 +312,11 @@ export declare const Source: z.ZodObject<{
         scope: z.ZodOptional<z.ZodPipe<z.ZodObject<{
             sessionIds: z.ZodOptional<z.ZodArray<z.ZodString>>;
             agentPresets: z.ZodOptional<z.ZodArray<z.ZodString>>;
+            condition: z.ZodOptional<z.ZodJSONSchema>;
         }, z.core.$strict>, z.ZodTransform<import("./scope.js").RecipientScope, {
             sessionIds?: string[] | undefined;
             agentPresets?: string[] | undefined;
+            condition?: z.core.util.JSONType | undefined;
         }>>>;
         text: z.ZodString;
         judge: z.ZodOptional<z.ZodObject<{

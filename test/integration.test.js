@@ -327,7 +327,7 @@ test('shared reminder reservations compensate failed session saves and retry fai
   await assert.rejects(runtime.rollback('a', messages), /claim-disk/)
   assert.equal(sessions.get('a').candidates[0].status, 'pending')
   assert.equal(sessions.get('a').candidates[0].messageId, messages[0].id)
-  assert.deepEqual(runtime.filterMessages('a', [], messages), [])
+  assert.deepEqual(await runtime.filterMessages('a', [], messages), [])
   failClaim = false
   await runtime.rollback('a', messages)
   const second = await runtime.collect({ sessionId: 'b', visible: [] })
@@ -1065,17 +1065,17 @@ registerScopeHostCases({ async exercise(t, scenario) {
   const pending = new Map(agents.map(agent => [agent.id, service.snapshot(agent.id).candidates
     .filter(candidate => candidate.status === 'pending').length]))
   await Promise.all(agents.map(agent => completionTurn(ctx, agent)))
-  const recipients = agents.map(agent => {
+  const recipients = await Promise.all(agents.map(async agent => {
     assert.equal(ctx.sessions.get(agent.id), agent.session)
     const request = adapter.requests.get(agent.id)
     assert.equal(typeof request, 'string', `Missing request for ${agent.id}`)
     return { id: agent.id, preset: agent.session.header.agentPreset,
-      catalogRules: service.catalog(agent.id).reduce((total, source) => total + source.rules.length, 0),
+      catalogRules: (await service.catalog(agent.id)).reduce((total, source) => total + source.rules.length, 0),
       pendingBeforeTurn: pending.get(agent.id),
       notices: agent.session.snapshotEvents().filter(event => event.type === 'user/message'
         && event.data.source?.kind === 'plugin:dsh-context-care:reminder').length,
       requestHasNotice: request.includes('SCOPED_HEADER_NOTICE') }
-  })
+  }))
   const claims = ctx.storageDomain.get('context_care_reminder_claims').table('claims').get('global').buckets
     .reduce((total, bucket) => total + bucket.claims.length, 0)
   await owned.close(ctx)
