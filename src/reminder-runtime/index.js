@@ -5,7 +5,7 @@
 /** @import {} from '@deepseek-ai/dsh-tools' */
 /** @import {} from '@deepseek-ai/dsh-storage-domain' */
 /** @import { createRuleControls } from '../rule-controls.js' */
-import { createReminderRuntime, ReminderConfig, REMINDER_DOMAIN, REMINDER_SERVICE } from '../../lib/reminder-runtime/runtime.js'
+import { createReminderRuntime, ReminderConfig, REMINDER_DOMAIN, REMINDER_SERVICE, REMINDER_MESSAGE_KIND } from '../../lib/reminder-runtime/runtime.js'
 import { createOutputStream } from './output-stream.js'
 import { createOutputInterrupt } from '../../lib/reminder-runtime/interrupt.js'
 import { createSessionIdentityResolver } from '../../lib/reminder-runtime/session-identity.js'
@@ -13,6 +13,7 @@ import { createBoundedMatcher } from '../bounded-matcher.js'
 import { CapacitySettings } from '../reminder-capacity.js'
 import { releaseResources } from '../resource-cleanup.js'
 import { CLAIM_DOMAIN } from './claims.js'
+import { createTemplates } from '../templates.js'
 export { createReminderRuntime, ReminderConfig, REMINDER_DOMAIN, REMINDER_SERVICE }
 export { ReminderScope } from './schema.js'
 
@@ -64,7 +65,7 @@ async function startReminderService(ctx, input, controls, facility) {
       maxPending: config.maxConcurrent, maxIdle: config.maxIdle, maxBytes: config.maxBytes })
     resources.unshift(['reminder-worker', () => matcher.close()])
     await matcher.warmup()
-    const runtime = createReminderRuntime({ config, entries: [...table.entries()], save: (id, value) => table.put(id, value),
+    const runtime = createReminderRuntime({ config, entries: [...table.entries()], templates: createTemplates(), save: (id, value) => table.put(id, value),
       capacity: settings.get('global'), saveCapacity: value => settings.put('global', value),
       resolveIdentity: createSessionIdentityResolver(ctx),
       updateClaims: change => claimTable.update('global', change),
@@ -88,11 +89,34 @@ async function startReminderService(ctx, input, controls, facility) {
       submit: event => runtime.submit(event),
       afterSubmit: interrupt,
       report: error => ctx.logger.warn(`reminder: ${error instanceof Error ? error.message : String(error)}`),
-      enabled: id => runtime.controlCatalog(id).some(source => source.rules.some(rule => rule.definition?.format === 'reminder/v3')) })
+      enabled: id => runtime.controlCatalog(id).some(source => source.rules.some(rule => rule.definition?.on === 'assistant.output')) })
     resources.unshift(['reminder-output-stream', () => outputStream.close()])
     ctx.effect(() => () => releaseResources(resources, undefined))
     ctx.provide(REMINDER_SERVICE, runtime)
     ctx.effect(() => controls.registerProvider((/** @type {string} */ id) => runtime.controlCatalog(id)))
+    // Denial policy runs before the tool body. The evaluation is asynchronous here,
+    // so the synchronous guard below is what actually stops the call.
+    ctx.on('tools/pre-execute', async (exec, next) => {
+      if (!exec.agent) return next()
+      try {
+        await runtime.prepareToolExecution({ key: exec.token, sessionId: String(exec.agent.session.id),
+          name: exec.name, arguments: exec.arguments, callId: String(exec.callId),
+          rootCallId: String(exec.rootCallId ?? exec.callId), signal: exec.signal })
+      } catch (error) {
+        // A failed policy evaluation leaves no ticket, and the guard then refuses the call.
+        ctx.logger.warn(`reminder: 工具前置评估失败: ${error instanceof Error ? error.message : String(error)}`)
+      }
+      return next()
+    })
+    // Guards have no allow result, so no listener ordering can turn a denial back into permission.
+    ctx.effect(() => ctx.tools.guard(exec => {
+      if (!exec.agent) return undefined
+      // The guard is the commit point: once it reads the ticket, the call either runs or fails here.
+      // Settling immediately keeps the registry bounded even when the body never runs.
+      const verdict = runtime.decideToolExecution(exec.token)
+      runtime.settleToolExecution(exec.token)
+      return verdict.kind === 'deny' ? verdict.reason : undefined
+    }))
     ctx.on('tools/result', (exec, result) => {
       if (!exec.agent) return
       const visible = exec.agent.session.deriveMessages()
@@ -112,6 +136,33 @@ async function startReminderService(ctx, input, controls, facility) {
       void runtime.submit(event, exec.signal).catch(error => ctx.logger.warn(`reminder: ${error.message}`))
     })
     ctx.on('agent/assistant-stream', ({ agent, frame }) => outputStream.observe(agent, frame))
+    // Committed log events are the `session.event` trigger. A rule selects the DSH
+    // event name; the persisted payload rides `arguments`, because `facts` belongs to
+    // analyzers (matching clears it before they run, and their output must not be
+    // overwritten by event data).
+    ctx.on('session/event', (session, event) => {
+      if (!runtime.handlesSessionEvent(event.type)) return
+      const data = event.data
+      // Classify the source. Loop prevention must tell our own delivery from a human turn,
+      // and it needs the identity of the rule that produced the causing message.
+      let origin = 'background'
+      let causationId
+      if (typeof data === 'object' && data !== null && 'source' in data && typeof data.source === 'object' && data.source !== null
+        && 'kind' in data.source && data.source.kind === REMINDER_MESSAGE_KIND) {
+        origin = 'reminder'
+        const trace = 'contextCareTrace' in data.source ? data.source.contextCareTrace : undefined
+        if (typeof trace === 'object' && trace !== null && 'sourceId' in trace && 'ruleId' in trace
+          && typeof trace.sourceId === 'string' && typeof trace.ruleId === 'string') {
+          causationId = `${trace.sourceId}:${trace.ruleId}`
+        }
+      } else if (event.type === 'user/message') origin = 'human'
+      else if (event.type.startsWith('tool/')) origin = 'tool'
+      const callId = `${event.type}#${event.seq}`
+      void runtime.submit({ type: 'session.event', sessionId: String(session.id), name: event.type, arguments: data,
+        callId, rootCallId: callId, origin, ...(causationId === undefined ? {} : { causationId }),
+        clock: { at: typeof event.time === 'number' ? event.time : Date.now() } })
+        .catch(error => ctx.logger.warn(`reminder: ${error instanceof Error ? error.message : String(error)}`))
+    })
     return runtime
   } catch (error) { await releaseResources(resources, error); throw error }
 }

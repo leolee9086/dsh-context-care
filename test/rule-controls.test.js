@@ -25,8 +25,8 @@ test('reminder catalogs preserve scoped recipients and string policy epochs acro
   const unregister = controls.registerProvider(id => runtime.controlCatalog(id))
   t.after(unregister)
   const definition = { sourceId: 'scoped', plugin: 'test', revision: 1, scope: { agentPresets: ['alpha'] }, rules: [{
-    format: 'reminder/v1', id: 'notice', on: 'tool.succeeded', text: 'SCOPED_NOTICE',
-    when: { tool: 'probe' }, deliver: { model: { once: 'surface' } },
+    format: 'reminder/v4', id: 'notice', on: 'tool.succeeded', text: 'SCOPED_NOTICE',
+    when: { tool: 'probe' }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
   }] }
   runtime.registerSource(definition)
   assert.deepEqual(controls.snapshot('included').sources[0].scope, { agentPresets: ['alpha'] })

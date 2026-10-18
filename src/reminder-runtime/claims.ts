@@ -10,7 +10,8 @@ export type SharedQuota = { reset: 'lifetime'; lifetime: string; limit: number }
 export interface QuotaCandidate {
   sourceId: string
   ruleId: string
-  rule: { deliver: { model: { shared?: SharedQuota } } }
+  // Every effect delivers, so every effect can own a quota.
+  rule: { effect: { deliver: { model: { shared?: SharedQuota } } } }
   window?: { id: string; end: number }
 }
 export interface Reservation {
@@ -33,7 +34,7 @@ export const CLAIM_DOMAIN = { name: 'context_care_reminder_claims', version: 1, 
 
 /** A lifecycle name survives rule edits; a calendar window supplies its own identity. */
 export function quotaFor(candidate: QuotaCandidate) {
-  const quota = candidate.rule.deliver.model.shared
+  const quota = candidate.rule.effect.deliver.model.shared
   if (!quota) return undefined
   if (quota.reset === 'window') {
     if (!candidate.window) throw new Error('shared-window-identity-missing')

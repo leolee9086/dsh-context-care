@@ -34,12 +34,12 @@ test('v3 output literal, keyword and regex rules parse and match only declared b
     execute: (input, signal, timing) => matcher.detect(input, signal, timing) })
   t.after(async () => { await runtime.close(); await matcher.close() })
   runtime.registerSource({ sourceId: 'output-rules', plugin: 'test', revision: 1, rules: [
-    { format: 'reminder/v3', id: 'reasoning', on: 'assistant.output', text: 'reasoning hit',
-      when: { blockTypes: ['reasoning'], pattern: { kind: 'literal', text: '秘密' } }, deliver: { model: { once: 'surface' } } },
-    { format: 'reminder/v3', id: 'keywords', on: 'assistant.output', text: 'keywords hit',
-      when: { blockTypes: ['text'], pattern: { kind: 'keywords', values: ['foo', 'bar'], mode: 'all' } }, deliver: { model: { once: 'surface' } } },
-    { format: 'reminder/v3', id: 'regex', on: 'assistant.output', text: 'regex hit',
-      when: { blockTypes: ['text'], pattern: { kind: 'regex', regex: 'x[0-9]+' } }, deliver: { model: { once: 'surface' } } },
+    { format: 'reminder/v4', id: 'reasoning', on: 'assistant.output', text: 'reasoning hit',
+      when: { blockTypes: ['reasoning'], pattern: { kind: 'literal', text: '秘密' } }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } },
+    { format: 'reminder/v4', id: 'keywords', on: 'assistant.output', text: 'keywords hit',
+      when: { blockTypes: ['text'], pattern: { kind: 'keywords', values: ['foo', 'bar'], mode: 'all' } }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } },
+    { format: 'reminder/v4', id: 'regex', on: 'assistant.output', text: 'regex hit',
+      when: { blockTypes: ['text'], pattern: { kind: 'regex', regex: 'x[0-9]+' } }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } },
   ] })
   for (const [index, type, text] of [[0, 'text', '秘密 foo x-no-number'], [1, 'reasoning', 'foo bar x42']]) {
     await runtime.submit({ type: 'assistant.output', sessionId: 's', callId: `miss-${index}`, rootCallId: 'miss',

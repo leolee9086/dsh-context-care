@@ -1,6 +1,6 @@
 {
   "name": "dsh-context-care",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "license": "AGPL-3.0-only",
   "type": "module",
   "description": "为 DeepSeek Harness 提供疲劳度、唤醒值、分段彩色数值显示与自主上下文压缩的独立 Cordis 插件",
@@ -67,8 +67,10 @@
     "test:integration": "pnpm build:host && node --test test/integration.test.js",
     "test:integration:source": "pnpm build:host && node test/run-source-integration.js",
     "test:client:source": "node test/run-client-source.js",
-    "check": "tsc -p tsconfig.reminders.json --noEmit && tsc -p tsconfig.host.json && tsc -p tsconfig.tests.json && node test/check-source.js",
-    "release:check": "pnpm check && pnpm test && pnpm build",
+    "check": "tsc -p tsconfig.reminders.json --noEmit && tsc -p tsconfig.scripts.json --noEmit && tsc -p tsconfig.host.json && tsc -p tsconfig.tests.json && node test/check-source.js",
+    "sync:events": "node scripts/sync-session-events.ts",
+    "sync:events:check": "node scripts/sync-session-events.ts --check",
+    "release:check": "pnpm check && pnpm sync:events:check && pnpm test && pnpm build",
     "release:pack": "pnpm release:check && pnpm pack --pack-destination artifacts"
   },
   "dependencies": {

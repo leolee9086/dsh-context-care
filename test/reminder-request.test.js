@@ -3,9 +3,9 @@ import assert from 'node:assert/strict'
 import { createReminderRuntime, REMINDER_DOMAIN } from '../src/reminder-runtime/index.js'
 import { createBoundedMatcher } from '../src/bounded-matcher.js'
 
-const rule = { format: 'reminder/v2', id: 'night', on: 'request.before', text: '没有紧急任务时，温和建议伙伴早点睡。',
+const rule = { format: 'reminder/v4', id: 'night', on: 'request.before', text: '没有紧急任务时，温和建议伙伴早点睡。',
   when: { timeWindow: { start: '23:00', end: '06:00', timeZone: 'local' }, humanActivity: { withinSeconds: 300 } },
-  deliver: { model: { once: 'window' } } }
+  effect: { kind: 'remind', deliver: { model: { once: 'window' } } } }
 const source = { sourceId: 'notes', plugin: 'test', revision: 1, rules: [rule] }
 const date = (day, hour, minute = 0) => new Date(2026, 9, day, hour, minute).getTime()
 const message = (id = 'human', kind = 'user') => ({ id, role: 'user', content: [{ type: 'text', text: '继续' }], source: { kind } })
@@ -132,7 +132,7 @@ test('v1 remains strict; v2 requires valid local windows for window delivery', a
   const f = fixture(t)
   const validate = input => f.runtime.validateRule(input)
   assert.equal(validate(rule).on, 'request.before')
-  for (const input of [ { ...rule, format: 'reminder/v1' },
+  for (const input of [ { ...rule, format: 'reminder/v3' },
     { ...rule, when: {} }, { ...rule, when: { timeWindow: { start: '24:00', end: '06:00' } } },
     { ...rule, when: { timeWindow: { start: '23:00', end: '23:00' } } },
     { ...rule, when: { ...rule.when, tool: 'read' } } ]) assert.throws(() => validate(input))

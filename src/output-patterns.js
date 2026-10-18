@@ -1,4 +1,5 @@
-import { fromMarkdown } from 'mdast-util-from-markdown'
+import { markdownStatements } from '../lib/reminder-runtime/text-projection.js'
+export { markdownStatements } from '../lib/reminder-runtime/text-projection.js'
 import { z } from 'zod'
 
 const positive = z.number().int().positive()
@@ -29,43 +30,6 @@ export const OutputPatternConfig = z.object({
   }
   try { new Intl.Segmenter(value.locale) } catch (error) { ctx.addIssue({ code: 'custom', message: String(error) }) }
 })
-
-/** Structured prose with source offsets; code, HTML and block quotes never become statements. */
-export function markdownStatements(text, locale = 'zh') {
-  const tree = fromMarkdown(text)
-  const statements = []
-  const segmenter = new Intl.Segmenter(locale, { granularity: 'sentence' })
-  function visit(node) {
-    if (['blockquote', 'code', 'html'].includes(node.type)) return
-    if (node.type === 'paragraph' || node.type === 'heading') {
-      const start = node.position.start.offset
-      const end = node.position.end.offset
-      const chars = [...text.slice(start, end)].join('').split('')
-      function redact(child) {
-        if (['inlineCode', 'html', 'image'].includes(child.type)) {
-          chars.fill(' ', child.position.start.offset - start, child.position.end.offset - start)
-        } else for (const part of child.children ?? []) redact(part)
-      }
-      redact(node)
-      const prose = chars.join('')
-      // A soft line break is a statement boundary, including Markdown list rows.
-      let lineStart = 0
-      for (const line of prose.split('\n')) {
-        for (const part of segmenter.segment(line)) {
-          const trimmed = part.segment.trim()
-          if (!/[\p{L}\p{N}]/u.test(trimmed)) continue
-          const offset = start + lineStart + part.index
-          statements.push({ text: part.segment, start: offset, end: offset + part.segment.length })
-        }
-        lineStart += line.length + 1
-      }
-      return
-    }
-    for (const child of node.children ?? []) visit(child)
-  }
-  visit(tree)
-  return statements
-}
 
 /** Enumerate literal hits on complete statements, merging overlap before counting. */
 export function detectOutputPatterns(text, config) {

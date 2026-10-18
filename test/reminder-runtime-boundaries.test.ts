@@ -6,8 +6,8 @@ import { createReminderRuntime } from '../lib/reminder-runtime/runtime.js'
 
 const config = { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 }
 const source = () => ({ sourceId: 'boundary-source', plugin: 'test', revision: 1, rules: [{
-  format: 'reminder/v1', id: 'notice', on: 'tool.succeeded', text: 'ORIGINAL_NOTICE',
-  when: { tool: 'probe' }, deliver: { model: { once: 'surface' } },
+  format: 'reminder/v4', id: 'notice', on: 'tool.succeeded', text: 'ORIGINAL_NOTICE',
+  when: { tool: 'probe' }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
 }] })
 const event = (callId = 'probe-1') => ({ sessionId: 'boundary-session', callId, rootCallId: callId,
   name: 'probe', arguments: { file_path: 'original.ts' } })

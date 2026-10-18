@@ -27,8 +27,9 @@ export function createOutputInterrupt<Agent>(options: InterruptOptions<Agent>) {
     if (budget.count >= options.maxInterrupts) return
     const ids = options.runtime.snapshot(id).candidates.filter(candidate => candidate.status === 'pending'
       && candidate.output?.attemptId === output.attemptId && candidate.output.index === output.index
-      && candidate.rule.format === 'reminder/v3'
-      && candidate.rule.deliver.model.interrupt === 'abort-resume').map(candidate => candidate.id)
+      && candidate.rule.effect.kind === 'remind'
+      && candidate.rule.on === 'assistant.output'
+      && candidate.rule.effect.deliver.model.interrupt === 'abort-resume').map(candidate => candidate.id)
     if (!ids.length) return
     running.add(id)
     try {

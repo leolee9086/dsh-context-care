@@ -1,4 +1,5 @@
 import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
+import type { TextSampleValue } from './conditions.js'
 
 export interface OutputConfig {
   maxStreamChars: number
@@ -15,6 +16,8 @@ export interface OutputEvidence {
   index: number
   type: 'text' | 'reasoning'
   text: string
+  /** The attempt's readable text so far, tail-capped like a block; `current-output` counts read this. */
+  full: string
   offset: number
 }
 export interface OutputEvent {
@@ -24,6 +27,7 @@ export interface OutputEvent {
   rootCallId: string
   clock: { at: number }
   output: OutputEvidence
+  textSamples: TextSampleValue[]
 }
 // The observer only consumes these frame fields. The actual chunk union comes
 // from DSH; attempt IDs remain plain identities inside this domain algorithm.
@@ -76,14 +80,44 @@ export function createOutputStream<Agent>({ config, submit, afterSubmit, report,
     // Observation is best effort after this explicit diagnostic; never abort ordinary output.
     report(new Error(`${reason}: session=${entry.sessionId}, attempt=${entry.attemptId}`))
   }
-  function flush(entry: OutputEntry<Agent>, block: OutputBlock) {
-    if (!block.dirty || closed || entry.overflowed) return
+  /**
+   * The attempt's readable text so far, in block order, tail-capped like a block.
+   * Truncation anywhere (a capped block, or this join) marks the sample truncated
+   * so a count over it reports `unavailable` instead of measuring an excerpt.
+   */
+  function fullText(entry: OutputEntry<Agent>) {
+    let truncated = false
+    const parts: string[] = []
+    for (const block of [...entry.blocks.values()].sort((left, right) => left.index - right.index)) {
+      if (!block.text) continue
+      if (block.offset > 0) truncated = true
+      parts.push(block.text)
+    }
+    const joined = parts.join('\n')
+    const dropped = Math.max(0, joined.length - config.maxStreamChars)
+    if (dropped > 0) truncated = true
+    return { text: joined.slice(dropped), truncated }
+  }
+  function flush(entry: OutputEntry<Agent>, block: OutputBlock, complete = false) {
+    // A completed block still needs readable text: an empty block carries no evidence.
+    if ((!block.dirty && !complete) || !block.text || closed || entry.overflowed) return
     block.dirty = false; block.since = 0
+    const full = fullText(entry)
     const output: OutputEvidence = { attemptId: entry.attemptId, turn: entry.turn, step: entry.step,
-      index: block.index, type: block.type, text: block.text, offset: block.offset }
+      index: block.index, type: block.type, text: block.text, full: full.text, offset: block.offset }
     const callId = `output:${entry.attemptId}:${block.index}:${++block.revision}`
+    const phase = complete ? 'complete' : 'prefix'
+    // Sample identity is the attempt plus block: a later prefix replaces this sample's text in place.
+    const textSamples: TextSampleValue[] = [{ field: 'event.output.text',
+      sampleId: `output:${entry.attemptId}:${block.index}`, window: 'current-block',
+      phase, truncated: block.offset > 0 }]
+    if (full.text) {
+      // The whole-output sample is replaced in place too, so it always describes this attempt so far.
+      textSamples.push({ field: 'event.output.full', sampleId: `output:${entry.attemptId}:full`,
+        window: 'current-output', phase, truncated: full.truncated })
+    }
     const event: OutputEvent = { type: 'assistant.output', sessionId: entry.sessionId, callId, rootCallId: entry.attemptId,
-      clock: { at: Date.now() }, output }
+      clock: { at: Date.now() }, output, textSamples }
     const bytes = Buffer.byteLength(JSON.stringify(event))
     if (pending.size >= maxPending || pendingBytes + bytes > maxPendingBytes) {
       overflow(entry, 'reminder-stream-pending-budget-exceeded'); return
@@ -132,7 +166,8 @@ export function createOutputStream<Agent>({ config, submit, afterSubmit, report,
     entry.revision = frame.revision
     if (frame.type === 'end') {
       clearTimeout(entry.timer)
-      for (const block of entry.blocks.values()) flush(entry, block)
+      // A block that never ended still holds its final text here, so publish it as complete once.
+      for (const block of entry.blocks.values()) if (!block.ended) { flush(entry, block, true); block.ended = true }
       active.delete(sessionId)
       return
     }
@@ -158,7 +193,8 @@ export function createOutputStream<Agent>({ config, submit, afterSubmit, report,
       // Some adapters only emit a completed block; do not append it over already-seen deltas.
       if (!block.hadDelta && (chunk.block.type === 'text' || chunk.block.type === 'reasoning')
         && typeof chunk.block.text === 'string') append(entry, block, chunk.block.text)
-      flush(entry, block); block.ended = true
+      // The completed block replaces the same sample identity, so a rule needing complete text can evaluate it.
+      flush(entry, block, true); block.ended = true
     }
   }
   return {

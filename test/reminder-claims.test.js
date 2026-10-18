@@ -38,9 +38,9 @@ test('expired windows free their own records while lifetime claims survive', () 
 
 test('quota identity survives source revision changes and changes only with explicit lifetime or calendar period', () => {
   const candidate = { sourceId: 's', ruleId: 'r', revision: 1,
-    rule: { deliver: { model: { shared: { reset: 'lifetime', lifetime: 'release-1', limit: 2 } } } } }
+    rule: { effect: { kind: 'remind', deliver: { model: { shared: { reset: 'lifetime', lifetime: 'release-1', limit: 2 } } } } } }
   assert.deepEqual(quotaFor(candidate), quotaFor({ ...candidate, revision: 99 }))
-  const windowed = { ...candidate, rule: { deliver: { model: { shared: { reset: 'window', limit: 1 } } } } }
+  const windowed = { ...candidate, rule: { effect: { kind: 'remind', deliver: { model: { shared: { reset: 'window', limit: 1 } } } } } }
   assert.throws(() => quotaFor(windowed), /window-identity-missing/)
   assert.notEqual(quotaFor({ ...windowed, window: { id: 'tonight', end: 200 } }).key,
     quotaFor({ ...windowed, window: { id: 'tomorrow', end: 300 } }).key)

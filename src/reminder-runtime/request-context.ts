@@ -74,7 +74,8 @@ export function requestContext(visible: MessageView[], config: { maxContextChars
 /** Built-in facts are evaluated before optional worker analysis and cannot be overwritten by it. */
 export function requestEligible(rule: Rule, event: EligibilityEvent) {
   if (rule.on !== (event.type ?? 'tool.succeeded')) return false
-  if (rule.on === 'tool.succeeded') return rule.when.tool === event.name
+  if (rule.on === 'tool.succeeded' || rule.on === 'tool.before-execute') return rule.when.tool === event.name
+  if (rule.on === 'session.event') return rule.when.eventType === event.name
   if (rule.on === 'tool.failed') return rule.when.tool === event.name && rule.when.error?.code === event.error?.code
   if (rule.on === 'assistant.output' && (!event.output || !rule.when.blockTypes.includes(event.output.type))) return false
   if ('timeWindow' in rule.when && rule.when.timeWindow && !localWindow(rule.when.timeWindow, event.clock?.at)) return false

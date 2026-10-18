@@ -4,6 +4,8 @@ import { CapacitySettings, CapacityWire } from './capacity.js';
 import type { ClaimBookValue } from './claims.js';
 import type { HistoryEvent, MessageView } from './request-context.js';
 import type { RecipientFacts } from './scope.js';
+import { type CountLimitValues } from './conditions.js';
+import type { DenialVerdict } from './denial.js';
 export declare const Detector: z.ZodObject<{
     ref: z.ZodString;
     revision: z.ZodNumber;
@@ -16,6 +18,8 @@ export declare const Event: z.ZodObject<{
         "tool.failed": "tool.failed";
         "request.before": "request.before";
         "assistant.output": "assistant.output";
+        "tool.before-execute": "tool.before-execute";
+        "session.event": "session.event";
     }>>;
     sessionId: z.ZodString;
     agentPreset: z.ZodOptional<z.ZodString>;
@@ -44,6 +48,7 @@ export declare const Event: z.ZodObject<{
             reasoning: "reasoning";
         }>;
         offset: z.ZodNumber;
+        full: z.ZodDefault<z.ZodString>;
         text: z.ZodString;
     }, z.core.$strip>>;
     context: z.ZodOptional<z.ZodObject<{
@@ -54,10 +59,36 @@ export declare const Event: z.ZodObject<{
         }, z.core.$strip>>;
         truncated: z.ZodBoolean;
     }, z.core.$strip>>;
+    textSamples: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        field: z.ZodString;
+        sampleId: z.ZodString;
+        window: z.ZodEnum<{
+            "current-block": "current-block";
+            "current-output": "current-output";
+        }>;
+        phase: z.ZodEnum<{
+            complete: "complete";
+            prefix: "prefix";
+        }>;
+        truncated: z.ZodBoolean;
+    }, z.core.$strict>>>;
+    origin: z.ZodDefault<z.ZodEnum<{
+        tool: "tool";
+        human: "human";
+        reminder: "reminder";
+        recovery: "recovery";
+        background: "background";
+    }>>;
+    causationId: z.ZodOptional<z.ZodString>;
     facts: z.ZodDefault<z.ZodRecord<z.ZodString, z.ZodJSONSchema>>;
 }, z.core.$catchall<z.ZodJSONSchema>>;
 export declare const MatchResult: z.ZodObject<{
     ok: z.ZodBoolean;
+    status: z.ZodOptional<z.ZodEnum<{
+        matched: "matched";
+        unmatched: "unmatched";
+        unavailable: "unavailable";
+    }>>;
 }, z.core.$catchall<z.ZodJSONSchema>>;
 export declare const AnalysisFacts: z.ZodRecord<z.ZodString, z.ZodJSONSchema>;
 declare const Candidate: z.ZodObject<{
@@ -97,6 +128,7 @@ declare const Candidate: z.ZodObject<{
             reasoning: "reasoning";
         }>;
         offset: z.ZodNumber;
+        full: z.ZodDefault<z.ZodString>;
     }, z.core.$strip>>;
     status: z.ZodEnum<{
         reserved: "reserved";
@@ -105,9 +137,14 @@ declare const Candidate: z.ZodObject<{
         discarded: "discarded";
     }>;
     messageId: z.ZodOptional<z.ZodString>;
+    rendered: z.ZodOptional<z.ZodBoolean>;
+    sticky: z.ZodOptional<z.ZodObject<{
+        activationId: z.ZodString;
+        charged: z.ZodBoolean;
+    }, z.core.$strict>>;
     evidence: z.ZodJSONSchema;
     rule: z.ZodDiscriminatedUnion<[z.ZodObject<{
-        format: z.ZodLiteral<"reminder/v1">;
+        format: z.ZodLiteral<"reminder/v4">;
         id: z.ZodString;
         title: z.ZodOptional<z.ZodString>;
         priority: z.ZodDefault<z.ZodNumber>;
@@ -128,20 +165,7 @@ declare const Candidate: z.ZodObject<{
             params: z.ZodOptional<z.ZodJSONSchema>;
             timeoutMs: z.ZodOptional<z.ZodNumber>;
         }, z.core.$strict>>;
-        deliver: z.ZodObject<{
-            model: z.ZodObject<{
-                once: z.ZodLiteral<"surface">;
-                shared: z.ZodOptional<z.ZodObject<{
-                    reset: z.ZodLiteral<"lifetime">;
-                    lifetime: z.ZodString;
-                    limit: z.ZodNumber;
-                }, z.core.$strict>>;
-            }, z.core.$strict>;
-        }, z.core.$strict>;
-        on: z.ZodEnum<{
-            "tool.succeeded": "tool.succeeded";
-            "tool.failed": "tool.failed";
-        }>;
+        on: z.ZodLiteral<"tool.succeeded">;
         when: z.ZodObject<{
             tool: z.ZodString;
             arguments: z.ZodDefault<z.ZodRecord<z.ZodString, z.ZodObject<{
@@ -153,7 +177,66 @@ declare const Candidate: z.ZodObject<{
             }, z.core.$strict>>;
             condition: z.ZodOptional<z.ZodJSONSchema>;
         }, z.core.$strict>;
+        effect: z.ZodDiscriminatedUnion<[z.ZodObject<{
+            kind: z.ZodLiteral<"remind">;
+            deliver: z.ZodObject<{
+                model: z.ZodObject<{
+                    once: z.ZodEnum<{
+                        window: "window";
+                        none: "none";
+                        surface: "surface";
+                    }>;
+                    shared: z.ZodOptional<z.ZodDiscriminatedUnion<[z.ZodObject<{
+                        reset: z.ZodLiteral<"lifetime">;
+                        lifetime: z.ZodString;
+                        limit: z.ZodNumber;
+                    }, z.core.$strict>, z.ZodObject<{
+                        reset: z.ZodLiteral<"window">;
+                        limit: z.ZodNumber;
+                    }, z.core.$strict>], "reset">>;
+                    interrupt: z.ZodOptional<z.ZodLiteral<"abort-resume">>;
+                    sticky: z.ZodOptional<z.ZodObject<{
+                        lifetime: z.ZodNumber;
+                        cooldown: z.ZodNumber;
+                        clock: z.ZodDefault<z.ZodEnum<{
+                            "main-request": "main-request";
+                            "human-turn": "human-turn";
+                        }>>;
+                    }, z.core.$strict>>;
+                }, z.core.$strict>;
+            }, z.core.$strict>;
+        }, z.core.$strict>, z.ZodObject<{
+            kind: z.ZodLiteral<"deny-tool">;
+            deliver: z.ZodObject<{
+                model: z.ZodObject<{
+                    once: z.ZodEnum<{
+                        window: "window";
+                        none: "none";
+                        surface: "surface";
+                    }>;
+                    shared: z.ZodOptional<z.ZodDiscriminatedUnion<[z.ZodObject<{
+                        reset: z.ZodLiteral<"lifetime">;
+                        lifetime: z.ZodString;
+                        limit: z.ZodNumber;
+                    }, z.core.$strict>, z.ZodObject<{
+                        reset: z.ZodLiteral<"window">;
+                        limit: z.ZodNumber;
+                    }, z.core.$strict>], "reset">>;
+                    interrupt: z.ZodOptional<z.ZodLiteral<"abort-resume">>;
+                    sticky: z.ZodOptional<z.ZodObject<{
+                        lifetime: z.ZodNumber;
+                        cooldown: z.ZodNumber;
+                        clock: z.ZodDefault<z.ZodEnum<{
+                            "main-request": "main-request";
+                            "human-turn": "human-turn";
+                        }>>;
+                    }, z.core.$strict>>;
+                }, z.core.$strict>;
+            }, z.core.$strict>;
+            reason: z.ZodOptional<z.ZodString>;
+        }, z.core.$strict>], "kind">;
     }, z.core.$strict>, z.ZodObject<{
+        format: z.ZodLiteral<"reminder/v4">;
         id: z.ZodString;
         title: z.ZodOptional<z.ZodString>;
         priority: z.ZodDefault<z.ZodNumber>;
@@ -174,7 +257,98 @@ declare const Candidate: z.ZodObject<{
             params: z.ZodOptional<z.ZodJSONSchema>;
             timeoutMs: z.ZodOptional<z.ZodNumber>;
         }, z.core.$strict>>;
-        format: z.ZodLiteral<"reminder/v2">;
+        on: z.ZodLiteral<"tool.failed">;
+        when: z.ZodObject<{
+            tool: z.ZodString;
+            arguments: z.ZodDefault<z.ZodRecord<z.ZodString, z.ZodObject<{
+                regex: z.ZodString;
+                flags: z.ZodDefault<z.ZodString>;
+            }, z.core.$strict>>>;
+            error: z.ZodOptional<z.ZodObject<{
+                code: z.ZodString;
+            }, z.core.$strict>>;
+            condition: z.ZodOptional<z.ZodJSONSchema>;
+        }, z.core.$strict>;
+        effect: z.ZodDiscriminatedUnion<[z.ZodObject<{
+            kind: z.ZodLiteral<"remind">;
+            deliver: z.ZodObject<{
+                model: z.ZodObject<{
+                    once: z.ZodEnum<{
+                        window: "window";
+                        none: "none";
+                        surface: "surface";
+                    }>;
+                    shared: z.ZodOptional<z.ZodDiscriminatedUnion<[z.ZodObject<{
+                        reset: z.ZodLiteral<"lifetime">;
+                        lifetime: z.ZodString;
+                        limit: z.ZodNumber;
+                    }, z.core.$strict>, z.ZodObject<{
+                        reset: z.ZodLiteral<"window">;
+                        limit: z.ZodNumber;
+                    }, z.core.$strict>], "reset">>;
+                    interrupt: z.ZodOptional<z.ZodLiteral<"abort-resume">>;
+                    sticky: z.ZodOptional<z.ZodObject<{
+                        lifetime: z.ZodNumber;
+                        cooldown: z.ZodNumber;
+                        clock: z.ZodDefault<z.ZodEnum<{
+                            "main-request": "main-request";
+                            "human-turn": "human-turn";
+                        }>>;
+                    }, z.core.$strict>>;
+                }, z.core.$strict>;
+            }, z.core.$strict>;
+        }, z.core.$strict>, z.ZodObject<{
+            kind: z.ZodLiteral<"deny-tool">;
+            deliver: z.ZodObject<{
+                model: z.ZodObject<{
+                    once: z.ZodEnum<{
+                        window: "window";
+                        none: "none";
+                        surface: "surface";
+                    }>;
+                    shared: z.ZodOptional<z.ZodDiscriminatedUnion<[z.ZodObject<{
+                        reset: z.ZodLiteral<"lifetime">;
+                        lifetime: z.ZodString;
+                        limit: z.ZodNumber;
+                    }, z.core.$strict>, z.ZodObject<{
+                        reset: z.ZodLiteral<"window">;
+                        limit: z.ZodNumber;
+                    }, z.core.$strict>], "reset">>;
+                    interrupt: z.ZodOptional<z.ZodLiteral<"abort-resume">>;
+                    sticky: z.ZodOptional<z.ZodObject<{
+                        lifetime: z.ZodNumber;
+                        cooldown: z.ZodNumber;
+                        clock: z.ZodDefault<z.ZodEnum<{
+                            "main-request": "main-request";
+                            "human-turn": "human-turn";
+                        }>>;
+                    }, z.core.$strict>>;
+                }, z.core.$strict>;
+            }, z.core.$strict>;
+            reason: z.ZodOptional<z.ZodString>;
+        }, z.core.$strict>], "kind">;
+    }, z.core.$strict>, z.ZodObject<{
+        format: z.ZodLiteral<"reminder/v4">;
+        id: z.ZodString;
+        title: z.ZodOptional<z.ZodString>;
+        priority: z.ZodDefault<z.ZodNumber>;
+        exclusiveGroup: z.ZodOptional<z.ZodString>;
+        scope: z.ZodOptional<z.ZodPipe<z.ZodObject<{
+            sessionIds: z.ZodOptional<z.ZodArray<z.ZodString>>;
+            agentPresets: z.ZodOptional<z.ZodArray<z.ZodString>>;
+            condition: z.ZodOptional<z.ZodJSONSchema>;
+        }, z.core.$strict>, z.ZodTransform<import("./scope.js").RecipientScope, {
+            sessionIds?: string[] | undefined;
+            agentPresets?: string[] | undefined;
+            condition?: z.core.util.JSONType | undefined;
+        }>>>;
+        text: z.ZodString;
+        judge: z.ZodOptional<z.ZodObject<{
+            ref: z.ZodString;
+            revision: z.ZodNumber;
+            params: z.ZodOptional<z.ZodJSONSchema>;
+            timeoutMs: z.ZodOptional<z.ZodNumber>;
+        }, z.core.$strict>>;
         on: z.ZodLiteral<"request.before">;
         when: z.ZodObject<{
             timeWindow: z.ZodOptional<z.ZodObject<{
@@ -187,23 +361,66 @@ declare const Candidate: z.ZodObject<{
             }, z.core.$strict>>;
             condition: z.ZodOptional<z.ZodJSONSchema>;
         }, z.core.$strict>;
-        deliver: z.ZodObject<{
-            model: z.ZodObject<{
-                once: z.ZodEnum<{
-                    window: "window";
-                    surface: "surface";
-                }>;
-                shared: z.ZodOptional<z.ZodDiscriminatedUnion<[z.ZodObject<{
-                    reset: z.ZodLiteral<"lifetime">;
-                    lifetime: z.ZodString;
-                    limit: z.ZodNumber;
-                }, z.core.$strict>, z.ZodObject<{
-                    reset: z.ZodLiteral<"window">;
-                    limit: z.ZodNumber;
-                }, z.core.$strict>], "reset">>;
+        effect: z.ZodDiscriminatedUnion<[z.ZodObject<{
+            kind: z.ZodLiteral<"remind">;
+            deliver: z.ZodObject<{
+                model: z.ZodObject<{
+                    once: z.ZodEnum<{
+                        window: "window";
+                        none: "none";
+                        surface: "surface";
+                    }>;
+                    shared: z.ZodOptional<z.ZodDiscriminatedUnion<[z.ZodObject<{
+                        reset: z.ZodLiteral<"lifetime">;
+                        lifetime: z.ZodString;
+                        limit: z.ZodNumber;
+                    }, z.core.$strict>, z.ZodObject<{
+                        reset: z.ZodLiteral<"window">;
+                        limit: z.ZodNumber;
+                    }, z.core.$strict>], "reset">>;
+                    interrupt: z.ZodOptional<z.ZodLiteral<"abort-resume">>;
+                    sticky: z.ZodOptional<z.ZodObject<{
+                        lifetime: z.ZodNumber;
+                        cooldown: z.ZodNumber;
+                        clock: z.ZodDefault<z.ZodEnum<{
+                            "main-request": "main-request";
+                            "human-turn": "human-turn";
+                        }>>;
+                    }, z.core.$strict>>;
+                }, z.core.$strict>;
             }, z.core.$strict>;
-        }, z.core.$strict>;
+        }, z.core.$strict>, z.ZodObject<{
+            kind: z.ZodLiteral<"deny-tool">;
+            deliver: z.ZodObject<{
+                model: z.ZodObject<{
+                    once: z.ZodEnum<{
+                        window: "window";
+                        none: "none";
+                        surface: "surface";
+                    }>;
+                    shared: z.ZodOptional<z.ZodDiscriminatedUnion<[z.ZodObject<{
+                        reset: z.ZodLiteral<"lifetime">;
+                        lifetime: z.ZodString;
+                        limit: z.ZodNumber;
+                    }, z.core.$strict>, z.ZodObject<{
+                        reset: z.ZodLiteral<"window">;
+                        limit: z.ZodNumber;
+                    }, z.core.$strict>], "reset">>;
+                    interrupt: z.ZodOptional<z.ZodLiteral<"abort-resume">>;
+                    sticky: z.ZodOptional<z.ZodObject<{
+                        lifetime: z.ZodNumber;
+                        cooldown: z.ZodNumber;
+                        clock: z.ZodDefault<z.ZodEnum<{
+                            "main-request": "main-request";
+                            "human-turn": "human-turn";
+                        }>>;
+                    }, z.core.$strict>>;
+                }, z.core.$strict>;
+            }, z.core.$strict>;
+            reason: z.ZodOptional<z.ZodString>;
+        }, z.core.$strict>], "kind">;
     }, z.core.$strict>, z.ZodObject<{
+        format: z.ZodLiteral<"reminder/v4">;
         id: z.ZodString;
         title: z.ZodOptional<z.ZodString>;
         priority: z.ZodDefault<z.ZodNumber>;
@@ -224,7 +441,6 @@ declare const Candidate: z.ZodObject<{
             params: z.ZodOptional<z.ZodJSONSchema>;
             timeoutMs: z.ZodOptional<z.ZodNumber>;
         }, z.core.$strict>>;
-        format: z.ZodLiteral<"reminder/v3">;
         on: z.ZodLiteral<"assistant.output">;
         when: z.ZodObject<{
             blockTypes: z.ZodArray<z.ZodEnum<{
@@ -253,25 +469,262 @@ declare const Candidate: z.ZodObject<{
             }, z.core.$strict>>;
             condition: z.ZodOptional<z.ZodJSONSchema>;
         }, z.core.$strict>;
-        deliver: z.ZodObject<{
-            model: z.ZodObject<{
-                once: z.ZodEnum<{
-                    window: "window";
-                    surface: "surface";
-                }>;
-                shared: z.ZodOptional<z.ZodDiscriminatedUnion<[z.ZodObject<{
-                    reset: z.ZodLiteral<"lifetime">;
-                    lifetime: z.ZodString;
-                    limit: z.ZodNumber;
-                }, z.core.$strict>, z.ZodObject<{
-                    reset: z.ZodLiteral<"window">;
-                    limit: z.ZodNumber;
-                }, z.core.$strict>], "reset">>;
-                interrupt: z.ZodOptional<z.ZodLiteral<"abort-resume">>;
+        effect: z.ZodDiscriminatedUnion<[z.ZodObject<{
+            kind: z.ZodLiteral<"remind">;
+            deliver: z.ZodObject<{
+                model: z.ZodObject<{
+                    once: z.ZodEnum<{
+                        window: "window";
+                        none: "none";
+                        surface: "surface";
+                    }>;
+                    shared: z.ZodOptional<z.ZodDiscriminatedUnion<[z.ZodObject<{
+                        reset: z.ZodLiteral<"lifetime">;
+                        lifetime: z.ZodString;
+                        limit: z.ZodNumber;
+                    }, z.core.$strict>, z.ZodObject<{
+                        reset: z.ZodLiteral<"window">;
+                        limit: z.ZodNumber;
+                    }, z.core.$strict>], "reset">>;
+                    interrupt: z.ZodOptional<z.ZodLiteral<"abort-resume">>;
+                    sticky: z.ZodOptional<z.ZodObject<{
+                        lifetime: z.ZodNumber;
+                        cooldown: z.ZodNumber;
+                        clock: z.ZodDefault<z.ZodEnum<{
+                            "main-request": "main-request";
+                            "human-turn": "human-turn";
+                        }>>;
+                    }, z.core.$strict>>;
+                }, z.core.$strict>;
             }, z.core.$strict>;
+        }, z.core.$strict>, z.ZodObject<{
+            kind: z.ZodLiteral<"deny-tool">;
+            deliver: z.ZodObject<{
+                model: z.ZodObject<{
+                    once: z.ZodEnum<{
+                        window: "window";
+                        none: "none";
+                        surface: "surface";
+                    }>;
+                    shared: z.ZodOptional<z.ZodDiscriminatedUnion<[z.ZodObject<{
+                        reset: z.ZodLiteral<"lifetime">;
+                        lifetime: z.ZodString;
+                        limit: z.ZodNumber;
+                    }, z.core.$strict>, z.ZodObject<{
+                        reset: z.ZodLiteral<"window">;
+                        limit: z.ZodNumber;
+                    }, z.core.$strict>], "reset">>;
+                    interrupt: z.ZodOptional<z.ZodLiteral<"abort-resume">>;
+                    sticky: z.ZodOptional<z.ZodObject<{
+                        lifetime: z.ZodNumber;
+                        cooldown: z.ZodNumber;
+                        clock: z.ZodDefault<z.ZodEnum<{
+                            "main-request": "main-request";
+                            "human-turn": "human-turn";
+                        }>>;
+                    }, z.core.$strict>>;
+                }, z.core.$strict>;
+            }, z.core.$strict>;
+            reason: z.ZodOptional<z.ZodString>;
+        }, z.core.$strict>], "kind">;
+    }, z.core.$strict>, z.ZodObject<{
+        format: z.ZodLiteral<"reminder/v4">;
+        id: z.ZodString;
+        title: z.ZodOptional<z.ZodString>;
+        priority: z.ZodDefault<z.ZodNumber>;
+        exclusiveGroup: z.ZodOptional<z.ZodString>;
+        scope: z.ZodOptional<z.ZodPipe<z.ZodObject<{
+            sessionIds: z.ZodOptional<z.ZodArray<z.ZodString>>;
+            agentPresets: z.ZodOptional<z.ZodArray<z.ZodString>>;
+            condition: z.ZodOptional<z.ZodJSONSchema>;
+        }, z.core.$strict>, z.ZodTransform<import("./scope.js").RecipientScope, {
+            sessionIds?: string[] | undefined;
+            agentPresets?: string[] | undefined;
+            condition?: z.core.util.JSONType | undefined;
+        }>>>;
+        text: z.ZodString;
+        judge: z.ZodOptional<z.ZodObject<{
+            ref: z.ZodString;
+            revision: z.ZodNumber;
+            params: z.ZodOptional<z.ZodJSONSchema>;
+            timeoutMs: z.ZodOptional<z.ZodNumber>;
+        }, z.core.$strict>>;
+        on: z.ZodLiteral<"tool.before-execute">;
+        when: z.ZodObject<{
+            tool: z.ZodString;
+            arguments: z.ZodDefault<z.ZodRecord<z.ZodString, z.ZodObject<{
+                regex: z.ZodString;
+                flags: z.ZodDefault<z.ZodString>;
+            }, z.core.$strict>>>;
+            condition: z.ZodOptional<z.ZodJSONSchema>;
         }, z.core.$strict>;
-    }, z.core.$strict>], "format">;
+        effect: z.ZodDiscriminatedUnion<[z.ZodObject<{
+            kind: z.ZodLiteral<"remind">;
+            deliver: z.ZodObject<{
+                model: z.ZodObject<{
+                    once: z.ZodEnum<{
+                        window: "window";
+                        none: "none";
+                        surface: "surface";
+                    }>;
+                    shared: z.ZodOptional<z.ZodDiscriminatedUnion<[z.ZodObject<{
+                        reset: z.ZodLiteral<"lifetime">;
+                        lifetime: z.ZodString;
+                        limit: z.ZodNumber;
+                    }, z.core.$strict>, z.ZodObject<{
+                        reset: z.ZodLiteral<"window">;
+                        limit: z.ZodNumber;
+                    }, z.core.$strict>], "reset">>;
+                    interrupt: z.ZodOptional<z.ZodLiteral<"abort-resume">>;
+                    sticky: z.ZodOptional<z.ZodObject<{
+                        lifetime: z.ZodNumber;
+                        cooldown: z.ZodNumber;
+                        clock: z.ZodDefault<z.ZodEnum<{
+                            "main-request": "main-request";
+                            "human-turn": "human-turn";
+                        }>>;
+                    }, z.core.$strict>>;
+                }, z.core.$strict>;
+            }, z.core.$strict>;
+        }, z.core.$strict>, z.ZodObject<{
+            kind: z.ZodLiteral<"deny-tool">;
+            deliver: z.ZodObject<{
+                model: z.ZodObject<{
+                    once: z.ZodEnum<{
+                        window: "window";
+                        none: "none";
+                        surface: "surface";
+                    }>;
+                    shared: z.ZodOptional<z.ZodDiscriminatedUnion<[z.ZodObject<{
+                        reset: z.ZodLiteral<"lifetime">;
+                        lifetime: z.ZodString;
+                        limit: z.ZodNumber;
+                    }, z.core.$strict>, z.ZodObject<{
+                        reset: z.ZodLiteral<"window">;
+                        limit: z.ZodNumber;
+                    }, z.core.$strict>], "reset">>;
+                    interrupt: z.ZodOptional<z.ZodLiteral<"abort-resume">>;
+                    sticky: z.ZodOptional<z.ZodObject<{
+                        lifetime: z.ZodNumber;
+                        cooldown: z.ZodNumber;
+                        clock: z.ZodDefault<z.ZodEnum<{
+                            "main-request": "main-request";
+                            "human-turn": "human-turn";
+                        }>>;
+                    }, z.core.$strict>>;
+                }, z.core.$strict>;
+            }, z.core.$strict>;
+            reason: z.ZodOptional<z.ZodString>;
+        }, z.core.$strict>], "kind">;
+    }, z.core.$strict>, z.ZodObject<{
+        format: z.ZodLiteral<"reminder/v4">;
+        id: z.ZodString;
+        title: z.ZodOptional<z.ZodString>;
+        priority: z.ZodDefault<z.ZodNumber>;
+        exclusiveGroup: z.ZodOptional<z.ZodString>;
+        scope: z.ZodOptional<z.ZodPipe<z.ZodObject<{
+            sessionIds: z.ZodOptional<z.ZodArray<z.ZodString>>;
+            agentPresets: z.ZodOptional<z.ZodArray<z.ZodString>>;
+            condition: z.ZodOptional<z.ZodJSONSchema>;
+        }, z.core.$strict>, z.ZodTransform<import("./scope.js").RecipientScope, {
+            sessionIds?: string[] | undefined;
+            agentPresets?: string[] | undefined;
+            condition?: z.core.util.JSONType | undefined;
+        }>>>;
+        text: z.ZodString;
+        judge: z.ZodOptional<z.ZodObject<{
+            ref: z.ZodString;
+            revision: z.ZodNumber;
+            params: z.ZodOptional<z.ZodJSONSchema>;
+            timeoutMs: z.ZodOptional<z.ZodNumber>;
+        }, z.core.$strict>>;
+        on: z.ZodLiteral<"session.event">;
+        when: z.ZodObject<{
+            eventType: z.ZodString;
+            condition: z.ZodOptional<z.ZodJSONSchema>;
+        }, z.core.$strict>;
+        effect: z.ZodDiscriminatedUnion<[z.ZodObject<{
+            kind: z.ZodLiteral<"remind">;
+            deliver: z.ZodObject<{
+                model: z.ZodObject<{
+                    once: z.ZodEnum<{
+                        window: "window";
+                        none: "none";
+                        surface: "surface";
+                    }>;
+                    shared: z.ZodOptional<z.ZodDiscriminatedUnion<[z.ZodObject<{
+                        reset: z.ZodLiteral<"lifetime">;
+                        lifetime: z.ZodString;
+                        limit: z.ZodNumber;
+                    }, z.core.$strict>, z.ZodObject<{
+                        reset: z.ZodLiteral<"window">;
+                        limit: z.ZodNumber;
+                    }, z.core.$strict>], "reset">>;
+                    interrupt: z.ZodOptional<z.ZodLiteral<"abort-resume">>;
+                    sticky: z.ZodOptional<z.ZodObject<{
+                        lifetime: z.ZodNumber;
+                        cooldown: z.ZodNumber;
+                        clock: z.ZodDefault<z.ZodEnum<{
+                            "main-request": "main-request";
+                            "human-turn": "human-turn";
+                        }>>;
+                    }, z.core.$strict>>;
+                }, z.core.$strict>;
+            }, z.core.$strict>;
+        }, z.core.$strict>, z.ZodObject<{
+            kind: z.ZodLiteral<"deny-tool">;
+            deliver: z.ZodObject<{
+                model: z.ZodObject<{
+                    once: z.ZodEnum<{
+                        window: "window";
+                        none: "none";
+                        surface: "surface";
+                    }>;
+                    shared: z.ZodOptional<z.ZodDiscriminatedUnion<[z.ZodObject<{
+                        reset: z.ZodLiteral<"lifetime">;
+                        lifetime: z.ZodString;
+                        limit: z.ZodNumber;
+                    }, z.core.$strict>, z.ZodObject<{
+                        reset: z.ZodLiteral<"window">;
+                        limit: z.ZodNumber;
+                    }, z.core.$strict>], "reset">>;
+                    interrupt: z.ZodOptional<z.ZodLiteral<"abort-resume">>;
+                    sticky: z.ZodOptional<z.ZodObject<{
+                        lifetime: z.ZodNumber;
+                        cooldown: z.ZodNumber;
+                        clock: z.ZodDefault<z.ZodEnum<{
+                            "main-request": "main-request";
+                            "human-turn": "human-turn";
+                        }>>;
+                    }, z.core.$strict>>;
+                }, z.core.$strict>;
+            }, z.core.$strict>;
+            reason: z.ZodOptional<z.ZodString>;
+        }, z.core.$strict>], "kind">;
+    }, z.core.$strict>], "on">;
 }, z.core.$strip>;
+/**
+ * One sticky activation: a reminder that stays present across consecutive clock
+ * ticks. `remaining` counts the active ticks left after the delivering tick, and
+ * `cooldown` counts the silent ticks that follow before a new event may activate it.
+ */
+declare const StickyState: z.ZodObject<{
+    key: z.ZodString;
+    activationId: z.ZodString;
+    sourceId: z.ZodString;
+    ruleId: z.ZodString;
+    sessionId: z.ZodString;
+    text: z.ZodString;
+    title: z.ZodString;
+    clock: z.ZodEnum<{
+        "main-request": "main-request";
+        "human-turn": "human-turn";
+    }>;
+    remaining: z.ZodNumber;
+    cooldown: z.ZodNumber;
+    charged: z.ZodBoolean;
+    lastHumanId: z.ZodString;
+}, z.core.$strict>;
 export declare const SessionState: z.ZodObject<{
     seen: z.ZodArray<z.ZodString>;
     candidates: z.ZodArray<z.ZodObject<{
@@ -311,6 +764,7 @@ export declare const SessionState: z.ZodObject<{
                 reasoning: "reasoning";
             }>;
             offset: z.ZodNumber;
+            full: z.ZodDefault<z.ZodString>;
         }, z.core.$strip>>;
         status: z.ZodEnum<{
             reserved: "reserved";
@@ -319,9 +773,14 @@ export declare const SessionState: z.ZodObject<{
             discarded: "discarded";
         }>;
         messageId: z.ZodOptional<z.ZodString>;
+        rendered: z.ZodOptional<z.ZodBoolean>;
+        sticky: z.ZodOptional<z.ZodObject<{
+            activationId: z.ZodString;
+            charged: z.ZodBoolean;
+        }, z.core.$strict>>;
         evidence: z.ZodJSONSchema;
         rule: z.ZodDiscriminatedUnion<[z.ZodObject<{
-            format: z.ZodLiteral<"reminder/v1">;
+            format: z.ZodLiteral<"reminder/v4">;
             id: z.ZodString;
             title: z.ZodOptional<z.ZodString>;
             priority: z.ZodDefault<z.ZodNumber>;
@@ -342,20 +801,7 @@ export declare const SessionState: z.ZodObject<{
                 params: z.ZodOptional<z.ZodJSONSchema>;
                 timeoutMs: z.ZodOptional<z.ZodNumber>;
             }, z.core.$strict>>;
-            deliver: z.ZodObject<{
-                model: z.ZodObject<{
-                    once: z.ZodLiteral<"surface">;
-                    shared: z.ZodOptional<z.ZodObject<{
-                        reset: z.ZodLiteral<"lifetime">;
-                        lifetime: z.ZodString;
-                        limit: z.ZodNumber;
-                    }, z.core.$strict>>;
-                }, z.core.$strict>;
-            }, z.core.$strict>;
-            on: z.ZodEnum<{
-                "tool.succeeded": "tool.succeeded";
-                "tool.failed": "tool.failed";
-            }>;
+            on: z.ZodLiteral<"tool.succeeded">;
             when: z.ZodObject<{
                 tool: z.ZodString;
                 arguments: z.ZodDefault<z.ZodRecord<z.ZodString, z.ZodObject<{
@@ -367,7 +813,66 @@ export declare const SessionState: z.ZodObject<{
                 }, z.core.$strict>>;
                 condition: z.ZodOptional<z.ZodJSONSchema>;
             }, z.core.$strict>;
+            effect: z.ZodDiscriminatedUnion<[z.ZodObject<{
+                kind: z.ZodLiteral<"remind">;
+                deliver: z.ZodObject<{
+                    model: z.ZodObject<{
+                        once: z.ZodEnum<{
+                            window: "window";
+                            none: "none";
+                            surface: "surface";
+                        }>;
+                        shared: z.ZodOptional<z.ZodDiscriminatedUnion<[z.ZodObject<{
+                            reset: z.ZodLiteral<"lifetime">;
+                            lifetime: z.ZodString;
+                            limit: z.ZodNumber;
+                        }, z.core.$strict>, z.ZodObject<{
+                            reset: z.ZodLiteral<"window">;
+                            limit: z.ZodNumber;
+                        }, z.core.$strict>], "reset">>;
+                        interrupt: z.ZodOptional<z.ZodLiteral<"abort-resume">>;
+                        sticky: z.ZodOptional<z.ZodObject<{
+                            lifetime: z.ZodNumber;
+                            cooldown: z.ZodNumber;
+                            clock: z.ZodDefault<z.ZodEnum<{
+                                "main-request": "main-request";
+                                "human-turn": "human-turn";
+                            }>>;
+                        }, z.core.$strict>>;
+                    }, z.core.$strict>;
+                }, z.core.$strict>;
+            }, z.core.$strict>, z.ZodObject<{
+                kind: z.ZodLiteral<"deny-tool">;
+                deliver: z.ZodObject<{
+                    model: z.ZodObject<{
+                        once: z.ZodEnum<{
+                            window: "window";
+                            none: "none";
+                            surface: "surface";
+                        }>;
+                        shared: z.ZodOptional<z.ZodDiscriminatedUnion<[z.ZodObject<{
+                            reset: z.ZodLiteral<"lifetime">;
+                            lifetime: z.ZodString;
+                            limit: z.ZodNumber;
+                        }, z.core.$strict>, z.ZodObject<{
+                            reset: z.ZodLiteral<"window">;
+                            limit: z.ZodNumber;
+                        }, z.core.$strict>], "reset">>;
+                        interrupt: z.ZodOptional<z.ZodLiteral<"abort-resume">>;
+                        sticky: z.ZodOptional<z.ZodObject<{
+                            lifetime: z.ZodNumber;
+                            cooldown: z.ZodNumber;
+                            clock: z.ZodDefault<z.ZodEnum<{
+                                "main-request": "main-request";
+                                "human-turn": "human-turn";
+                            }>>;
+                        }, z.core.$strict>>;
+                    }, z.core.$strict>;
+                }, z.core.$strict>;
+                reason: z.ZodOptional<z.ZodString>;
+            }, z.core.$strict>], "kind">;
         }, z.core.$strict>, z.ZodObject<{
+            format: z.ZodLiteral<"reminder/v4">;
             id: z.ZodString;
             title: z.ZodOptional<z.ZodString>;
             priority: z.ZodDefault<z.ZodNumber>;
@@ -388,7 +893,98 @@ export declare const SessionState: z.ZodObject<{
                 params: z.ZodOptional<z.ZodJSONSchema>;
                 timeoutMs: z.ZodOptional<z.ZodNumber>;
             }, z.core.$strict>>;
-            format: z.ZodLiteral<"reminder/v2">;
+            on: z.ZodLiteral<"tool.failed">;
+            when: z.ZodObject<{
+                tool: z.ZodString;
+                arguments: z.ZodDefault<z.ZodRecord<z.ZodString, z.ZodObject<{
+                    regex: z.ZodString;
+                    flags: z.ZodDefault<z.ZodString>;
+                }, z.core.$strict>>>;
+                error: z.ZodOptional<z.ZodObject<{
+                    code: z.ZodString;
+                }, z.core.$strict>>;
+                condition: z.ZodOptional<z.ZodJSONSchema>;
+            }, z.core.$strict>;
+            effect: z.ZodDiscriminatedUnion<[z.ZodObject<{
+                kind: z.ZodLiteral<"remind">;
+                deliver: z.ZodObject<{
+                    model: z.ZodObject<{
+                        once: z.ZodEnum<{
+                            window: "window";
+                            none: "none";
+                            surface: "surface";
+                        }>;
+                        shared: z.ZodOptional<z.ZodDiscriminatedUnion<[z.ZodObject<{
+                            reset: z.ZodLiteral<"lifetime">;
+                            lifetime: z.ZodString;
+                            limit: z.ZodNumber;
+                        }, z.core.$strict>, z.ZodObject<{
+                            reset: z.ZodLiteral<"window">;
+                            limit: z.ZodNumber;
+                        }, z.core.$strict>], "reset">>;
+                        interrupt: z.ZodOptional<z.ZodLiteral<"abort-resume">>;
+                        sticky: z.ZodOptional<z.ZodObject<{
+                            lifetime: z.ZodNumber;
+                            cooldown: z.ZodNumber;
+                            clock: z.ZodDefault<z.ZodEnum<{
+                                "main-request": "main-request";
+                                "human-turn": "human-turn";
+                            }>>;
+                        }, z.core.$strict>>;
+                    }, z.core.$strict>;
+                }, z.core.$strict>;
+            }, z.core.$strict>, z.ZodObject<{
+                kind: z.ZodLiteral<"deny-tool">;
+                deliver: z.ZodObject<{
+                    model: z.ZodObject<{
+                        once: z.ZodEnum<{
+                            window: "window";
+                            none: "none";
+                            surface: "surface";
+                        }>;
+                        shared: z.ZodOptional<z.ZodDiscriminatedUnion<[z.ZodObject<{
+                            reset: z.ZodLiteral<"lifetime">;
+                            lifetime: z.ZodString;
+                            limit: z.ZodNumber;
+                        }, z.core.$strict>, z.ZodObject<{
+                            reset: z.ZodLiteral<"window">;
+                            limit: z.ZodNumber;
+                        }, z.core.$strict>], "reset">>;
+                        interrupt: z.ZodOptional<z.ZodLiteral<"abort-resume">>;
+                        sticky: z.ZodOptional<z.ZodObject<{
+                            lifetime: z.ZodNumber;
+                            cooldown: z.ZodNumber;
+                            clock: z.ZodDefault<z.ZodEnum<{
+                                "main-request": "main-request";
+                                "human-turn": "human-turn";
+                            }>>;
+                        }, z.core.$strict>>;
+                    }, z.core.$strict>;
+                }, z.core.$strict>;
+                reason: z.ZodOptional<z.ZodString>;
+            }, z.core.$strict>], "kind">;
+        }, z.core.$strict>, z.ZodObject<{
+            format: z.ZodLiteral<"reminder/v4">;
+            id: z.ZodString;
+            title: z.ZodOptional<z.ZodString>;
+            priority: z.ZodDefault<z.ZodNumber>;
+            exclusiveGroup: z.ZodOptional<z.ZodString>;
+            scope: z.ZodOptional<z.ZodPipe<z.ZodObject<{
+                sessionIds: z.ZodOptional<z.ZodArray<z.ZodString>>;
+                agentPresets: z.ZodOptional<z.ZodArray<z.ZodString>>;
+                condition: z.ZodOptional<z.ZodJSONSchema>;
+            }, z.core.$strict>, z.ZodTransform<import("./scope.js").RecipientScope, {
+                sessionIds?: string[] | undefined;
+                agentPresets?: string[] | undefined;
+                condition?: z.core.util.JSONType | undefined;
+            }>>>;
+            text: z.ZodString;
+            judge: z.ZodOptional<z.ZodObject<{
+                ref: z.ZodString;
+                revision: z.ZodNumber;
+                params: z.ZodOptional<z.ZodJSONSchema>;
+                timeoutMs: z.ZodOptional<z.ZodNumber>;
+            }, z.core.$strict>>;
             on: z.ZodLiteral<"request.before">;
             when: z.ZodObject<{
                 timeWindow: z.ZodOptional<z.ZodObject<{
@@ -401,23 +997,66 @@ export declare const SessionState: z.ZodObject<{
                 }, z.core.$strict>>;
                 condition: z.ZodOptional<z.ZodJSONSchema>;
             }, z.core.$strict>;
-            deliver: z.ZodObject<{
-                model: z.ZodObject<{
-                    once: z.ZodEnum<{
-                        window: "window";
-                        surface: "surface";
-                    }>;
-                    shared: z.ZodOptional<z.ZodDiscriminatedUnion<[z.ZodObject<{
-                        reset: z.ZodLiteral<"lifetime">;
-                        lifetime: z.ZodString;
-                        limit: z.ZodNumber;
-                    }, z.core.$strict>, z.ZodObject<{
-                        reset: z.ZodLiteral<"window">;
-                        limit: z.ZodNumber;
-                    }, z.core.$strict>], "reset">>;
+            effect: z.ZodDiscriminatedUnion<[z.ZodObject<{
+                kind: z.ZodLiteral<"remind">;
+                deliver: z.ZodObject<{
+                    model: z.ZodObject<{
+                        once: z.ZodEnum<{
+                            window: "window";
+                            none: "none";
+                            surface: "surface";
+                        }>;
+                        shared: z.ZodOptional<z.ZodDiscriminatedUnion<[z.ZodObject<{
+                            reset: z.ZodLiteral<"lifetime">;
+                            lifetime: z.ZodString;
+                            limit: z.ZodNumber;
+                        }, z.core.$strict>, z.ZodObject<{
+                            reset: z.ZodLiteral<"window">;
+                            limit: z.ZodNumber;
+                        }, z.core.$strict>], "reset">>;
+                        interrupt: z.ZodOptional<z.ZodLiteral<"abort-resume">>;
+                        sticky: z.ZodOptional<z.ZodObject<{
+                            lifetime: z.ZodNumber;
+                            cooldown: z.ZodNumber;
+                            clock: z.ZodDefault<z.ZodEnum<{
+                                "main-request": "main-request";
+                                "human-turn": "human-turn";
+                            }>>;
+                        }, z.core.$strict>>;
+                    }, z.core.$strict>;
                 }, z.core.$strict>;
-            }, z.core.$strict>;
+            }, z.core.$strict>, z.ZodObject<{
+                kind: z.ZodLiteral<"deny-tool">;
+                deliver: z.ZodObject<{
+                    model: z.ZodObject<{
+                        once: z.ZodEnum<{
+                            window: "window";
+                            none: "none";
+                            surface: "surface";
+                        }>;
+                        shared: z.ZodOptional<z.ZodDiscriminatedUnion<[z.ZodObject<{
+                            reset: z.ZodLiteral<"lifetime">;
+                            lifetime: z.ZodString;
+                            limit: z.ZodNumber;
+                        }, z.core.$strict>, z.ZodObject<{
+                            reset: z.ZodLiteral<"window">;
+                            limit: z.ZodNumber;
+                        }, z.core.$strict>], "reset">>;
+                        interrupt: z.ZodOptional<z.ZodLiteral<"abort-resume">>;
+                        sticky: z.ZodOptional<z.ZodObject<{
+                            lifetime: z.ZodNumber;
+                            cooldown: z.ZodNumber;
+                            clock: z.ZodDefault<z.ZodEnum<{
+                                "main-request": "main-request";
+                                "human-turn": "human-turn";
+                            }>>;
+                        }, z.core.$strict>>;
+                    }, z.core.$strict>;
+                }, z.core.$strict>;
+                reason: z.ZodOptional<z.ZodString>;
+            }, z.core.$strict>], "kind">;
         }, z.core.$strict>, z.ZodObject<{
+            format: z.ZodLiteral<"reminder/v4">;
             id: z.ZodString;
             title: z.ZodOptional<z.ZodString>;
             priority: z.ZodDefault<z.ZodNumber>;
@@ -438,7 +1077,6 @@ export declare const SessionState: z.ZodObject<{
                 params: z.ZodOptional<z.ZodJSONSchema>;
                 timeoutMs: z.ZodOptional<z.ZodNumber>;
             }, z.core.$strict>>;
-            format: z.ZodLiteral<"reminder/v3">;
             on: z.ZodLiteral<"assistant.output">;
             when: z.ZodObject<{
                 blockTypes: z.ZodArray<z.ZodEnum<{
@@ -467,24 +1105,239 @@ export declare const SessionState: z.ZodObject<{
                 }, z.core.$strict>>;
                 condition: z.ZodOptional<z.ZodJSONSchema>;
             }, z.core.$strict>;
-            deliver: z.ZodObject<{
-                model: z.ZodObject<{
-                    once: z.ZodEnum<{
-                        window: "window";
-                        surface: "surface";
-                    }>;
-                    shared: z.ZodOptional<z.ZodDiscriminatedUnion<[z.ZodObject<{
-                        reset: z.ZodLiteral<"lifetime">;
-                        lifetime: z.ZodString;
-                        limit: z.ZodNumber;
-                    }, z.core.$strict>, z.ZodObject<{
-                        reset: z.ZodLiteral<"window">;
-                        limit: z.ZodNumber;
-                    }, z.core.$strict>], "reset">>;
-                    interrupt: z.ZodOptional<z.ZodLiteral<"abort-resume">>;
+            effect: z.ZodDiscriminatedUnion<[z.ZodObject<{
+                kind: z.ZodLiteral<"remind">;
+                deliver: z.ZodObject<{
+                    model: z.ZodObject<{
+                        once: z.ZodEnum<{
+                            window: "window";
+                            none: "none";
+                            surface: "surface";
+                        }>;
+                        shared: z.ZodOptional<z.ZodDiscriminatedUnion<[z.ZodObject<{
+                            reset: z.ZodLiteral<"lifetime">;
+                            lifetime: z.ZodString;
+                            limit: z.ZodNumber;
+                        }, z.core.$strict>, z.ZodObject<{
+                            reset: z.ZodLiteral<"window">;
+                            limit: z.ZodNumber;
+                        }, z.core.$strict>], "reset">>;
+                        interrupt: z.ZodOptional<z.ZodLiteral<"abort-resume">>;
+                        sticky: z.ZodOptional<z.ZodObject<{
+                            lifetime: z.ZodNumber;
+                            cooldown: z.ZodNumber;
+                            clock: z.ZodDefault<z.ZodEnum<{
+                                "main-request": "main-request";
+                                "human-turn": "human-turn";
+                            }>>;
+                        }, z.core.$strict>>;
+                    }, z.core.$strict>;
                 }, z.core.$strict>;
+            }, z.core.$strict>, z.ZodObject<{
+                kind: z.ZodLiteral<"deny-tool">;
+                deliver: z.ZodObject<{
+                    model: z.ZodObject<{
+                        once: z.ZodEnum<{
+                            window: "window";
+                            none: "none";
+                            surface: "surface";
+                        }>;
+                        shared: z.ZodOptional<z.ZodDiscriminatedUnion<[z.ZodObject<{
+                            reset: z.ZodLiteral<"lifetime">;
+                            lifetime: z.ZodString;
+                            limit: z.ZodNumber;
+                        }, z.core.$strict>, z.ZodObject<{
+                            reset: z.ZodLiteral<"window">;
+                            limit: z.ZodNumber;
+                        }, z.core.$strict>], "reset">>;
+                        interrupt: z.ZodOptional<z.ZodLiteral<"abort-resume">>;
+                        sticky: z.ZodOptional<z.ZodObject<{
+                            lifetime: z.ZodNumber;
+                            cooldown: z.ZodNumber;
+                            clock: z.ZodDefault<z.ZodEnum<{
+                                "main-request": "main-request";
+                                "human-turn": "human-turn";
+                            }>>;
+                        }, z.core.$strict>>;
+                    }, z.core.$strict>;
+                }, z.core.$strict>;
+                reason: z.ZodOptional<z.ZodString>;
+            }, z.core.$strict>], "kind">;
+        }, z.core.$strict>, z.ZodObject<{
+            format: z.ZodLiteral<"reminder/v4">;
+            id: z.ZodString;
+            title: z.ZodOptional<z.ZodString>;
+            priority: z.ZodDefault<z.ZodNumber>;
+            exclusiveGroup: z.ZodOptional<z.ZodString>;
+            scope: z.ZodOptional<z.ZodPipe<z.ZodObject<{
+                sessionIds: z.ZodOptional<z.ZodArray<z.ZodString>>;
+                agentPresets: z.ZodOptional<z.ZodArray<z.ZodString>>;
+                condition: z.ZodOptional<z.ZodJSONSchema>;
+            }, z.core.$strict>, z.ZodTransform<import("./scope.js").RecipientScope, {
+                sessionIds?: string[] | undefined;
+                agentPresets?: string[] | undefined;
+                condition?: z.core.util.JSONType | undefined;
+            }>>>;
+            text: z.ZodString;
+            judge: z.ZodOptional<z.ZodObject<{
+                ref: z.ZodString;
+                revision: z.ZodNumber;
+                params: z.ZodOptional<z.ZodJSONSchema>;
+                timeoutMs: z.ZodOptional<z.ZodNumber>;
+            }, z.core.$strict>>;
+            on: z.ZodLiteral<"tool.before-execute">;
+            when: z.ZodObject<{
+                tool: z.ZodString;
+                arguments: z.ZodDefault<z.ZodRecord<z.ZodString, z.ZodObject<{
+                    regex: z.ZodString;
+                    flags: z.ZodDefault<z.ZodString>;
+                }, z.core.$strict>>>;
+                condition: z.ZodOptional<z.ZodJSONSchema>;
             }, z.core.$strict>;
-        }, z.core.$strict>], "format">;
+            effect: z.ZodDiscriminatedUnion<[z.ZodObject<{
+                kind: z.ZodLiteral<"remind">;
+                deliver: z.ZodObject<{
+                    model: z.ZodObject<{
+                        once: z.ZodEnum<{
+                            window: "window";
+                            none: "none";
+                            surface: "surface";
+                        }>;
+                        shared: z.ZodOptional<z.ZodDiscriminatedUnion<[z.ZodObject<{
+                            reset: z.ZodLiteral<"lifetime">;
+                            lifetime: z.ZodString;
+                            limit: z.ZodNumber;
+                        }, z.core.$strict>, z.ZodObject<{
+                            reset: z.ZodLiteral<"window">;
+                            limit: z.ZodNumber;
+                        }, z.core.$strict>], "reset">>;
+                        interrupt: z.ZodOptional<z.ZodLiteral<"abort-resume">>;
+                        sticky: z.ZodOptional<z.ZodObject<{
+                            lifetime: z.ZodNumber;
+                            cooldown: z.ZodNumber;
+                            clock: z.ZodDefault<z.ZodEnum<{
+                                "main-request": "main-request";
+                                "human-turn": "human-turn";
+                            }>>;
+                        }, z.core.$strict>>;
+                    }, z.core.$strict>;
+                }, z.core.$strict>;
+            }, z.core.$strict>, z.ZodObject<{
+                kind: z.ZodLiteral<"deny-tool">;
+                deliver: z.ZodObject<{
+                    model: z.ZodObject<{
+                        once: z.ZodEnum<{
+                            window: "window";
+                            none: "none";
+                            surface: "surface";
+                        }>;
+                        shared: z.ZodOptional<z.ZodDiscriminatedUnion<[z.ZodObject<{
+                            reset: z.ZodLiteral<"lifetime">;
+                            lifetime: z.ZodString;
+                            limit: z.ZodNumber;
+                        }, z.core.$strict>, z.ZodObject<{
+                            reset: z.ZodLiteral<"window">;
+                            limit: z.ZodNumber;
+                        }, z.core.$strict>], "reset">>;
+                        interrupt: z.ZodOptional<z.ZodLiteral<"abort-resume">>;
+                        sticky: z.ZodOptional<z.ZodObject<{
+                            lifetime: z.ZodNumber;
+                            cooldown: z.ZodNumber;
+                            clock: z.ZodDefault<z.ZodEnum<{
+                                "main-request": "main-request";
+                                "human-turn": "human-turn";
+                            }>>;
+                        }, z.core.$strict>>;
+                    }, z.core.$strict>;
+                }, z.core.$strict>;
+                reason: z.ZodOptional<z.ZodString>;
+            }, z.core.$strict>], "kind">;
+        }, z.core.$strict>, z.ZodObject<{
+            format: z.ZodLiteral<"reminder/v4">;
+            id: z.ZodString;
+            title: z.ZodOptional<z.ZodString>;
+            priority: z.ZodDefault<z.ZodNumber>;
+            exclusiveGroup: z.ZodOptional<z.ZodString>;
+            scope: z.ZodOptional<z.ZodPipe<z.ZodObject<{
+                sessionIds: z.ZodOptional<z.ZodArray<z.ZodString>>;
+                agentPresets: z.ZodOptional<z.ZodArray<z.ZodString>>;
+                condition: z.ZodOptional<z.ZodJSONSchema>;
+            }, z.core.$strict>, z.ZodTransform<import("./scope.js").RecipientScope, {
+                sessionIds?: string[] | undefined;
+                agentPresets?: string[] | undefined;
+                condition?: z.core.util.JSONType | undefined;
+            }>>>;
+            text: z.ZodString;
+            judge: z.ZodOptional<z.ZodObject<{
+                ref: z.ZodString;
+                revision: z.ZodNumber;
+                params: z.ZodOptional<z.ZodJSONSchema>;
+                timeoutMs: z.ZodOptional<z.ZodNumber>;
+            }, z.core.$strict>>;
+            on: z.ZodLiteral<"session.event">;
+            when: z.ZodObject<{
+                eventType: z.ZodString;
+                condition: z.ZodOptional<z.ZodJSONSchema>;
+            }, z.core.$strict>;
+            effect: z.ZodDiscriminatedUnion<[z.ZodObject<{
+                kind: z.ZodLiteral<"remind">;
+                deliver: z.ZodObject<{
+                    model: z.ZodObject<{
+                        once: z.ZodEnum<{
+                            window: "window";
+                            none: "none";
+                            surface: "surface";
+                        }>;
+                        shared: z.ZodOptional<z.ZodDiscriminatedUnion<[z.ZodObject<{
+                            reset: z.ZodLiteral<"lifetime">;
+                            lifetime: z.ZodString;
+                            limit: z.ZodNumber;
+                        }, z.core.$strict>, z.ZodObject<{
+                            reset: z.ZodLiteral<"window">;
+                            limit: z.ZodNumber;
+                        }, z.core.$strict>], "reset">>;
+                        interrupt: z.ZodOptional<z.ZodLiteral<"abort-resume">>;
+                        sticky: z.ZodOptional<z.ZodObject<{
+                            lifetime: z.ZodNumber;
+                            cooldown: z.ZodNumber;
+                            clock: z.ZodDefault<z.ZodEnum<{
+                                "main-request": "main-request";
+                                "human-turn": "human-turn";
+                            }>>;
+                        }, z.core.$strict>>;
+                    }, z.core.$strict>;
+                }, z.core.$strict>;
+            }, z.core.$strict>, z.ZodObject<{
+                kind: z.ZodLiteral<"deny-tool">;
+                deliver: z.ZodObject<{
+                    model: z.ZodObject<{
+                        once: z.ZodEnum<{
+                            window: "window";
+                            none: "none";
+                            surface: "surface";
+                        }>;
+                        shared: z.ZodOptional<z.ZodDiscriminatedUnion<[z.ZodObject<{
+                            reset: z.ZodLiteral<"lifetime">;
+                            lifetime: z.ZodString;
+                            limit: z.ZodNumber;
+                        }, z.core.$strict>, z.ZodObject<{
+                            reset: z.ZodLiteral<"window">;
+                            limit: z.ZodNumber;
+                        }, z.core.$strict>], "reset">>;
+                        interrupt: z.ZodOptional<z.ZodLiteral<"abort-resume">>;
+                        sticky: z.ZodOptional<z.ZodObject<{
+                            lifetime: z.ZodNumber;
+                            cooldown: z.ZodNumber;
+                            clock: z.ZodDefault<z.ZodEnum<{
+                                "main-request": "main-request";
+                                "human-turn": "human-turn";
+                            }>>;
+                        }, z.core.$strict>>;
+                    }, z.core.$strict>;
+                }, z.core.$strict>;
+                reason: z.ZodOptional<z.ZodString>;
+            }, z.core.$strict>], "kind">;
+        }, z.core.$strict>], "on">;
     }, z.core.$strip>>;
     diagnostics: z.ZodArray<z.ZodRecord<z.ZodString, z.ZodJSONSchema>>;
     windows: z.ZodDefault<z.ZodArray<z.ZodObject<{
@@ -492,6 +1345,23 @@ export declare const SessionState: z.ZodObject<{
         until: z.ZodNumber;
         messageId: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>>>;
+    stickies: z.ZodDefault<z.ZodArray<z.ZodObject<{
+        key: z.ZodString;
+        activationId: z.ZodString;
+        sourceId: z.ZodString;
+        ruleId: z.ZodString;
+        sessionId: z.ZodString;
+        text: z.ZodString;
+        title: z.ZodString;
+        clock: z.ZodEnum<{
+            "main-request": "main-request";
+            "human-turn": "human-turn";
+        }>;
+        remaining: z.ZodNumber;
+        cooldown: z.ZodNumber;
+        charged: z.ZodBoolean;
+        lastHumanId: z.ZodString;
+    }, z.core.$strict>>>;
 }, z.core.$strict>;
 export declare const REMINDER_DOMAIN: {
     name: string;
@@ -508,11 +1378,13 @@ export declare const REMINDER_DOMAIN: {
                     until: z.ZodNumber;
                     messageId: z.ZodOptional<z.ZodString>;
                 }, z.core.$strict>>>;
+                stickies: z.ZodOptional<z.ZodArray<z.ZodJSONSchema>>;
             }, z.core.$strict>;
         };
     };
 };
 export type CandidateValue = z.infer<typeof Candidate>;
+export type StickyStateValue = z.infer<typeof StickyState>;
 export type StateValue = z.infer<typeof SessionState>;
 export type EventValue = z.infer<typeof Event>;
 export type SourceValue = z.infer<typeof Source>;
@@ -545,6 +1417,12 @@ export interface Run {
     done: Promise<void>;
     task?: Promise<unknown>;
     timer?: ReturnType<typeof setTimeout>;
+    /** Execution token this round decides, for pre-execution calls only. */
+    denialKey?: object;
+    /** Denial chosen by this round; absent means the call stays allowed. */
+    denial?: DenialVerdict;
+    /** Whether every rule was actually evaluated; an interrupted round must not authorize. */
+    evaluated?: boolean;
 }
 export type Work = {
     analysis: {
@@ -557,6 +1435,7 @@ export type Work = {
         condition: CompiledRule['condition'];
         event: EventValue;
         maxBytes: number;
+        countLimits: CountLimitValues;
         judge?: DetectorValue;
         params?: z.infer<ReturnType<typeof z.json>>;
     };
@@ -564,6 +1443,8 @@ export type Work = {
 export interface RuntimeOptions {
     config?: unknown;
     entries?: Iterable<readonly [string, unknown]>;
+    /** Strict, single-pass prompt templates reused from context-care's engine. */
+    templates?: TemplateRenderer;
     save?: (id: string, state: StateValue) => Promise<unknown> | void;
     execute?: (input: Work, signal: AbortSignal, timing: {
         onDispatch: () => void;
@@ -581,6 +1462,29 @@ export interface RuntimeOptions {
     eligible?: (sessionId: string, sourceId: string, ruleId: string) => boolean;
     epoch?: (sessionId: string, sourceId: string, ruleId: string) => CandidateValue['policy'];
     report?: (error: unknown) => void;
+}
+/** The subset of the shared template engine the runtime needs. */
+export interface TemplateRenderer {
+    /** Reject an unusable template before any rule is registered. */
+    validate(source: string): void;
+    /**
+     * Render once against a frozen snapshot. The argument is `unknown` because the
+     * engine owns snapshot validation: it walks the value and rejects anything that
+     * is not plain JSON, so the caller does not pre-narrow it here.
+     */
+    render(source: string, snapshot: unknown): string;
+}
+/** One tool call at the pre-execution point, already materialized by the registry. */
+export interface ToolPreparation {
+    /** Registry execution token; the later synchronous guard correlates on this exact object. */
+    key: object;
+    sessionId: string;
+    agentPreset?: string;
+    name: string;
+    arguments: unknown;
+    callId: string;
+    rootCallId: string;
+    signal?: AbortSignal;
 }
 export interface RequestInput {
     sessionId: string;

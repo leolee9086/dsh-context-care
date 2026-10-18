@@ -1,4 +1,5 @@
 import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent';
+import type { TextSampleValue } from './conditions.js';
 export interface OutputConfig {
     maxStreamChars: number;
     maxStreamBlocks: number;
@@ -14,6 +15,8 @@ export interface OutputEvidence {
     index: number;
     type: 'text' | 'reasoning';
     text: string;
+    /** The attempt's readable text so far, tail-capped like a block; `current-output` counts read this. */
+    full: string;
     offset: number;
 }
 export interface OutputEvent {
@@ -25,6 +28,7 @@ export interface OutputEvent {
         at: number;
     };
     output: OutputEvidence;
+    textSamples: TextSampleValue[];
 }
 export type OutputFrame = (Pick<Extract<AssistantStreamFrame, {
     type: 'start';

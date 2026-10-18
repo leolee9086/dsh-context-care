@@ -7,8 +7,8 @@ import type { ClaimBookValue } from '../lib/reminder-runtime/claims.js'
 const name: RecipientCondition = { kind: 'compare', field: 'session.agentPresetName', op: 'eq', value: '织' }
 const model: RecipientCondition = { kind: 'compare', field: 'session.model', op: 'contains', value: 'gpt-' }
 const source: ReminderSource = { sourceId: 'notes', plugin: 'siyuan', revision: 1,
-  scope: { condition: name }, rules: [{ format: 'reminder/v1', id: 'notes-first', on: 'tool.succeeded',
-    scope: { condition: model }, text: '内部笔记写入思源。', when: { tool: 'write' }, deliver: { model: { once: 'surface' } } }] }
+  scope: { condition: name }, rules: [{ format: 'reminder/v4', id: 'notes-first', on: 'tool.succeeded',
+    scope: { condition: model }, text: '内部笔记写入思源。', when: { tool: 'write' }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } }] }
 const event = (callId: string, sessionId = 's') => ({ sessionId, callId, rootCallId: callId, name: 'write' })
 const facts = (): RecipientFacts => ({ agentPreset: 'zhi', agentPresetName: '织', provider: 'route', model: 'gpt-6' })
 function fixture(t: TestContext, options: RuntimeOptions) {
@@ -100,7 +100,7 @@ test('共享额度保存期间模型切换会释放名额，其它合适会话�
       return book
     } })
   runtime.registerSource({ ...source, rules: source.rules.map(rule => ({ ...rule,
-    deliver: { model: { once: 'surface', shared: { reset: 'lifetime', lifetime: 'test', limit: 1 } } } })) })
+    effect: { kind: 'remind', deliver: { model: { once: 'surface', shared: { reset: 'lifetime', lifetime: 'test', limit: 1 } } } } })) })
   await Promise.all([runtime.submit(event('s-hit')), runtime.submit(event('other-hit', 'other'))])
   assert.deepEqual(await runtime.collect({ sessionId: 's', visible: [] }), [])
   assert.equal(book.buckets.length, 0)
@@ -118,7 +118,7 @@ test('一或多个会话共享消费只计合适接收者，额度不会按模�
     const runtime = fixture(t, { resolveIdentity: async id => id === 'excluded' ? { ...facts(), model: 'other' } : facts(),
       updateClaims: async change => { book = change(book); return book } })
     runtime.registerSource({ ...source, rules: source.rules.map(rule => ({ ...rule,
-      deliver: { model: { once: 'surface', shared: { reset: 'lifetime', lifetime: 'test', limit } } } })) })
+      effect: { kind: 'remind', deliver: { model: { once: 'surface', shared: { reset: 'lifetime', lifetime: 'test', limit } } } } })) })
     const ids = ['a', 'b', 'c', 'excluded']
     await Promise.all(ids.map(id => runtime.submit(event(id, id))))
     const messages = await Promise.all(ids.map(sessionId => runtime.collect({ sessionId, visible: [] })))

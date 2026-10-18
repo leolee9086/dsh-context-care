@@ -3,18 +3,29 @@ import { performance } from 'node:perf_hooks'
 import type { MessageId } from '@deepseek-ai/dsh-llm'
 import type { UserMessage } from '@deepseek-ai/dsh-session'
 import { Source, ReminderConfig, compileRule } from './schema.js'
+import type { DeclaredEvents } from './schema.js'
+import type { EventFieldShape } from './generated/session-events.js'
 import { CapacitySettings, CapacityError } from './capacity.js'
 import { localWindow, humanActivity, requestContext, requestEligible } from './request-context.js'
 import type { MessageView } from './request-context.js'
 import { matchesScope } from './scope.js'
 import type { RecipientIdentity } from './scope.js'
 import { changeClaims, quotaFor, hasClaim } from './claims.js'
+import { createDenialTickets } from './denial.js'
+import { SESSION_EVENT_TYPES } from './generated/session-events.js'
+
+/** Built-in names, which a custom event may not shadow. */
+const BUILT_IN_EVENT_NAMES = new Set<string>(SESSION_EVENT_TYPES)
+import { parseOrThrow } from './schema-error.js'
+import type { DenialVerdict } from './denial.js'
 import type { ClaimOperation } from './claims.js'
 import { Detector, SessionState, Event, MatchResult, AnalysisFacts, jsonCopy, errorMessage, errorDetail } from './state.js'
-import type { CandidateValue, StateValue, SourceValue, RuleValue, DetectorValue, Rejection, RegisteredSource, Run, RuntimeOptions, RequestInput, CollectInput } from './state.js'
+import type { CandidateValue, StateValue, SourceValue, RuleValue, DetectorValue, Rejection, RegisteredSource, Run, RuntimeOptions, RequestInput, CollectInput, ToolPreparation, EventValue } from './state.js'
 export { ReminderConfig } from './schema.js'
 export { REMINDER_DOMAIN } from './state.js'
 export type { RuntimeOptions } from './state.js'
+/** The selector shape a custom event descriptor declares, reused from the generated catalog. */
+export type { EventFieldShape } from './generated/session-events.js'
 
 /** Public source declarations keep schema defaults optional until registration. */
 export type ReminderSource = import('zod').input<typeof Source>
@@ -24,18 +35,31 @@ export type ReminderService = ReturnType<typeof createReminderRuntime>
 export type ReminderSourceHandle = ReturnType<ReminderService['registerSource']>
 
 export const REMINDER_SERVICE = 'reminderRules'
-const KIND = 'plugin:dsh-context-care:reminder'
+/**
+ * Source kind of a reminder delivery. It also guards session-event matching:
+ * a delivery is itself a logged message, so matching must not consume its own output.
+ */
+export const REMINDER_MESSAGE_KIND = 'plugin:dsh-context-care:reminder'
 const keyOf = (sourceId: string, ruleId: string) => JSON.stringify([sourceId, ruleId, 'model'])
 const sourceSignature = (source: SourceValue, rule: RuleValue) => createHash('sha256').update(JSON.stringify({
   plugin: source.plugin, sessionId: source.sessionId, scope: source.scope, rule,
 })).digest('hex')
+/**
+ * The frozen event facts a reminder template may read. Captures, counts and the
+ * decision itself live beside these in the same evidence record, so one snapshot
+ * answers every question the template can ask.
+ */
+function frozenFacts(event: EventValue) {
+  return AnalysisFacts.parse(jsonCopy({ type: event.type, name: event.name, arguments: event.arguments,
+    error: event.error, output: event.output, clock: event.clock, humanActivity: event.humanActivity }))
+}
 function reminderKeys(message: MessageView) {
-  if (message.source?.kind !== KIND) return []
+  if (message.source?.kind !== REMINDER_MESSAGE_KIND) return []
   if (!message.source.reminder) throw new Error('reminder-message-key-missing')
   return [message.source.reminder.key]
 }
 function reminderSource(candidate: CandidateValue) {
-  return { kind: KIND, form: 'notice', summary: candidate.title,
+  return { kind: REMINDER_MESSAGE_KIND, form: 'notice', summary: candidate.title,
     reminder: { key: candidate.key, candidateId: candidate.id },
     contextCareTrace: { trigger: 'reminder-rule', evaluationId: candidate.id, ruleId: candidate.ruleId,
       sourceId: candidate.sourceId, callId: candidate.eventId, rule: candidate.rule, evidence: candidate.evidence,
@@ -57,7 +81,7 @@ function reminderMessage(candidate: CandidateValue, messageId: string) {
 /** One runtime owns source snapshots, evaluation lifetimes and durable candidate records.
  * save ACKs before publishing state; execute must settle cancellation after its worker stops.
  * No Cordis or live session objects enter the scheduler. */
-export function createReminderRuntime({ config: input, entries = [], save = async () => {}, execute = async () => { throw new Error('reminder-executor-unavailable') },
+export function createReminderRuntime({ config: input, entries = [], templates, save = async () => {}, execute = async () => { throw new Error('reminder-executor-unavailable') },
   capacity, saveCapacity = async () => {}, dispatches = false, resolvePreset, resolveIdentity, updateClaims,
   wallNow = () => Date.now(), now = () => performance.now(), eligible = () => true, epoch = () => 0, report = () => {} }: RuntimeOptions = {}) {
   const config = ReminderConfig.parse(input)
@@ -71,11 +95,41 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
   const chains = new Map<string, Promise<unknown>>(), queues = new Map<string, Run[]>(), running = new Map<string, Run>()
   const failures = new Map<string, unknown>(), admissions = new Set<{ sessionId: string; controller: AbortController; task?: Promise<void> }>()
   let closed = false, pumping = false
-  const empty = (): StateValue => ({ seen: [], candidates: [], diagnostics: [], windows: [] })
+  // Tickets outlive one evaluation round but never a policy change; a stale ticket must not permit a call.
+  const tickets = createDenialTickets(config.ruleTimeoutMs * 4, () => performance.now())
+  // Reminder-caused activations per session. A human turn breaks the chain; the
+  // budget is what stops two rules from ping-ponging without a shared causal store.
+  const reminderChains = new Map<string, number>()
+  // Declared custom events: a rule may select one by name once its owner declares it.
+  const customEvents = new Map<string, EventFieldShape>()
+  const declaredEvents = (): DeclaredEvents => ({ names: new Set(customEvents.keys()), shapes: customEvents })
+  /**
+   * Whether loop prevention suppresses this activation. A reminder may not be re-activated
+   * by the message it generated itself, and reminder-caused activations share one budget
+   * per session. A due denial is never suppressed: loop prevention must not allow a call
+   * that should still be refused.
+   */
+  function loopBlocked(event: EventValue, sourceId: string, ruleId: string, effect: string): boolean {
+    if (event.origin !== 'reminder' || effect === 'deny-tool') return false
+    return event.causationId === `${sourceId}:${ruleId}` || (reminderChains.get(event.sessionId) ?? 0) > config.maxReminderChain
+  }
+  const empty = (): StateValue => ({ seen: [], candidates: [], diagnostics: [], windows: [], stickies: [] })
   const serial = <T>(id: string, fn: () => T | Promise<T>) => {
     const task = (chains.get(id) ?? Promise.resolve()).catch(() => {}).then(fn)
     chains.set(id, task)
     return task
+  }
+  /**
+   * Reject an unusable body while the source is being registered, so a broken
+   * template never reaches delivery. Without the engine, only fixed text is legal.
+   */
+  function validateText(source: string) {
+    if (templates) return templates.validate(source)
+    if (source.includes('{{')) throw new Error('reminder-template-engine-unavailable')
+  }
+  /** Render a body once; the injected engine is the only substitution mechanism. */
+  function renderText(source: string, snapshot: unknown) {
+    return templates ? templates.render(source, snapshot) : source
   }
   async function claims(operation: Omit<ClaimOperation, 'at' | 'maxBytes'>) {
     if (!updateClaims) throw new Error('reminder-shared-storage-unavailable')
@@ -150,7 +204,53 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
   function diagnostic(id: string, detail: Record<string, unknown>) {
     return update(id, state => state.diagnostics.push(AnalysisFacts.parse(jsonCopy({ at: Date.now(), ...detail })))).catch(report)
   }
+  /**
+   * Move every sticky activation one clock tick. An activation delivers while it
+   * has active ticks left, stands silent through its cooldown, and is dropped once
+   * both are spent: a new event is then required to activate the rule again.
+   * A tick never refreshes the activation, so repeated hits cannot extend it.
+   */
+  function advanceStickies(state: StateValue, humanId: string): Set<string> {
+    const ticked = new Set<string>()
+    state.stickies = state.stickies.filter(sticky => {
+      // A main-request clock advances on every request; a human-turn clock waits for new input.
+      if (sticky.clock === 'human-turn' && sticky.lastHumanId === humanId) return true
+      sticky.lastHumanId = humanId
+      if (sticky.remaining > 0) { ticked.add(sticky.activationId); return true }
+      sticky.cooldown -= 1
+      return sticky.cooldown >= 0
+    })
+    return ticked
+  }
+  /** Queue this tick's delivery for each activation that still has active ticks. */
+  function pendSticky(state: StateValue, sessionId: string, ticked: Set<string>) {
+    for (const sticky of state.stickies) {
+      // Only an activation whose clock actually advanced delivers this request.
+      if (sticky.remaining <= 0 || !ticked.has(sticky.activationId)) continue
+      const source = sources.get(sticky.sourceId)
+      const definition = source?.value.rules.find(rule => rule.id === sticky.ruleId)
+      const compiled = source?.compiled.find(rule => rule.id === sticky.ruleId)
+      // A withdrawn rule or source ends the activation; its text no longer has an owner.
+      if (!source || !definition || !compiled) { sticky.remaining = 0; sticky.cooldown = 0; continue }
+      // One delivery per lifetime unit: a queued or reserved tick already claims this one.
+      const key = JSON.stringify([sticky.sourceId, sticky.ruleId, 'sticky', sticky.activationId, sticky.remaining])
+      if (state.candidates.some(item => item.key === key && (item.status === 'pending' || item.status === 'reserved'))) continue
+      state.candidates.push({ id: randomUUID(), sessionId, sourceId: sticky.sourceId, sourceToken: source.token,
+        sourceSignature: sourceSignature(source.value, definition), ruleId: sticky.ruleId, key,
+        revision: source.value.revision, policy: epoch(sessionId, sticky.sourceId, sticky.ruleId),
+        text: sticky.text, title: sticky.title, eventId: `sticky:${sticky.activationId}:${sticky.remaining}`,
+        rootCallId: `sticky:${sticky.activationId}`, status: 'pending',
+        // The activation stores the body its first delivery already rendered, so a
+        // later tick reuses that text and must never render the template source again.
+        rendered: true,
+        evidence: AnalysisFacts.parse(jsonCopy({ sticky: true, activationId: sticky.activationId })),
+        sticky: { activationId: sticky.activationId, charged: sticky.charged },
+        rule: structuredClone(definition) })
+    }
+  }
   function invalidate(sourceId: string) {
+    // A changed source can change a denial, so uncommitted tickets from the old policy must not authorize.
+    tickets.revoke()
     if (sources.has(sourceId)) for (const state of records.values()) {
       for (const candidate of state.candidates) if (candidate.sourceId === sourceId) recovered.delete(candidate.id)
     }
@@ -176,6 +276,8 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
   async function evaluate(run: Run) {
     const { event, items, controller, deadline } = run
     const blockedGroups = new Set<string>(), winners = new Set<string>(), results: CandidateValue[] = []
+    // Only a pre-execution round can still stop its call; correlation uses the registry's execution token.
+    const denialKey = event.type === 'tool.before-execute' ? run.denialKey : undefined
     const diagnostics: Record<string, unknown>[] = []
     // Every analyzer reads the same base input; only the matching phase sees their combined facts.
     event.facts = {}
@@ -215,16 +317,21 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
       try {
         const judge = item.judge
         if (rule.judge && (judge?.revision !== rule.judge.revision || detectors.get(rule.judge.ref) !== judge)) throw new Error('reminder-judge-unavailable')
-        const result = MatchResult.parse(await execute({ reminder: { condition: rule.condition, event, maxBytes: config.maxBytes,
+        const result = MatchResult.parse(await execute({ reminder: { condition: rule.condition, event, maxBytes: config.maxBytes, countLimits: config.countLimits,
           ...(judge && rule.judge ? { judge, params: rule.judge.params ?? null } : {}) } }, child.signal, { onDispatch, workTimeoutMs }))
         if (child.signal.aborted || controller.signal.aborted || now() >= deadline) throw child.signal.reason ?? new Error('reminder-round-timeout')
         if (sources.get(source.sourceId)?.token !== token || epoch(event.sessionId, source.sourceId, rule.id) !== policy) continue
         if (result.ok) {
-          const definition = source.rules.find(value => value.id === rule.id)
-          if (!definition) throw new Error('reminder-source-rule-missing')
           const output = rule.on === 'assistant.output' ? event.output : undefined
           if (rule.on === 'assistant.output' && !output) throw new Error('reminder-output-evidence-missing')
           if (rule.exclusiveGroup) winners.add(rule.exclusiveGroup)
+          // A denial and an ordinary reminder take this same path: same validation, same delivery,
+          // same quota. The denial only records that this call must also be refused.
+          const definition = source.rules.find(value => value.id === rule.id)
+          if (!definition) throw new Error('reminder-source-rule-missing')
+          if (rule.effect.kind === 'deny-tool') {
+            run.denial ??= { sourceId: source.sourceId, ruleId: rule.id, reason: rule.effect.reason ?? rule.text }
+          }
           results.push({ id: randomUUID(), sessionId: event.sessionId, ...(event.agentPreset === undefined ? {} : { agentPreset: event.agentPreset }), sourceId: source.sourceId, sourceToken: token, ruleId: rule.id,
             key: item.window ? JSON.stringify([source.sourceId, rule.id, 'model', item.window.id]) : keyOf(source.sourceId, rule.id),
             ...(item.window ? { window: item.window } : {}),
@@ -232,13 +339,17 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
             revision: source.revision, policy, text: rule.text,
             sourceSignature: sourceSignature(source, definition),
             ...(output ? { output: { attemptId: output.attemptId, turn: output.turn,
-              step: output.step, index: output.index, type: output.type, offset: output.offset } } : {}),
+              step: output.step, index: output.index, type: output.type, offset: output.offset,
+              full: output.full } } : {}),
             title: rule.title ?? rule.id, eventId: event.callId, rootCallId: event.rootCallId,
-            status: 'pending', evidence: rule.on === 'request.before'
-              ? AnalysisFacts.parse(jsonCopy({ ...result, clock: event.clock, humanActivity: event.humanActivity })) : result,
+            status: 'pending', evidence: AnalysisFacts.parse(jsonCopy({ ...result, event: frozenFacts(event),
+              ...(rule.on === 'request.before' ? { clock: event.clock, humanActivity: event.humanActivity } : {}) })),
             rule: structuredClone(definition) })
         }
-        diagnostics.push({ ruleId: rule.id, sourceId: source.sourceId, eventId: event.callId, status: result.ok ? 'matched' : 'unmatched' })
+        if (result.status === 'unavailable' && rule.exclusiveGroup) blockedGroups.add(rule.exclusiveGroup)
+        diagnostics.push({ ruleId: rule.id, sourceId: source.sourceId, eventId: event.callId,
+          status: result.status ?? (result.ok ? 'matched' : 'unmatched'),
+          ...(result.status === 'unavailable' ? { evidence: result } : {}) })
       } catch (error) {
         if (rule.exclusiveGroup) blockedGroups.add(rule.exclusiveGroup)
         diagnostics.push({ ruleId: rule.id, sourceId: source.sourceId, eventId: event.callId,
@@ -246,10 +357,14 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
           ...errorDetail(error) })
       } finally { clearTimeout(timer); controller.signal.removeEventListener('abort', abort) }
     }
+    // Reaching the end of the loop is the only proof that no denial rule was skipped.
+    run.evaluated = !controller.signal.aborted && now() < deadline
     await update(event.sessionId, async state => {
       state.diagnostics.push(...diagnostics.map(detail => AnalysisFacts.parse(jsonCopy(detail))))
       if (controller.signal.aborted || closed) return
       const target = await identity(event.sessionId, event.agentPreset, controller.signal)
+      // Recorded after the identity recheck, so a decision revoked during the round never survives it.
+      if (denialKey) tickets.record(denialKey, run.denial, run.evaluated === true)
       for (const candidate of results) {
         if (controller.signal.aborted || closed || !current(candidate, target) || !eligible(event.sessionId, candidate.sourceId, candidate.ruleId)
           || epoch(event.sessionId, candidate.sourceId, candidate.ruleId) !== candidate.policy) continue
@@ -258,8 +373,66 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
       }
     })
   }
-  function catalogFor(acceptSource: (item: RegisteredSource) => boolean, acceptRule: (rule: RuleValue) => boolean) {
-    return [...sources.values()].filter(acceptSource).map(item => item.value)
+  /** Single admission path for composed events; a pre-execution round also carries its ticket key. */
+  function admit(rawEvent: unknown, signal?: AbortSignal, denialKey?: object): Promise<void> {
+    if (closed || signal?.aborted) return Promise.resolve()
+    // Reserve capacity before the first persistence await; pending writes are part of the queue.
+    if (admissions.size >= config.maxQueued + config.maxConcurrent) return Promise.reject(new Error('reminder-capacity-exceeded'))
+    const admittedAt = now(), serialized = JSON.stringify(rawEvent)
+    if (Buffer.byteLength(serialized) > config.maxBytes) return Promise.reject(new Error('reminder-input-budget-exceeded'))
+    // A rejected submission is reported through the public service, so its reason must survive relay.
+    const event = parseOrThrow('提醒事件无效', () => Event.parse(JSON.parse(serialized)))
+    // A human turn breaks the reminder chain; a reminder-caused event extends it. Only
+    // derived activations are affected by this count (see loopBlocked).
+    if (event.origin === 'human') reminderChains.delete(event.sessionId)
+    else if (event.origin === 'reminder') reminderChains.set(event.sessionId, (reminderChains.get(event.sessionId) ?? 0) + 1)
+    const admission: { sessionId: string; controller: AbortController; task?: Promise<void> } = { sessionId: event.sessionId, controller: new AbortController() }
+    admissions.add(admission)
+    // Promise invokes its executor synchronously before this resolver is read.
+    let resolve!: () => void
+    const done = new Promise<void>(finish => { resolve = finish })
+    const run: Run = { event, items: [], analyzers: [...analyzers.values()], controller: admission.controller, deadline: admittedAt + config.roundTimeoutMs, resolve, done,
+      ...(denialKey === undefined ? {} : { denialKey }) }
+    const abort = () => {
+      run.controller.abort(signal?.reason ?? new Error('reminder-round-timeout'))
+      const queue = queues.get(event.sessionId), index = queue?.indexOf(run) ?? -1
+      if (queue && index >= 0) {
+        queue.splice(index, 1); if (!queue.length) queues.delete(event.sessionId)
+        void diagnostic(event.sessionId, { eventId: event.callId, status: signal?.aborted ? 'cancelled' : 'queue-timeout' }).finally(resolve)
+      }
+    }
+    signal?.addEventListener('abort', abort, { once: true })
+    run.timer = setTimeout(abort, Math.max(0, run.deadline - now()))
+    // Identity lookup occupies admission capacity and uses the same round deadline as matching.
+    admission.task = identity(event.sessionId, event.agentPreset, run.controller.signal).then(target => {
+      if (closed || run.controller.signal.aborted) return false
+      run.items = [...sources.values()].filter(item => sourceAccepts(item, target))
+        .flatMap(item => item.compiled.filter(rule => ruleAccepts(rule, target) && requestEligible(rule, event)
+          && eligible(event.sessionId, item.value.sourceId, rule.id)
+          && !loopBlocked(event, item.value.sourceId, rule.id, rule.effect.kind))
+          .map(rule => ({ rule, source: item.value, token: item.token, policy: epoch(event.sessionId, item.value.sourceId, rule.id),
+            judge: rule.judge ? detectors.get(rule.judge.ref) : undefined,
+            window: rule.effect.deliver.model.once === 'window' || rule.effect.deliver.model.shared?.reset === 'window'
+              ? localWindow('timeWindow' in rule.when ? rule.when.timeWindow : undefined, event.clock?.at) : undefined })))
+        .sort((a, b) => b.rule.priority - a.rule.priority || a.source.sourceId.localeCompare(b.source.sourceId) || a.rule.id.localeCompare(b.rule.id))
+      if (!run.items.length) return false
+      return update(event.sessionId, state => {
+        if (run.controller.signal.aborted || state.seen.includes(event.callId)) return false
+        state.seen.push(event.callId); return true
+      })
+    }).then(admitted => {
+      if (!admitted || closed || run.controller.signal.aborted || now() >= run.deadline) return
+      const queue = queues.get(event.sessionId) ?? []; queue.push(run); queues.set(event.sessionId, queue); pump()
+      return done
+    }).catch(async error => {
+      if (!run.controller.signal.aborted) throw error
+      await diagnostic(event.sessionId, { eventId: event.callId, status: signal?.aborted ? 'cancelled' : 'queue-timeout' })
+    }).finally(() => {
+      clearTimeout(run.timer); signal?.removeEventListener('abort', abort); admissions.delete(admission)
+    })
+    return admission.task
+  }
+  function catalogFor(acceptSource: (item: RegisteredSource) => boolean, acceptRule: (rule: RuleValue) => boolean) {    return [...sources.values()].filter(acceptSource).map(item => item.value)
       .map(source => ({ sourceId: source.sourceId, plugin: source.plugin, registration: 'reminderRules', executor: 'context-care',
         ...(source.sessionId ? { sessionId: source.sessionId } : {}), ...(source.scope ? { scope: source.scope } : {}), readOnly: true,
         rules: source.rules.filter(acceptRule).map(rule => ({ id: rule.id, title: rule.title ?? rule.id, description: rule.text,
@@ -284,7 +457,8 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
       const target = await identity(sessionId, agentPreset)
       const selected = [...sources.values()].filter(source => sourceAccepts(source, target)
         && (sourceId === undefined || source.value.sourceId === sourceId))
-        .flatMap(source => source.compiled.filter(rule => rule.deliver.model.once === 'window'
+        .flatMap(source => source.compiled.filter(rule => rule.effect.kind === 'remind'
+          && rule.effect.deliver.model.once === 'window'
           && ruleAccepts(rule, target)
           && (ruleId === undefined || rule.id === ruleId)).map(rule => ({ sourceId: source.value.sourceId, rule })))
       return update(sessionId, state => {
@@ -314,15 +488,16 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
       capacityWrite = task
       return task
     },
-    validateRule(input: unknown) { return structuredClone(compileRule(input, 'validation', 1)) },
+    validateRule(input: unknown) { return structuredClone(compileRule(input, config.countLimits, declaredEvents())) },
     registerSource(input: unknown, { acceptSession = () => true }: { acceptSession?: (sessionId: string) => boolean } = {}) {
       if (closed) throw new Error('reminder-runtime-closed')
-      const value = Source.parse(input)
+      // Registration is a public entry point; a rejected declaration must carry its reason.
+      const value = parseOrThrow('提醒来源无效', () => Source.parse(input))
       if (sources.has(value.sourceId)) throw new Error('reminder-source-already-registered')
       const owner = {}
       const replace = (input: unknown) => {
         if (closed || (sources.has(value.sourceId) && sources.get(value.sourceId)?.owner !== owner)) throw new Error('reminder-source-disposed')
-        const next = Source.parse(input)
+        const next = parseOrThrow('提醒来源无效', () => Source.parse(input))
         if (next.sourceId !== value.sourceId || next.plugin !== value.plugin || next.sessionId !== value.sessionId) throw new Error('reminder-source-identity-changed')
         const previousCount = registeredRules()
         const totalRules = previousCount - (sources.get(next.sourceId)?.compiled.length ?? 0) + next.rules.length
@@ -333,8 +508,10 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
           throw Object.assign(new Error(message), { code: 'reminder-capacity-exceeded' })
         }
         if (new Set(next.rules.map(rule => rule.id)).size !== next.rules.length) throw new Error('reminder-duplicate-rule')
-        const compiled = next.rules.map(rule => compileRule(rule, next.sourceId, next.revision))
-        if (!updateClaims && compiled.some(rule => rule.deliver.model.shared)) throw new Error('reminder-shared-storage-unavailable')
+        // A body that cannot render is rejected here, before any rule can match.
+        for (const rule of next.rules) validateText(rule.text)
+        const compiled = next.rules.map(rule => compileRule(rule, config.countLimits, declaredEvents()))
+        if (!updateClaims && compiled.some(rule => rule.effect.kind === 'remind' && rule.effect.deliver.model.shared)) throw new Error('reminder-shared-storage-unavailable')
         invalidate(value.sourceId)
         rejectedSources.delete(next.sourceId)
         sources.set(value.sourceId, { owner, acceptSession, token: randomUUID(), value: next, compiled })
@@ -376,56 +553,74 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
     controlCatalog(sessionId: string) {
       return catalogFor(item => item.value.sessionId === undefined || item.value.sessionId === sessionId, () => true)
     },
-    submit(rawEvent: unknown, signal?: AbortSignal) {
-      if (closed || signal?.aborted) return Promise.resolve()
-      // Reserve capacity before the first persistence await; pending writes are part of the queue.
-      if (admissions.size >= config.maxQueued + config.maxConcurrent) return Promise.reject(new Error('reminder-capacity-exceeded'))
-      const admittedAt = now(), serialized = JSON.stringify(rawEvent)
-      if (Buffer.byteLength(serialized) > config.maxBytes) return Promise.reject(new Error('reminder-input-budget-exceeded'))
-      const event = Event.parse(JSON.parse(serialized))
-      const admission: { sessionId: string; controller: AbortController; task?: Promise<void> } = { sessionId: event.sessionId, controller: new AbortController() }
-      admissions.add(admission)
-      // Promise invokes its executor synchronously before this resolver is read.
-      let resolve!: () => void
-      const done = new Promise<void>(finish => { resolve = finish })
-      const run: Run = { event, items: [], analyzers: [...analyzers.values()], controller: admission.controller, deadline: admittedAt + config.roundTimeoutMs, resolve, done }
-      const abort = () => {
-        run.controller.abort(signal?.reason ?? new Error('reminder-round-timeout'))
-        const queue = queues.get(event.sessionId), index = queue?.indexOf(run) ?? -1
-        if (queue && index >= 0) {
-          queue.splice(index, 1); if (!queue.length) queues.delete(event.sessionId)
-          void diagnostic(event.sessionId, { eventId: event.callId, status: signal?.aborted ? 'cancelled' : 'queue-timeout' }).finally(resolve)
+    submit(rawEvent: unknown, signal?: AbortSignal) { return admit(rawEvent, signal) },
+    /** Evaluate denial policy before a tool body runs; the guard later reads this ticket. */
+    async prepareToolExecution({ key, sessionId, agentPreset, name, arguments: args, callId, rootCallId, signal }: ToolPreparation) {
+      if (closed) return
+      const applying = [...sources.values()].some(item => item.compiled.some(rule => rule.on === 'tool.before-execute'))
+      // With no pre-execution rule anywhere there is nothing to decide; the guard then allows without a ticket.
+      if (!applying) return
+      await admit(Event.parse(jsonCopy({ type: 'tool.before-execute', sessionId, ...(agentPreset === undefined ? {} : { agentPreset }),
+        callId, rootCallId, name, arguments: args, clock: { at: wallNow() }, facts: {} })), signal, key).catch(report)
+    },
+    /**
+     * Declare the custom events a rule may select by name. The owner keeps the returned
+     * disposer inside a Cordis effect, so unloading that plugin withdraws its names:
+     * nothing can publish them afterwards, and `handlesSessionEvent` reports them as
+     * unreachable even though already-compiled rules still mention them.
+     */
+    registerCustomEvents(descriptors: { name: string; shape?: EventFieldShape }[]) {
+      if (closed) throw new Error('reminder-runtime-closed')
+      const added: string[] = []
+      for (const descriptor of descriptors) {
+        const name = descriptor.name
+        if (typeof name !== 'string' || !name.trim()) throw new Error('自定义事件名不能为空')
+        if (BUILT_IN_EVENT_NAMES.has(name)) throw new Error(`自定义事件不能占用内置事件名 ${name}`)
+        const shape = descriptor.shape ?? 'any'
+        const existing = customEvents.get(name)
+        // Re-declaring the same name with the same shape is what a plugin reload looks
+        // like; a different shape would leave already-compiled selectors unverified.
+        if (existing !== undefined && JSON.stringify(existing) !== JSON.stringify(shape)) {
+          throw new Error(`自定义事件 ${name} 已被声明为另一种载荷结构`)
+        }
+        if (existing === undefined) { customEvents.set(name, shape); added.push(name) }
+      }
+      return () => { for (const name of added) customEvents.delete(name) }
+    },
+    /**
+     * Publish one custom event. `eventId` is the idempotency key: care records it in the
+     * session's durable state, so re-publishing is ignored instead of delivered twice.
+     * The payload rides `arguments` and is frozen into the delivery evidence as received.
+     */
+    async publishCustomEvent({ sessionId, name, eventId, at, facts }: {
+      sessionId: string; name: string; eventId: string; at?: number; facts?: unknown
+    }, signal?: AbortSignal) {
+      if (closed) throw new Error('reminder-runtime-closed')
+      if (!customEvents.has(name)) throw new Error(`自定义事件 ${name} 未被声明`)
+      if (!eventId.trim()) throw new Error('自定义事件缺少幂等键 eventId')
+      await admit(Event.parse(jsonCopy({ type: 'session.event', sessionId, name, arguments: facts,
+        callId: eventId, rootCallId: eventId, clock: { at: at ?? wallNow() }, facts: {} })), signal).catch(report)
+    },
+    /**
+     * Whether any registered rule selects this committed DSH event type. A session
+     * event can only match a rule whose `eventType` equals it, so this pre-filter is
+     * exact and keeps unrelated log traffic off the admission path.
+     */
+    handlesSessionEvent(eventType: string) {
+      // A withdrawn custom name has no producer left, so nothing can reach the rules that
+      // still reference it; a built-in name always can.
+      if (!BUILT_IN_EVENT_NAMES.has(eventType) && !customEvents.has(eventType)) return false
+      for (const source of sources.values()) {
+        for (const rule of source.compiled) {
+          if (rule.on === 'session.event' && rule.when.eventType === eventType) return true
         }
       }
-      signal?.addEventListener('abort', abort, { once: true })
-      run.timer = setTimeout(abort, Math.max(0, run.deadline - now()))
-      // Identity lookup occupies admission capacity and uses the same round deadline as matching.
-      admission.task = identity(event.sessionId, event.agentPreset, run.controller.signal).then(target => {
-        if (closed || run.controller.signal.aborted) return false
-        run.items = [...sources.values()].filter(item => sourceAccepts(item, target))
-          .flatMap(item => item.compiled.filter(rule => ruleAccepts(rule, target) && requestEligible(rule, event) && eligible(event.sessionId, item.value.sourceId, rule.id))
-            .map(rule => ({ rule, source: item.value, token: item.token, policy: epoch(event.sessionId, item.value.sourceId, rule.id),
-              judge: rule.judge ? detectors.get(rule.judge.ref) : undefined,
-              window: rule.deliver.model.once === 'window' || rule.deliver.model.shared?.reset === 'window'
-                ? localWindow('timeWindow' in rule.when ? rule.when.timeWindow : undefined, event.clock?.at) : undefined })))
-          .sort((a, b) => b.rule.priority - a.rule.priority || a.source.sourceId.localeCompare(b.source.sourceId) || a.rule.id.localeCompare(b.rule.id))
-        if (!run.items.length) return false
-        return update(event.sessionId, state => {
-          if (run.controller.signal.aborted || state.seen.includes(event.callId)) return false
-          state.seen.push(event.callId); return true
-        })
-      }).then(admitted => {
-        if (!admitted || closed || run.controller.signal.aborted || now() >= run.deadline) return
-        const queue = queues.get(event.sessionId) ?? []; queue.push(run); queues.set(event.sessionId, queue); pump()
-        return done
-      }).catch(async error => {
-        if (!run.controller.signal.aborted) throw error
-        await diagnostic(event.sessionId, { eventId: event.callId, status: signal?.aborted ? 'cancelled' : 'queue-timeout' })
-      }).finally(() => {
-        clearTimeout(run.timer); signal?.removeEventListener('abort', abort); admissions.delete(admission)
-      })
-      return admission.task
+      return false
     },
+    /** Synchronous guard decision; never awaits, so another listener cannot re-allow a denial. */
+    decideToolExecution(key: object) { return tickets.decide(key, now()) },
+    /** Release a settled execution's ticket. */
+    settleToolExecution(key: object) { tickets.settle(key) },
     async settle(sessionId: string) {
       // Previous callers have already received write failures. A new collection may retry the durable writer.
       await Promise.allSettled([...admissions].filter(item => item.sessionId === sessionId).map(item => item.task))
@@ -442,6 +637,10 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
         const keys = new Set(present.flatMap(reminderKeys))
         // Accepted inbox entries are not committed yet; pre-step filtering still owns their handoff.
         const committed = new Set([...committedIds, ...visible.map(message => message.id)])
+        // The human-turn clock advances only on a new human message, not on every request.
+        let lastHumanId = ''
+        for (const message of present) if (message.source?.kind === 'user' && message.id !== undefined) lastHumanId = message.id
+        const humanId = lastHumanId
         const consume: string[] = []
         for (const candidate of state.candidates) {
           if (candidate.status !== 'reserved') continue
@@ -449,13 +648,29 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
           if (committed.has(candidate.messageId)) {
             candidate.status = 'delivered'
             if (quotaFor(candidate)) consume.push(candidate.messageId)
+            // Only a confirmed delivery spends a lifetime unit, so a dropped tick is retried.
+            const activation = candidate.sticky
+              ? state.stickies.find(item => item.activationId === candidate.sticky?.activationId) : undefined
+            if (activation) activation.remaining = Math.max(0, activation.remaining - 1)
+            // The first confirmed delivery opens one activation; later ticks reuse its text.
+            const sticky = candidate.rule.effect.deliver.model.sticky
+            if (sticky && !candidate.sticky && !state.stickies.some(item => item.activationId === candidate.id)) {
+              state.stickies.push({ key: JSON.stringify([candidate.sourceId, candidate.ruleId, candidate.id]),
+                activationId: candidate.id, sourceId: candidate.sourceId, ruleId: candidate.ruleId, sessionId,
+                text: candidate.text, title: candidate.title, clock: sticky.clock,
+                remaining: sticky.lifetime - 1, cooldown: sticky.cooldown,
+                charged: quotaFor(candidate) !== undefined, lastHumanId: humanId })
+            }
           } else keys.add(candidate.key) // Unknown handoff cannot be retried merely because the process restarted.
         }
         if (consume.length) await claims({ consume })
+        const ticked = advanceStickies(state, humanId)
+        pendSticky(state, sessionId, ticked)
         for (const candidate of state.candidates) {
           if (candidate.status !== 'pending' || (candidateIds && !candidateIds.includes(candidate.id))) continue
           // A persisted rollback keeps its old message id until shared release is acknowledged.
-          if (candidate.messageId && quotaFor(candidate)) {
+          // A later sticky tick never reserved a quota, so it has nothing to release.
+          if (candidate.messageId && !candidate.sticky?.charged && quotaFor(candidate)) {
             await claims({ release: [candidate.messageId] })
             delete candidate.messageId
           }
@@ -463,7 +678,27 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
           if (closed || !fresh(candidate) || !current(candidate, target) || !eligible(sessionId, candidate.sourceId, candidate.ruleId)
             || epoch(sessionId, candidate.sourceId, candidate.ruleId) !== candidate.policy) { candidate.status = 'discarded'; continue }
           if (keys.has(candidate.key) || state.windows.some(item => item.key === candidate.key)) { candidate.status = 'discarded'; continue }
-          const messageId = randomUUID(), quota = quotaFor(candidate)
+          // The reminder is already present during an activation, so a repeated hit is
+          // absorbed: it must neither deliver again nor extend the activation.
+          if (!candidate.sticky && state.stickies.some(item => item.sourceId === candidate.sourceId && item.ruleId === candidate.ruleId)) {
+            candidate.status = 'discarded'; continue
+          }
+          // The template renders once, against the facts frozen when the rule matched.
+          // A sticky activation later reuses this same text instead of rendering again.
+          if (!candidate.rendered) {
+            try {
+              candidate.text = renderText(candidate.rule.text, candidate.evidence)
+              candidate.rendered = true
+            } catch (error) {
+              candidate.status = 'discarded'
+              state.diagnostics.push(AnalysisFacts.parse(jsonCopy({ at: wallNow(), ruleId: candidate.ruleId,
+                sourceId: candidate.sourceId, eventId: candidate.eventId, status: 'render-failed',
+                message: errorMessage(error) })))
+              continue
+            }
+          }
+          // An activation charges its shared quota once, when it opens.
+          const messageId = randomUUID(), quota = candidate.sticky?.charged ? undefined : quotaFor(candidate)
           if (quota) {
             const book = await claims({ reserve: [{ ...quota, candidateId: candidate.id, sessionId, messageId }] })
             // Losing sessions retain a pending hit: a known rollback may make room on their next request.
@@ -481,14 +716,14 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
           signal?.throwIfAborted()
           keys.add(candidate.key)
           candidate.messageId = messageId; candidate.status = 'reserved'
-          if (candidate.window && candidate.rule.deliver.model.once === 'window') state.windows.push({ key: candidate.key, until: candidate.window.end, messageId })
+          if (candidate.window && candidate.rule.effect.kind === 'remind' && candidate.rule.effect.deliver.model.once === 'window') state.windows.push({ key: candidate.key, until: candidate.window.end, messageId })
           messages.push(reminderMessage(candidate, messageId))
         }
         return messages
       }, async () => { if (reserved.length) await claims({ release: reserved }) })
     },
     async rollback(sessionId: string, messages: MessageView[]) {
-      const ids = new Set(messages.filter(message => message.source?.kind === KIND).map(message => message.id))
+      const ids = new Set(messages.filter(message => message.source?.kind === REMINDER_MESSAGE_KIND).map(message => message.id))
       if (!ids.size) return
       const release = await update(sessionId, state => {
         const release: string[] = []
@@ -505,12 +740,12 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
       if (release.length) await claims({ release })
     },
     async filterMessages<Message extends MessageView>(sessionId: string, visible: MessageView[], messages: Message[], agentPreset?: string) {
-      if (!messages.some(message => message.source?.kind === KIND)) return messages
+      if (!messages.some(message => message.source?.kind === REMINDER_MESSAGE_KIND)) return messages
       const target = await identity(sessionId, agentPreset)
       const keys = new Set(visible.flatMap(reminderKeys))
       const state = records.get(sessionId)
       return messages.filter(message => {
-        if (message.source?.kind !== KIND) return true
+        if (message.source?.kind !== REMINDER_MESSAGE_KIND) return true
         const candidate = state?.candidates.find(item => item.messageId === message.id)
         if (closed || !state || !candidate || candidate.status !== 'reserved' || !fresh(candidate) || !current(candidate, target) || keys.has(candidate.key)
           || state.windows?.some(item => item.key === candidate.key && item.messageId !== message.id) || !eligible(sessionId, candidate.sourceId, candidate.ruleId)
@@ -527,6 +762,7 @@ export function createReminderRuntime({ config: input, entries = [], save = asyn
       await Promise.allSettled([...running.values()].map(run => run.done))
       await Promise.allSettled([...admissions].map(item => item.task))
       await Promise.allSettled([...chains.values(), capacityWrite]); sources.clear(); detectors.clear(); analyzers.clear(); rejectedSources.clear()
+      tickets.revoke()
     },
   }
 }

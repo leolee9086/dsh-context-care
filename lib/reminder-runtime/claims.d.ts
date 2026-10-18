@@ -27,9 +27,11 @@ export interface QuotaCandidate {
     sourceId: string;
     ruleId: string;
     rule: {
-        deliver: {
-            model: {
-                shared?: SharedQuota;
+        effect: {
+            deliver: {
+                model: {
+                    shared?: SharedQuota;
+                };
             };
         };
     };

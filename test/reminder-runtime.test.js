@@ -4,8 +4,8 @@ import { createReminderRuntime } from '../src/reminder-runtime/index.js'
 import { createBoundedMatcher } from '../src/bounded-matcher.js'
 import { setTimeout as delay } from 'node:timers/promises'
 
-const rule = { format: 'reminder/v1', id: 'no-any', on: 'tool.succeeded', text: '禁止使用 any',
-  when: { tool: 'read', arguments: { file_path: { regex: '\\.ts$', flags: 'i' } } }, deliver: { model: { once: 'surface' } } }
+const rule = { format: 'reminder/v4', id: 'no-any', on: 'tool.succeeded', text: '禁止使用 any',
+  when: { tool: 'read', arguments: { file_path: { regex: '\\.ts$', flags: 'i' } } }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } }
 const source = { sourceId: 'test', plugin: 'test', revision: 1, rules: [rule] }
 const event = (id, file = 'code.ts', sessionId = 's') => ({ callId: id, rootCallId: id, sessionId, name: 'read', arguments: { file_path: file } })
 function fixture(t, options = {}) {
@@ -17,8 +17,8 @@ function fixture(t, options = {}) {
 
 test('tool timeout rules match only TOOL_TIMEOUT failure results', async t => {
   const runtime = fixture(t)
-  const timeoutRule = { format: 'reminder/v1', id: 'timeout', on: 'tool.failed', text: '工具调用超时，请检查结果',
-    when: { tool: 'read', error: { code: 'TOOL_TIMEOUT' } }, deliver: { model: { once: 'surface' } } }
+  const timeoutRule = { format: 'reminder/v4', id: 'timeout', on: 'tool.failed', text: '工具调用超时，请检查结果',
+    when: { tool: 'read', error: { code: 'TOOL_TIMEOUT' } }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } }
   runtime.registerSource({ ...source, rules: [timeoutRule] })
   await runtime.submit({ ...event('other-failure'), type: 'tool.failed', error: { code: 'TOOL_FAILURE' } })
   assert.equal((await runtime.collect({ sessionId: 's', visible: [] })).length, 0)

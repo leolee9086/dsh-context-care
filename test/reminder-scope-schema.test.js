@@ -3,8 +3,8 @@ import assert from 'node:assert/strict'
 import { ReminderRule, ReminderScope, Source } from '../src/reminder-runtime/schema.js'
 
 const baseRule = {
-  format: 'reminder/v1', id: 'scoped', on: 'tool.succeeded', text: '提醒',
-  when: { tool: 'example' }, deliver: { model: { once: 'surface' } },
+  format: 'reminder/v4', id: 'scoped', on: 'tool.succeeded', text: '提醒',
+  when: { tool: 'example' }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
 }
 
 test('rule and source schemas preserve normalized recipient scopes', () => {
@@ -24,14 +24,17 @@ test('tool failure rules require an exact error code', () => {
   assert.throws(() => ReminderRule.parse({ ...baseRule, on: 'tool.failed' }), /requires/)
 })
 
-test('all reminder versions reject unknown top-level fields', () => {
+test('the single public format rejects unknown top-level fields', () => {
   for (const declaration of [baseRule,
-    { ...baseRule, format: 'reminder/v2', on: 'request.before', when: {} },
-    { ...baseRule, format: 'reminder/v3', on: 'assistant.output', when: { blockTypes: ['text'], pattern: { kind: 'literal', text: 'marker' } } },
+    { ...baseRule, on: 'request.before', when: {} },
+    { ...baseRule, on: 'assistant.output', when: { blockTypes: ['text'], pattern: { kind: 'literal', text: 'marker' } } },
+    { ...baseRule, on: 'tool.before-execute', when: { tool: 'example' }, effect: { kind: 'deny-tool', deliver: { model: { once: 'surface' } } } },
   ]) {
     assert.ok(ReminderRule.safeParse(declaration).success)
     assert.equal(ReminderRule.safeParse({ ...declaration, typo: true }).success, false)
   }
+  // An old format number is no longer a public format at all.
+  assert.equal(ReminderRule.safeParse({ ...baseRule, format: 'reminder/v3' }).success, false)
 })
 
 test('scope schema rejects empty dimensions and unknown fields', () => {

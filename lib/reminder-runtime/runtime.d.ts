@@ -1,11 +1,14 @@
 import type { MessageId } from '@deepseek-ai/dsh-llm';
 import { Source } from './schema.js';
+import type { EventFieldShape } from './generated/session-events.js';
 import type { MessageView } from './request-context.js';
 import type { RecipientIdentity } from './scope.js';
-import type { CandidateValue, RuntimeOptions, RequestInput, CollectInput } from './state.js';
+import type { CandidateValue, RuntimeOptions, RequestInput, CollectInput, ToolPreparation } from './state.js';
 export { ReminderConfig } from './schema.js';
 export { REMINDER_DOMAIN } from './state.js';
 export type { RuntimeOptions } from './state.js';
+/** The selector shape a custom event descriptor declares, reused from the generated catalog. */
+export type { EventFieldShape } from './generated/session-events.js';
 /** Public source declarations keep schema defaults optional until registration. */
 export type ReminderSource = import('zod').input<typeof Source>;
 export type ReminderRuleInput = ReminderSource['rules'][number];
@@ -13,6 +16,11 @@ export type ReminderRuleInput = ReminderSource['rules'][number];
 export type ReminderService = ReturnType<typeof createReminderRuntime>;
 export type ReminderSourceHandle = ReturnType<ReminderService['registerSource']>;
 export declare const REMINDER_SERVICE = "reminderRules";
+/**
+ * Source kind of a reminder delivery. It also guards session-event matching:
+ * a delivery is itself a logged message, so matching must not consume its own output.
+ */
+export declare const REMINDER_MESSAGE_KIND = "plugin:dsh-context-care:reminder";
 declare function reminderSource(candidate: CandidateValue): {
     readonly kind: "plugin:dsh-context-care:reminder";
     readonly form: "notice";
@@ -29,6 +37,7 @@ declare function reminderSource(candidate: CandidateValue): {
             index: number;
             type: "text" | "reasoning";
             offset: number;
+            full: string;
         } | undefined;
         readonly trigger: "reminder-rule";
         readonly evaluationId: string;
@@ -36,21 +45,11 @@ declare function reminderSource(candidate: CandidateValue): {
         readonly sourceId: string;
         readonly callId: string;
         readonly rule: {
-            format: "reminder/v1";
+            format: "reminder/v4";
             id: string;
             priority: number;
             text: string;
-            deliver: {
-                model: {
-                    once: "surface";
-                    shared?: {
-                        reset: "lifetime";
-                        lifetime: string;
-                        limit: number;
-                    } | undefined;
-                };
-            };
-            on: "tool.succeeded" | "tool.failed";
+            on: "tool.succeeded";
             when: {
                 tool: string;
                 arguments: Record<string, {
@@ -62,6 +61,50 @@ declare function reminderSource(candidate: CandidateValue): {
                 } | undefined;
                 condition?: import("zod").JSONType | undefined;
             };
+            effect: {
+                kind: "remind";
+                deliver: {
+                    model: {
+                        once: "window" | "none" | "surface";
+                        shared?: {
+                            reset: "lifetime";
+                            lifetime: string;
+                            limit: number;
+                        } | {
+                            reset: "window";
+                            limit: number;
+                        } | undefined;
+                        interrupt?: "abort-resume" | undefined;
+                        sticky?: {
+                            lifetime: number;
+                            cooldown: number;
+                            clock: "main-request" | "human-turn";
+                        } | undefined;
+                    };
+                };
+            } | {
+                kind: "deny-tool";
+                deliver: {
+                    model: {
+                        once: "window" | "none" | "surface";
+                        shared?: {
+                            reset: "lifetime";
+                            lifetime: string;
+                            limit: number;
+                        } | {
+                            reset: "window";
+                            limit: number;
+                        } | undefined;
+                        interrupt?: "abort-resume" | undefined;
+                        sticky?: {
+                            lifetime: number;
+                            cooldown: number;
+                            clock: "main-request" | "human-turn";
+                        } | undefined;
+                    };
+                };
+                reason?: string | undefined;
+            };
             title?: string | undefined;
             exclusiveGroup?: string | undefined;
             scope?: import("./scope.js").RecipientScope | undefined;
@@ -72,10 +115,80 @@ declare function reminderSource(candidate: CandidateValue): {
                 timeoutMs?: number | undefined;
             } | undefined;
         } | {
+            format: "reminder/v4";
             id: string;
             priority: number;
             text: string;
-            format: "reminder/v2";
+            on: "tool.failed";
+            when: {
+                tool: string;
+                arguments: Record<string, {
+                    regex: string;
+                    flags: string;
+                }>;
+                error?: {
+                    code: string;
+                } | undefined;
+                condition?: import("zod").JSONType | undefined;
+            };
+            effect: {
+                kind: "remind";
+                deliver: {
+                    model: {
+                        once: "window" | "none" | "surface";
+                        shared?: {
+                            reset: "lifetime";
+                            lifetime: string;
+                            limit: number;
+                        } | {
+                            reset: "window";
+                            limit: number;
+                        } | undefined;
+                        interrupt?: "abort-resume" | undefined;
+                        sticky?: {
+                            lifetime: number;
+                            cooldown: number;
+                            clock: "main-request" | "human-turn";
+                        } | undefined;
+                    };
+                };
+            } | {
+                kind: "deny-tool";
+                deliver: {
+                    model: {
+                        once: "window" | "none" | "surface";
+                        shared?: {
+                            reset: "lifetime";
+                            lifetime: string;
+                            limit: number;
+                        } | {
+                            reset: "window";
+                            limit: number;
+                        } | undefined;
+                        interrupt?: "abort-resume" | undefined;
+                        sticky?: {
+                            lifetime: number;
+                            cooldown: number;
+                            clock: "main-request" | "human-turn";
+                        } | undefined;
+                    };
+                };
+                reason?: string | undefined;
+            };
+            title?: string | undefined;
+            exclusiveGroup?: string | undefined;
+            scope?: import("./scope.js").RecipientScope | undefined;
+            judge?: {
+                ref: string;
+                revision: number;
+                params?: import("zod").JSONType | undefined;
+                timeoutMs?: number | undefined;
+            } | undefined;
+        } | {
+            format: "reminder/v4";
+            id: string;
+            priority: number;
+            text: string;
             on: "request.before";
             when: {
                 timeWindow?: {
@@ -88,18 +201,49 @@ declare function reminderSource(candidate: CandidateValue): {
                 } | undefined;
                 condition?: import("zod").JSONType | undefined;
             };
-            deliver: {
-                model: {
-                    once: "window" | "surface";
-                    shared?: {
-                        reset: "lifetime";
-                        lifetime: string;
-                        limit: number;
-                    } | {
-                        reset: "window";
-                        limit: number;
-                    } | undefined;
+            effect: {
+                kind: "remind";
+                deliver: {
+                    model: {
+                        once: "window" | "none" | "surface";
+                        shared?: {
+                            reset: "lifetime";
+                            lifetime: string;
+                            limit: number;
+                        } | {
+                            reset: "window";
+                            limit: number;
+                        } | undefined;
+                        interrupt?: "abort-resume" | undefined;
+                        sticky?: {
+                            lifetime: number;
+                            cooldown: number;
+                            clock: "main-request" | "human-turn";
+                        } | undefined;
+                    };
                 };
+            } | {
+                kind: "deny-tool";
+                deliver: {
+                    model: {
+                        once: "window" | "none" | "surface";
+                        shared?: {
+                            reset: "lifetime";
+                            lifetime: string;
+                            limit: number;
+                        } | {
+                            reset: "window";
+                            limit: number;
+                        } | undefined;
+                        interrupt?: "abort-resume" | undefined;
+                        sticky?: {
+                            lifetime: number;
+                            cooldown: number;
+                            clock: "main-request" | "human-turn";
+                        } | undefined;
+                    };
+                };
+                reason?: string | undefined;
             };
             title?: string | undefined;
             exclusiveGroup?: string | undefined;
@@ -111,10 +255,10 @@ declare function reminderSource(candidate: CandidateValue): {
                 timeoutMs?: number | undefined;
             } | undefined;
         } | {
+            format: "reminder/v4";
             id: string;
             priority: number;
             text: string;
-            format: "reminder/v3";
             on: "assistant.output";
             when: {
                 blockTypes: ("text" | "reasoning")[];
@@ -137,19 +281,179 @@ declare function reminderSource(candidate: CandidateValue): {
                 } | undefined;
                 condition?: import("zod").JSONType | undefined;
             };
-            deliver: {
-                model: {
-                    once: "window" | "surface";
-                    shared?: {
-                        reset: "lifetime";
-                        lifetime: string;
-                        limit: number;
-                    } | {
-                        reset: "window";
-                        limit: number;
-                    } | undefined;
-                    interrupt?: "abort-resume" | undefined;
+            effect: {
+                kind: "remind";
+                deliver: {
+                    model: {
+                        once: "window" | "none" | "surface";
+                        shared?: {
+                            reset: "lifetime";
+                            lifetime: string;
+                            limit: number;
+                        } | {
+                            reset: "window";
+                            limit: number;
+                        } | undefined;
+                        interrupt?: "abort-resume" | undefined;
+                        sticky?: {
+                            lifetime: number;
+                            cooldown: number;
+                            clock: "main-request" | "human-turn";
+                        } | undefined;
+                    };
                 };
+            } | {
+                kind: "deny-tool";
+                deliver: {
+                    model: {
+                        once: "window" | "none" | "surface";
+                        shared?: {
+                            reset: "lifetime";
+                            lifetime: string;
+                            limit: number;
+                        } | {
+                            reset: "window";
+                            limit: number;
+                        } | undefined;
+                        interrupt?: "abort-resume" | undefined;
+                        sticky?: {
+                            lifetime: number;
+                            cooldown: number;
+                            clock: "main-request" | "human-turn";
+                        } | undefined;
+                    };
+                };
+                reason?: string | undefined;
+            };
+            title?: string | undefined;
+            exclusiveGroup?: string | undefined;
+            scope?: import("./scope.js").RecipientScope | undefined;
+            judge?: {
+                ref: string;
+                revision: number;
+                params?: import("zod").JSONType | undefined;
+                timeoutMs?: number | undefined;
+            } | undefined;
+        } | {
+            format: "reminder/v4";
+            id: string;
+            priority: number;
+            text: string;
+            on: "tool.before-execute";
+            when: {
+                tool: string;
+                arguments: Record<string, {
+                    regex: string;
+                    flags: string;
+                }>;
+                condition?: import("zod").JSONType | undefined;
+            };
+            effect: {
+                kind: "remind";
+                deliver: {
+                    model: {
+                        once: "window" | "none" | "surface";
+                        shared?: {
+                            reset: "lifetime";
+                            lifetime: string;
+                            limit: number;
+                        } | {
+                            reset: "window";
+                            limit: number;
+                        } | undefined;
+                        interrupt?: "abort-resume" | undefined;
+                        sticky?: {
+                            lifetime: number;
+                            cooldown: number;
+                            clock: "main-request" | "human-turn";
+                        } | undefined;
+                    };
+                };
+            } | {
+                kind: "deny-tool";
+                deliver: {
+                    model: {
+                        once: "window" | "none" | "surface";
+                        shared?: {
+                            reset: "lifetime";
+                            lifetime: string;
+                            limit: number;
+                        } | {
+                            reset: "window";
+                            limit: number;
+                        } | undefined;
+                        interrupt?: "abort-resume" | undefined;
+                        sticky?: {
+                            lifetime: number;
+                            cooldown: number;
+                            clock: "main-request" | "human-turn";
+                        } | undefined;
+                    };
+                };
+                reason?: string | undefined;
+            };
+            title?: string | undefined;
+            exclusiveGroup?: string | undefined;
+            scope?: import("./scope.js").RecipientScope | undefined;
+            judge?: {
+                ref: string;
+                revision: number;
+                params?: import("zod").JSONType | undefined;
+                timeoutMs?: number | undefined;
+            } | undefined;
+        } | {
+            format: "reminder/v4";
+            id: string;
+            priority: number;
+            text: string;
+            on: "session.event";
+            when: {
+                eventType: string;
+                condition?: import("zod").JSONType | undefined;
+            };
+            effect: {
+                kind: "remind";
+                deliver: {
+                    model: {
+                        once: "window" | "none" | "surface";
+                        shared?: {
+                            reset: "lifetime";
+                            lifetime: string;
+                            limit: number;
+                        } | {
+                            reset: "window";
+                            limit: number;
+                        } | undefined;
+                        interrupt?: "abort-resume" | undefined;
+                        sticky?: {
+                            lifetime: number;
+                            cooldown: number;
+                            clock: "main-request" | "human-turn";
+                        } | undefined;
+                    };
+                };
+            } | {
+                kind: "deny-tool";
+                deliver: {
+                    model: {
+                        once: "window" | "none" | "surface";
+                        shared?: {
+                            reset: "lifetime";
+                            lifetime: string;
+                            limit: number;
+                        } | {
+                            reset: "window";
+                            limit: number;
+                        } | undefined;
+                        interrupt?: "abort-resume" | undefined;
+                        sticky?: {
+                            lifetime: number;
+                            cooldown: number;
+                            clock: "main-request" | "human-turn";
+                        } | undefined;
+                    };
+                };
+                reason?: string | undefined;
             };
             title?: string | undefined;
             exclusiveGroup?: string | undefined;
@@ -172,7 +476,7 @@ declare module '@deepseek-ai/dsh-llm' {
 /** One runtime owns source snapshots, evaluation lifetimes and durable candidate records.
  * save ACKs before publishing state; execute must settle cancellation after its worker stops.
  * No Cordis or live session objects enter the scheduler. */
-export declare function createReminderRuntime({ config: input, entries, save, execute, capacity, saveCapacity, dispatches, resolvePreset, resolveIdentity, updateClaims, wallNow, now, eligible, epoch, report }?: RuntimeOptions): {
+export declare function createReminderRuntime({ config: input, entries, templates, save, execute, capacity, saveCapacity, dispatches, resolvePreset, resolveIdentity, updateClaims, wallNow, now, eligible, epoch, report }?: RuntimeOptions): {
     capacitySnapshot: () => {
         registeredRules: number;
         rejections: {
@@ -209,22 +513,12 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
         maxRules: number;
     }>;
     validateRule(input: unknown): {
-        condition: import("zod").JSONType;
-        format: "reminder/v1";
+        condition: import("./conditions.js").ReminderCondition;
+        format: "reminder/v4";
         id: string;
         priority: number;
         text: string;
-        deliver: {
-            model: {
-                once: "surface";
-                shared?: {
-                    reset: "lifetime";
-                    lifetime: string;
-                    limit: number;
-                } | undefined;
-            };
-        };
-        on: "tool.succeeded" | "tool.failed";
+        on: "tool.succeeded";
         when: {
             tool: string;
             arguments: Record<string, {
@@ -236,6 +530,50 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
             } | undefined;
             condition?: import("zod").JSONType | undefined;
         };
+        effect: {
+            kind: "remind";
+            deliver: {
+                model: {
+                    once: "window" | "none" | "surface";
+                    shared?: {
+                        reset: "lifetime";
+                        lifetime: string;
+                        limit: number;
+                    } | {
+                        reset: "window";
+                        limit: number;
+                    } | undefined;
+                    interrupt?: "abort-resume" | undefined;
+                    sticky?: {
+                        lifetime: number;
+                        cooldown: number;
+                        clock: "main-request" | "human-turn";
+                    } | undefined;
+                };
+            };
+        } | {
+            kind: "deny-tool";
+            deliver: {
+                model: {
+                    once: "window" | "none" | "surface";
+                    shared?: {
+                        reset: "lifetime";
+                        lifetime: string;
+                        limit: number;
+                    } | {
+                        reset: "window";
+                        limit: number;
+                    } | undefined;
+                    interrupt?: "abort-resume" | undefined;
+                    sticky?: {
+                        lifetime: number;
+                        cooldown: number;
+                        clock: "main-request" | "human-turn";
+                    } | undefined;
+                };
+            };
+            reason?: string | undefined;
+        };
         title?: string | undefined;
         exclusiveGroup?: string | undefined;
         scope?: import("./scope.js").RecipientScope | undefined;
@@ -246,11 +584,82 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
             timeoutMs?: number | undefined;
         } | undefined;
     } | {
-        condition: import("zod").JSONType;
+        condition: import("./conditions.js").ReminderCondition;
+        format: "reminder/v4";
         id: string;
         priority: number;
         text: string;
-        format: "reminder/v2";
+        on: "tool.failed";
+        when: {
+            tool: string;
+            arguments: Record<string, {
+                regex: string;
+                flags: string;
+            }>;
+            error?: {
+                code: string;
+            } | undefined;
+            condition?: import("zod").JSONType | undefined;
+        };
+        effect: {
+            kind: "remind";
+            deliver: {
+                model: {
+                    once: "window" | "none" | "surface";
+                    shared?: {
+                        reset: "lifetime";
+                        lifetime: string;
+                        limit: number;
+                    } | {
+                        reset: "window";
+                        limit: number;
+                    } | undefined;
+                    interrupt?: "abort-resume" | undefined;
+                    sticky?: {
+                        lifetime: number;
+                        cooldown: number;
+                        clock: "main-request" | "human-turn";
+                    } | undefined;
+                };
+            };
+        } | {
+            kind: "deny-tool";
+            deliver: {
+                model: {
+                    once: "window" | "none" | "surface";
+                    shared?: {
+                        reset: "lifetime";
+                        lifetime: string;
+                        limit: number;
+                    } | {
+                        reset: "window";
+                        limit: number;
+                    } | undefined;
+                    interrupt?: "abort-resume" | undefined;
+                    sticky?: {
+                        lifetime: number;
+                        cooldown: number;
+                        clock: "main-request" | "human-turn";
+                    } | undefined;
+                };
+            };
+            reason?: string | undefined;
+        };
+        title?: string | undefined;
+        exclusiveGroup?: string | undefined;
+        scope?: import("./scope.js").RecipientScope | undefined;
+        judge?: {
+            ref: string;
+            revision: number;
+            params?: import("zod").JSONType | undefined;
+            timeoutMs?: number | undefined;
+        } | undefined;
+    } | {
+        condition: import("./conditions.js").ReminderCondition;
+        format: "reminder/v4";
+        id: string;
+        priority: number;
+        text: string;
         on: "request.before";
         when: {
             timeWindow?: {
@@ -263,18 +672,49 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
             } | undefined;
             condition?: import("zod").JSONType | undefined;
         };
-        deliver: {
-            model: {
-                once: "window" | "surface";
-                shared?: {
-                    reset: "lifetime";
-                    lifetime: string;
-                    limit: number;
-                } | {
-                    reset: "window";
-                    limit: number;
-                } | undefined;
+        effect: {
+            kind: "remind";
+            deliver: {
+                model: {
+                    once: "window" | "none" | "surface";
+                    shared?: {
+                        reset: "lifetime";
+                        lifetime: string;
+                        limit: number;
+                    } | {
+                        reset: "window";
+                        limit: number;
+                    } | undefined;
+                    interrupt?: "abort-resume" | undefined;
+                    sticky?: {
+                        lifetime: number;
+                        cooldown: number;
+                        clock: "main-request" | "human-turn";
+                    } | undefined;
+                };
             };
+        } | {
+            kind: "deny-tool";
+            deliver: {
+                model: {
+                    once: "window" | "none" | "surface";
+                    shared?: {
+                        reset: "lifetime";
+                        lifetime: string;
+                        limit: number;
+                    } | {
+                        reset: "window";
+                        limit: number;
+                    } | undefined;
+                    interrupt?: "abort-resume" | undefined;
+                    sticky?: {
+                        lifetime: number;
+                        cooldown: number;
+                        clock: "main-request" | "human-turn";
+                    } | undefined;
+                };
+            };
+            reason?: string | undefined;
         };
         title?: string | undefined;
         exclusiveGroup?: string | undefined;
@@ -286,11 +726,11 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
             timeoutMs?: number | undefined;
         } | undefined;
     } | {
-        condition: import("zod").JSONType;
+        condition: import("./conditions.js").ReminderCondition;
+        format: "reminder/v4";
         id: string;
         priority: number;
         text: string;
-        format: "reminder/v3";
         on: "assistant.output";
         when: {
             blockTypes: ("text" | "reasoning")[];
@@ -313,19 +753,181 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
             } | undefined;
             condition?: import("zod").JSONType | undefined;
         };
-        deliver: {
-            model: {
-                once: "window" | "surface";
-                shared?: {
-                    reset: "lifetime";
-                    lifetime: string;
-                    limit: number;
-                } | {
-                    reset: "window";
-                    limit: number;
-                } | undefined;
-                interrupt?: "abort-resume" | undefined;
+        effect: {
+            kind: "remind";
+            deliver: {
+                model: {
+                    once: "window" | "none" | "surface";
+                    shared?: {
+                        reset: "lifetime";
+                        lifetime: string;
+                        limit: number;
+                    } | {
+                        reset: "window";
+                        limit: number;
+                    } | undefined;
+                    interrupt?: "abort-resume" | undefined;
+                    sticky?: {
+                        lifetime: number;
+                        cooldown: number;
+                        clock: "main-request" | "human-turn";
+                    } | undefined;
+                };
             };
+        } | {
+            kind: "deny-tool";
+            deliver: {
+                model: {
+                    once: "window" | "none" | "surface";
+                    shared?: {
+                        reset: "lifetime";
+                        lifetime: string;
+                        limit: number;
+                    } | {
+                        reset: "window";
+                        limit: number;
+                    } | undefined;
+                    interrupt?: "abort-resume" | undefined;
+                    sticky?: {
+                        lifetime: number;
+                        cooldown: number;
+                        clock: "main-request" | "human-turn";
+                    } | undefined;
+                };
+            };
+            reason?: string | undefined;
+        };
+        title?: string | undefined;
+        exclusiveGroup?: string | undefined;
+        scope?: import("./scope.js").RecipientScope | undefined;
+        judge?: {
+            ref: string;
+            revision: number;
+            params?: import("zod").JSONType | undefined;
+            timeoutMs?: number | undefined;
+        } | undefined;
+    } | {
+        condition: import("./conditions.js").ReminderCondition;
+        format: "reminder/v4";
+        id: string;
+        priority: number;
+        text: string;
+        on: "tool.before-execute";
+        when: {
+            tool: string;
+            arguments: Record<string, {
+                regex: string;
+                flags: string;
+            }>;
+            condition?: import("zod").JSONType | undefined;
+        };
+        effect: {
+            kind: "remind";
+            deliver: {
+                model: {
+                    once: "window" | "none" | "surface";
+                    shared?: {
+                        reset: "lifetime";
+                        lifetime: string;
+                        limit: number;
+                    } | {
+                        reset: "window";
+                        limit: number;
+                    } | undefined;
+                    interrupt?: "abort-resume" | undefined;
+                    sticky?: {
+                        lifetime: number;
+                        cooldown: number;
+                        clock: "main-request" | "human-turn";
+                    } | undefined;
+                };
+            };
+        } | {
+            kind: "deny-tool";
+            deliver: {
+                model: {
+                    once: "window" | "none" | "surface";
+                    shared?: {
+                        reset: "lifetime";
+                        lifetime: string;
+                        limit: number;
+                    } | {
+                        reset: "window";
+                        limit: number;
+                    } | undefined;
+                    interrupt?: "abort-resume" | undefined;
+                    sticky?: {
+                        lifetime: number;
+                        cooldown: number;
+                        clock: "main-request" | "human-turn";
+                    } | undefined;
+                };
+            };
+            reason?: string | undefined;
+        };
+        title?: string | undefined;
+        exclusiveGroup?: string | undefined;
+        scope?: import("./scope.js").RecipientScope | undefined;
+        judge?: {
+            ref: string;
+            revision: number;
+            params?: import("zod").JSONType | undefined;
+            timeoutMs?: number | undefined;
+        } | undefined;
+    } | {
+        condition: import("./conditions.js").ReminderCondition;
+        format: "reminder/v4";
+        id: string;
+        priority: number;
+        text: string;
+        on: "session.event";
+        when: {
+            eventType: string;
+            condition?: import("zod").JSONType | undefined;
+        };
+        effect: {
+            kind: "remind";
+            deliver: {
+                model: {
+                    once: "window" | "none" | "surface";
+                    shared?: {
+                        reset: "lifetime";
+                        lifetime: string;
+                        limit: number;
+                    } | {
+                        reset: "window";
+                        limit: number;
+                    } | undefined;
+                    interrupt?: "abort-resume" | undefined;
+                    sticky?: {
+                        lifetime: number;
+                        cooldown: number;
+                        clock: "main-request" | "human-turn";
+                    } | undefined;
+                };
+            };
+        } | {
+            kind: "deny-tool";
+            deliver: {
+                model: {
+                    once: "window" | "none" | "surface";
+                    shared?: {
+                        reset: "lifetime";
+                        lifetime: string;
+                        limit: number;
+                    } | {
+                        reset: "window";
+                        limit: number;
+                    } | undefined;
+                    interrupt?: "abort-resume" | undefined;
+                    sticky?: {
+                        lifetime: number;
+                        cooldown: number;
+                        clock: "main-request" | "human-turn";
+                    } | undefined;
+                };
+            };
+            reason?: string | undefined;
         };
         title?: string | undefined;
         exclusiveGroup?: string | undefined;
@@ -353,21 +955,11 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
             title: string;
             description: string;
             definition: {
-                format: "reminder/v1";
+                format: "reminder/v4";
                 id: string;
                 priority: number;
                 text: string;
-                deliver: {
-                    model: {
-                        once: "surface";
-                        shared?: {
-                            reset: "lifetime";
-                            lifetime: string;
-                            limit: number;
-                        } | undefined;
-                    };
-                };
-                on: "tool.succeeded" | "tool.failed";
+                on: "tool.succeeded";
                 when: {
                     tool: string;
                     arguments: Record<string, {
@@ -379,6 +971,50 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
                     } | undefined;
                     condition?: import("zod").JSONType | undefined;
                 };
+                effect: {
+                    kind: "remind";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                } | {
+                    kind: "deny-tool";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                    reason?: string | undefined;
+                };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
                 scope?: import("./scope.js").RecipientScope | undefined;
@@ -389,10 +1025,80 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
                     timeoutMs?: number | undefined;
                 } | undefined;
             } | {
+                format: "reminder/v4";
                 id: string;
                 priority: number;
                 text: string;
-                format: "reminder/v2";
+                on: "tool.failed";
+                when: {
+                    tool: string;
+                    arguments: Record<string, {
+                        regex: string;
+                        flags: string;
+                    }>;
+                    error?: {
+                        code: string;
+                    } | undefined;
+                    condition?: import("zod").JSONType | undefined;
+                };
+                effect: {
+                    kind: "remind";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                } | {
+                    kind: "deny-tool";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                    reason?: string | undefined;
+                };
+                title?: string | undefined;
+                exclusiveGroup?: string | undefined;
+                scope?: import("./scope.js").RecipientScope | undefined;
+                judge?: {
+                    ref: string;
+                    revision: number;
+                    params?: import("zod").JSONType | undefined;
+                    timeoutMs?: number | undefined;
+                } | undefined;
+            } | {
+                format: "reminder/v4";
+                id: string;
+                priority: number;
+                text: string;
                 on: "request.before";
                 when: {
                     timeWindow?: {
@@ -405,18 +1111,49 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
                     } | undefined;
                     condition?: import("zod").JSONType | undefined;
                 };
-                deliver: {
-                    model: {
-                        once: "window" | "surface";
-                        shared?: {
-                            reset: "lifetime";
-                            lifetime: string;
-                            limit: number;
-                        } | {
-                            reset: "window";
-                            limit: number;
-                        } | undefined;
+                effect: {
+                    kind: "remind";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
                     };
+                } | {
+                    kind: "deny-tool";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                    reason?: string | undefined;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -428,10 +1165,10 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
                     timeoutMs?: number | undefined;
                 } | undefined;
             } | {
+                format: "reminder/v4";
                 id: string;
                 priority: number;
                 text: string;
-                format: "reminder/v3";
                 on: "assistant.output";
                 when: {
                     blockTypes: ("text" | "reasoning")[];
@@ -454,19 +1191,179 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
                     } | undefined;
                     condition?: import("zod").JSONType | undefined;
                 };
-                deliver: {
-                    model: {
-                        once: "window" | "surface";
-                        shared?: {
-                            reset: "lifetime";
-                            lifetime: string;
-                            limit: number;
-                        } | {
-                            reset: "window";
-                            limit: number;
-                        } | undefined;
-                        interrupt?: "abort-resume" | undefined;
+                effect: {
+                    kind: "remind";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
                     };
+                } | {
+                    kind: "deny-tool";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                    reason?: string | undefined;
+                };
+                title?: string | undefined;
+                exclusiveGroup?: string | undefined;
+                scope?: import("./scope.js").RecipientScope | undefined;
+                judge?: {
+                    ref: string;
+                    revision: number;
+                    params?: import("zod").JSONType | undefined;
+                    timeoutMs?: number | undefined;
+                } | undefined;
+            } | {
+                format: "reminder/v4";
+                id: string;
+                priority: number;
+                text: string;
+                on: "tool.before-execute";
+                when: {
+                    tool: string;
+                    arguments: Record<string, {
+                        regex: string;
+                        flags: string;
+                    }>;
+                    condition?: import("zod").JSONType | undefined;
+                };
+                effect: {
+                    kind: "remind";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                } | {
+                    kind: "deny-tool";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                    reason?: string | undefined;
+                };
+                title?: string | undefined;
+                exclusiveGroup?: string | undefined;
+                scope?: import("./scope.js").RecipientScope | undefined;
+                judge?: {
+                    ref: string;
+                    revision: number;
+                    params?: import("zod").JSONType | undefined;
+                    timeoutMs?: number | undefined;
+                } | undefined;
+            } | {
+                format: "reminder/v4";
+                id: string;
+                priority: number;
+                text: string;
+                on: "session.event";
+                when: {
+                    eventType: string;
+                    condition?: import("zod").JSONType | undefined;
+                };
+                effect: {
+                    kind: "remind";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                } | {
+                    kind: "deny-tool";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                    reason?: string | undefined;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -499,21 +1396,11 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
             title: string;
             description: string;
             definition: {
-                format: "reminder/v1";
+                format: "reminder/v4";
                 id: string;
                 priority: number;
                 text: string;
-                deliver: {
-                    model: {
-                        once: "surface";
-                        shared?: {
-                            reset: "lifetime";
-                            lifetime: string;
-                            limit: number;
-                        } | undefined;
-                    };
-                };
-                on: "tool.succeeded" | "tool.failed";
+                on: "tool.succeeded";
                 when: {
                     tool: string;
                     arguments: Record<string, {
@@ -525,6 +1412,50 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
                     } | undefined;
                     condition?: import("zod").JSONType | undefined;
                 };
+                effect: {
+                    kind: "remind";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                } | {
+                    kind: "deny-tool";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                    reason?: string | undefined;
+                };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
                 scope?: import("./scope.js").RecipientScope | undefined;
@@ -535,10 +1466,80 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
                     timeoutMs?: number | undefined;
                 } | undefined;
             } | {
+                format: "reminder/v4";
                 id: string;
                 priority: number;
                 text: string;
-                format: "reminder/v2";
+                on: "tool.failed";
+                when: {
+                    tool: string;
+                    arguments: Record<string, {
+                        regex: string;
+                        flags: string;
+                    }>;
+                    error?: {
+                        code: string;
+                    } | undefined;
+                    condition?: import("zod").JSONType | undefined;
+                };
+                effect: {
+                    kind: "remind";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                } | {
+                    kind: "deny-tool";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                    reason?: string | undefined;
+                };
+                title?: string | undefined;
+                exclusiveGroup?: string | undefined;
+                scope?: import("./scope.js").RecipientScope | undefined;
+                judge?: {
+                    ref: string;
+                    revision: number;
+                    params?: import("zod").JSONType | undefined;
+                    timeoutMs?: number | undefined;
+                } | undefined;
+            } | {
+                format: "reminder/v4";
+                id: string;
+                priority: number;
+                text: string;
                 on: "request.before";
                 when: {
                     timeWindow?: {
@@ -551,18 +1552,49 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
                     } | undefined;
                     condition?: import("zod").JSONType | undefined;
                 };
-                deliver: {
-                    model: {
-                        once: "window" | "surface";
-                        shared?: {
-                            reset: "lifetime";
-                            lifetime: string;
-                            limit: number;
-                        } | {
-                            reset: "window";
-                            limit: number;
-                        } | undefined;
+                effect: {
+                    kind: "remind";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
                     };
+                } | {
+                    kind: "deny-tool";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                    reason?: string | undefined;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -574,10 +1606,10 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
                     timeoutMs?: number | undefined;
                 } | undefined;
             } | {
+                format: "reminder/v4";
                 id: string;
                 priority: number;
                 text: string;
-                format: "reminder/v3";
                 on: "assistant.output";
                 when: {
                     blockTypes: ("text" | "reasoning")[];
@@ -600,19 +1632,179 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
                     } | undefined;
                     condition?: import("zod").JSONType | undefined;
                 };
-                deliver: {
-                    model: {
-                        once: "window" | "surface";
-                        shared?: {
-                            reset: "lifetime";
-                            lifetime: string;
-                            limit: number;
-                        } | {
-                            reset: "window";
-                            limit: number;
-                        } | undefined;
-                        interrupt?: "abort-resume" | undefined;
+                effect: {
+                    kind: "remind";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
                     };
+                } | {
+                    kind: "deny-tool";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                    reason?: string | undefined;
+                };
+                title?: string | undefined;
+                exclusiveGroup?: string | undefined;
+                scope?: import("./scope.js").RecipientScope | undefined;
+                judge?: {
+                    ref: string;
+                    revision: number;
+                    params?: import("zod").JSONType | undefined;
+                    timeoutMs?: number | undefined;
+                } | undefined;
+            } | {
+                format: "reminder/v4";
+                id: string;
+                priority: number;
+                text: string;
+                on: "tool.before-execute";
+                when: {
+                    tool: string;
+                    arguments: Record<string, {
+                        regex: string;
+                        flags: string;
+                    }>;
+                    condition?: import("zod").JSONType | undefined;
+                };
+                effect: {
+                    kind: "remind";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                } | {
+                    kind: "deny-tool";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                    reason?: string | undefined;
+                };
+                title?: string | undefined;
+                exclusiveGroup?: string | undefined;
+                scope?: import("./scope.js").RecipientScope | undefined;
+                judge?: {
+                    ref: string;
+                    revision: number;
+                    params?: import("zod").JSONType | undefined;
+                    timeoutMs?: number | undefined;
+                } | undefined;
+            } | {
+                format: "reminder/v4";
+                id: string;
+                priority: number;
+                text: string;
+                on: "session.event";
+                when: {
+                    eventType: string;
+                    condition?: import("zod").JSONType | undefined;
+                };
+                effect: {
+                    kind: "remind";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                } | {
+                    kind: "deny-tool";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                    reason?: string | undefined;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -638,6 +1830,45 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
         executor: string;
     }[];
     submit(rawEvent: unknown, signal?: AbortSignal): Promise<void>;
+    /** Evaluate denial policy before a tool body runs; the guard later reads this ticket. */
+    prepareToolExecution({ key, sessionId, agentPreset, name, arguments: args, callId, rootCallId, signal }: ToolPreparation): Promise<void>;
+    /**
+     * Declare the custom events a rule may select by name. The owner keeps the returned
+     * disposer inside a Cordis effect, so unloading that plugin withdraws its names:
+     * nothing can publish them afterwards, and `handlesSessionEvent` reports them as
+     * unreachable even though already-compiled rules still mention them.
+     */
+    registerCustomEvents(descriptors: {
+        name: string;
+        shape?: EventFieldShape;
+    }[]): () => void;
+    /**
+     * Publish one custom event. `eventId` is the idempotency key: care records it in the
+     * session's durable state, so re-publishing is ignored instead of delivered twice.
+     * The payload rides `arguments` and is frozen into the delivery evidence as received.
+     */
+    publishCustomEvent({ sessionId, name, eventId, at, facts }: {
+        sessionId: string;
+        name: string;
+        eventId: string;
+        at?: number;
+        facts?: unknown;
+    }, signal?: AbortSignal): Promise<void>;
+    /**
+     * Whether any registered rule selects this committed DSH event type. A session
+     * event can only match a rule whose `eventType` equals it, so this pre-filter is
+     * exact and keeps unrelated log traffic off the admission path.
+     */
+    handlesSessionEvent(eventType: string): boolean;
+    /** Synchronous guard decision; never awaits, so another listener cannot re-allow a denial. */
+    decideToolExecution(key: object): {
+        kind: "allow";
+    } | {
+        kind: "deny";
+        reason: string;
+    };
+    /** Release a settled execution's ticket. */
+    settleToolExecution(key: object): void;
     settle(sessionId: string): Promise<void>;
     snapshot(sessionId: string): {
         sources: {
@@ -645,21 +1876,11 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
             plugin: string;
             revision: number;
             rules: ({
-                format: "reminder/v1";
+                format: "reminder/v4";
                 id: string;
                 priority: number;
                 text: string;
-                deliver: {
-                    model: {
-                        once: "surface";
-                        shared?: {
-                            reset: "lifetime";
-                            lifetime: string;
-                            limit: number;
-                        } | undefined;
-                    };
-                };
-                on: "tool.succeeded" | "tool.failed";
+                on: "tool.succeeded";
                 when: {
                     tool: string;
                     arguments: Record<string, {
@@ -671,6 +1892,50 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
                     } | undefined;
                     condition?: import("zod").JSONType | undefined;
                 };
+                effect: {
+                    kind: "remind";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                } | {
+                    kind: "deny-tool";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                    reason?: string | undefined;
+                };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
                 scope?: import("./scope.js").RecipientScope | undefined;
@@ -681,10 +1946,80 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
                     timeoutMs?: number | undefined;
                 } | undefined;
             } | {
+                format: "reminder/v4";
                 id: string;
                 priority: number;
                 text: string;
-                format: "reminder/v2";
+                on: "tool.failed";
+                when: {
+                    tool: string;
+                    arguments: Record<string, {
+                        regex: string;
+                        flags: string;
+                    }>;
+                    error?: {
+                        code: string;
+                    } | undefined;
+                    condition?: import("zod").JSONType | undefined;
+                };
+                effect: {
+                    kind: "remind";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                } | {
+                    kind: "deny-tool";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                    reason?: string | undefined;
+                };
+                title?: string | undefined;
+                exclusiveGroup?: string | undefined;
+                scope?: import("./scope.js").RecipientScope | undefined;
+                judge?: {
+                    ref: string;
+                    revision: number;
+                    params?: import("zod").JSONType | undefined;
+                    timeoutMs?: number | undefined;
+                } | undefined;
+            } | {
+                format: "reminder/v4";
+                id: string;
+                priority: number;
+                text: string;
                 on: "request.before";
                 when: {
                     timeWindow?: {
@@ -697,18 +2032,49 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
                     } | undefined;
                     condition?: import("zod").JSONType | undefined;
                 };
-                deliver: {
-                    model: {
-                        once: "window" | "surface";
-                        shared?: {
-                            reset: "lifetime";
-                            lifetime: string;
-                            limit: number;
-                        } | {
-                            reset: "window";
-                            limit: number;
-                        } | undefined;
+                effect: {
+                    kind: "remind";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
                     };
+                } | {
+                    kind: "deny-tool";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                    reason?: string | undefined;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -720,10 +2086,10 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
                     timeoutMs?: number | undefined;
                 } | undefined;
             } | {
+                format: "reminder/v4";
                 id: string;
                 priority: number;
                 text: string;
-                format: "reminder/v3";
                 on: "assistant.output";
                 when: {
                     blockTypes: ("text" | "reasoning")[];
@@ -746,19 +2112,179 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
                     } | undefined;
                     condition?: import("zod").JSONType | undefined;
                 };
-                deliver: {
-                    model: {
-                        once: "window" | "surface";
-                        shared?: {
-                            reset: "lifetime";
-                            lifetime: string;
-                            limit: number;
-                        } | {
-                            reset: "window";
-                            limit: number;
-                        } | undefined;
-                        interrupt?: "abort-resume" | undefined;
+                effect: {
+                    kind: "remind";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
                     };
+                } | {
+                    kind: "deny-tool";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                    reason?: string | undefined;
+                };
+                title?: string | undefined;
+                exclusiveGroup?: string | undefined;
+                scope?: import("./scope.js").RecipientScope | undefined;
+                judge?: {
+                    ref: string;
+                    revision: number;
+                    params?: import("zod").JSONType | undefined;
+                    timeoutMs?: number | undefined;
+                } | undefined;
+            } | {
+                format: "reminder/v4";
+                id: string;
+                priority: number;
+                text: string;
+                on: "tool.before-execute";
+                when: {
+                    tool: string;
+                    arguments: Record<string, {
+                        regex: string;
+                        flags: string;
+                    }>;
+                    condition?: import("zod").JSONType | undefined;
+                };
+                effect: {
+                    kind: "remind";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                } | {
+                    kind: "deny-tool";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                    reason?: string | undefined;
+                };
+                title?: string | undefined;
+                exclusiveGroup?: string | undefined;
+                scope?: import("./scope.js").RecipientScope | undefined;
+                judge?: {
+                    ref: string;
+                    revision: number;
+                    params?: import("zod").JSONType | undefined;
+                    timeoutMs?: number | undefined;
+                } | undefined;
+            } | {
+                format: "reminder/v4";
+                id: string;
+                priority: number;
+                text: string;
+                on: "session.event";
+                when: {
+                    eventType: string;
+                    condition?: import("zod").JSONType | undefined;
+                };
+                effect: {
+                    kind: "remind";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                } | {
+                    kind: "deny-tool";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                    reason?: string | undefined;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -795,21 +2321,11 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
             status: "reserved" | "pending" | "delivered" | "discarded";
             evidence: import("zod").JSONType;
             rule: {
-                format: "reminder/v1";
+                format: "reminder/v4";
                 id: string;
                 priority: number;
                 text: string;
-                deliver: {
-                    model: {
-                        once: "surface";
-                        shared?: {
-                            reset: "lifetime";
-                            lifetime: string;
-                            limit: number;
-                        } | undefined;
-                    };
-                };
-                on: "tool.succeeded" | "tool.failed";
+                on: "tool.succeeded";
                 when: {
                     tool: string;
                     arguments: Record<string, {
@@ -821,6 +2337,50 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
                     } | undefined;
                     condition?: import("zod").JSONType | undefined;
                 };
+                effect: {
+                    kind: "remind";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                } | {
+                    kind: "deny-tool";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                    reason?: string | undefined;
+                };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
                 scope?: import("./scope.js").RecipientScope | undefined;
@@ -831,10 +2391,80 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
                     timeoutMs?: number | undefined;
                 } | undefined;
             } | {
+                format: "reminder/v4";
                 id: string;
                 priority: number;
                 text: string;
-                format: "reminder/v2";
+                on: "tool.failed";
+                when: {
+                    tool: string;
+                    arguments: Record<string, {
+                        regex: string;
+                        flags: string;
+                    }>;
+                    error?: {
+                        code: string;
+                    } | undefined;
+                    condition?: import("zod").JSONType | undefined;
+                };
+                effect: {
+                    kind: "remind";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                } | {
+                    kind: "deny-tool";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                    reason?: string | undefined;
+                };
+                title?: string | undefined;
+                exclusiveGroup?: string | undefined;
+                scope?: import("./scope.js").RecipientScope | undefined;
+                judge?: {
+                    ref: string;
+                    revision: number;
+                    params?: import("zod").JSONType | undefined;
+                    timeoutMs?: number | undefined;
+                } | undefined;
+            } | {
+                format: "reminder/v4";
+                id: string;
+                priority: number;
+                text: string;
                 on: "request.before";
                 when: {
                     timeWindow?: {
@@ -847,18 +2477,49 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
                     } | undefined;
                     condition?: import("zod").JSONType | undefined;
                 };
-                deliver: {
-                    model: {
-                        once: "window" | "surface";
-                        shared?: {
-                            reset: "lifetime";
-                            lifetime: string;
-                            limit: number;
-                        } | {
-                            reset: "window";
-                            limit: number;
-                        } | undefined;
+                effect: {
+                    kind: "remind";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
                     };
+                } | {
+                    kind: "deny-tool";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                    reason?: string | undefined;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -870,10 +2531,10 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
                     timeoutMs?: number | undefined;
                 } | undefined;
             } | {
+                format: "reminder/v4";
                 id: string;
                 priority: number;
                 text: string;
-                format: "reminder/v3";
                 on: "assistant.output";
                 when: {
                     blockTypes: ("text" | "reasoning")[];
@@ -896,19 +2557,179 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
                     } | undefined;
                     condition?: import("zod").JSONType | undefined;
                 };
-                deliver: {
-                    model: {
-                        once: "window" | "surface";
-                        shared?: {
-                            reset: "lifetime";
-                            lifetime: string;
-                            limit: number;
-                        } | {
-                            reset: "window";
-                            limit: number;
-                        } | undefined;
-                        interrupt?: "abort-resume" | undefined;
+                effect: {
+                    kind: "remind";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
                     };
+                } | {
+                    kind: "deny-tool";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                    reason?: string | undefined;
+                };
+                title?: string | undefined;
+                exclusiveGroup?: string | undefined;
+                scope?: import("./scope.js").RecipientScope | undefined;
+                judge?: {
+                    ref: string;
+                    revision: number;
+                    params?: import("zod").JSONType | undefined;
+                    timeoutMs?: number | undefined;
+                } | undefined;
+            } | {
+                format: "reminder/v4";
+                id: string;
+                priority: number;
+                text: string;
+                on: "tool.before-execute";
+                when: {
+                    tool: string;
+                    arguments: Record<string, {
+                        regex: string;
+                        flags: string;
+                    }>;
+                    condition?: import("zod").JSONType | undefined;
+                };
+                effect: {
+                    kind: "remind";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                } | {
+                    kind: "deny-tool";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                    reason?: string | undefined;
+                };
+                title?: string | undefined;
+                exclusiveGroup?: string | undefined;
+                scope?: import("./scope.js").RecipientScope | undefined;
+                judge?: {
+                    ref: string;
+                    revision: number;
+                    params?: import("zod").JSONType | undefined;
+                    timeoutMs?: number | undefined;
+                } | undefined;
+            } | {
+                format: "reminder/v4";
+                id: string;
+                priority: number;
+                text: string;
+                on: "session.event";
+                when: {
+                    eventType: string;
+                    condition?: import("zod").JSONType | undefined;
+                };
+                effect: {
+                    kind: "remind";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                } | {
+                    kind: "deny-tool";
+                    deliver: {
+                        model: {
+                            once: "window" | "none" | "surface";
+                            shared?: {
+                                reset: "lifetime";
+                                lifetime: string;
+                                limit: number;
+                            } | {
+                                reset: "window";
+                                limit: number;
+                            } | undefined;
+                            interrupt?: "abort-resume" | undefined;
+                            sticky?: {
+                                lifetime: number;
+                                cooldown: number;
+                                clock: "main-request" | "human-turn";
+                            } | undefined;
+                        };
+                    };
+                    reason?: string | undefined;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -941,14 +2762,34 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
                 index: number;
                 type: "text" | "reasoning";
                 offset: number;
+                full: string;
             } | undefined;
             messageId?: string | undefined;
+            rendered?: boolean | undefined;
+            sticky?: {
+                activationId: string;
+                charged: boolean;
+            } | undefined;
         }[];
         diagnostics: Record<string, import("zod").JSONType>[];
         windows: {
             key: string;
             until: number;
             messageId?: string | undefined;
+        }[];
+        stickies: {
+            key: string;
+            activationId: string;
+            sourceId: string;
+            ruleId: string;
+            sessionId: string;
+            text: string;
+            title: string;
+            clock: "main-request" | "human-turn";
+            remaining: number;
+            cooldown: number;
+            charged: boolean;
+            lastHumanId: string;
         }[];
     };
     collect({ sessionId, agentPreset, visible, accepted, committedIds, signal, candidateIds }: CollectInput): Promise<{
@@ -974,6 +2815,7 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
                     index: number;
                     type: "text" | "reasoning";
                     offset: number;
+                    full: string;
                 } | undefined;
                 readonly trigger: "reminder-rule";
                 readonly evaluationId: string;
@@ -981,21 +2823,11 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
                 readonly sourceId: string;
                 readonly callId: string;
                 readonly rule: {
-                    format: "reminder/v1";
+                    format: "reminder/v4";
                     id: string;
                     priority: number;
                     text: string;
-                    deliver: {
-                        model: {
-                            once: "surface";
-                            shared?: {
-                                reset: "lifetime";
-                                lifetime: string;
-                                limit: number;
-                            } | undefined;
-                        };
-                    };
-                    on: "tool.succeeded" | "tool.failed";
+                    on: "tool.succeeded";
                     when: {
                         tool: string;
                         arguments: Record<string, {
@@ -1007,6 +2839,50 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
                         } | undefined;
                         condition?: import("zod").JSONType | undefined;
                     };
+                    effect: {
+                        kind: "remind";
+                        deliver: {
+                            model: {
+                                once: "window" | "none" | "surface";
+                                shared?: {
+                                    reset: "lifetime";
+                                    lifetime: string;
+                                    limit: number;
+                                } | {
+                                    reset: "window";
+                                    limit: number;
+                                } | undefined;
+                                interrupt?: "abort-resume" | undefined;
+                                sticky?: {
+                                    lifetime: number;
+                                    cooldown: number;
+                                    clock: "main-request" | "human-turn";
+                                } | undefined;
+                            };
+                        };
+                    } | {
+                        kind: "deny-tool";
+                        deliver: {
+                            model: {
+                                once: "window" | "none" | "surface";
+                                shared?: {
+                                    reset: "lifetime";
+                                    lifetime: string;
+                                    limit: number;
+                                } | {
+                                    reset: "window";
+                                    limit: number;
+                                } | undefined;
+                                interrupt?: "abort-resume" | undefined;
+                                sticky?: {
+                                    lifetime: number;
+                                    cooldown: number;
+                                    clock: "main-request" | "human-turn";
+                                } | undefined;
+                            };
+                        };
+                        reason?: string | undefined;
+                    };
                     title?: string | undefined;
                     exclusiveGroup?: string | undefined;
                     scope?: import("./scope.js").RecipientScope | undefined;
@@ -1017,10 +2893,80 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
                         timeoutMs?: number | undefined;
                     } | undefined;
                 } | {
+                    format: "reminder/v4";
                     id: string;
                     priority: number;
                     text: string;
-                    format: "reminder/v2";
+                    on: "tool.failed";
+                    when: {
+                        tool: string;
+                        arguments: Record<string, {
+                            regex: string;
+                            flags: string;
+                        }>;
+                        error?: {
+                            code: string;
+                        } | undefined;
+                        condition?: import("zod").JSONType | undefined;
+                    };
+                    effect: {
+                        kind: "remind";
+                        deliver: {
+                            model: {
+                                once: "window" | "none" | "surface";
+                                shared?: {
+                                    reset: "lifetime";
+                                    lifetime: string;
+                                    limit: number;
+                                } | {
+                                    reset: "window";
+                                    limit: number;
+                                } | undefined;
+                                interrupt?: "abort-resume" | undefined;
+                                sticky?: {
+                                    lifetime: number;
+                                    cooldown: number;
+                                    clock: "main-request" | "human-turn";
+                                } | undefined;
+                            };
+                        };
+                    } | {
+                        kind: "deny-tool";
+                        deliver: {
+                            model: {
+                                once: "window" | "none" | "surface";
+                                shared?: {
+                                    reset: "lifetime";
+                                    lifetime: string;
+                                    limit: number;
+                                } | {
+                                    reset: "window";
+                                    limit: number;
+                                } | undefined;
+                                interrupt?: "abort-resume" | undefined;
+                                sticky?: {
+                                    lifetime: number;
+                                    cooldown: number;
+                                    clock: "main-request" | "human-turn";
+                                } | undefined;
+                            };
+                        };
+                        reason?: string | undefined;
+                    };
+                    title?: string | undefined;
+                    exclusiveGroup?: string | undefined;
+                    scope?: import("./scope.js").RecipientScope | undefined;
+                    judge?: {
+                        ref: string;
+                        revision: number;
+                        params?: import("zod").JSONType | undefined;
+                        timeoutMs?: number | undefined;
+                    } | undefined;
+                } | {
+                    format: "reminder/v4";
+                    id: string;
+                    priority: number;
+                    text: string;
                     on: "request.before";
                     when: {
                         timeWindow?: {
@@ -1033,18 +2979,49 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
                         } | undefined;
                         condition?: import("zod").JSONType | undefined;
                     };
-                    deliver: {
-                        model: {
-                            once: "window" | "surface";
-                            shared?: {
-                                reset: "lifetime";
-                                lifetime: string;
-                                limit: number;
-                            } | {
-                                reset: "window";
-                                limit: number;
-                            } | undefined;
+                    effect: {
+                        kind: "remind";
+                        deliver: {
+                            model: {
+                                once: "window" | "none" | "surface";
+                                shared?: {
+                                    reset: "lifetime";
+                                    lifetime: string;
+                                    limit: number;
+                                } | {
+                                    reset: "window";
+                                    limit: number;
+                                } | undefined;
+                                interrupt?: "abort-resume" | undefined;
+                                sticky?: {
+                                    lifetime: number;
+                                    cooldown: number;
+                                    clock: "main-request" | "human-turn";
+                                } | undefined;
+                            };
                         };
+                    } | {
+                        kind: "deny-tool";
+                        deliver: {
+                            model: {
+                                once: "window" | "none" | "surface";
+                                shared?: {
+                                    reset: "lifetime";
+                                    lifetime: string;
+                                    limit: number;
+                                } | {
+                                    reset: "window";
+                                    limit: number;
+                                } | undefined;
+                                interrupt?: "abort-resume" | undefined;
+                                sticky?: {
+                                    lifetime: number;
+                                    cooldown: number;
+                                    clock: "main-request" | "human-turn";
+                                } | undefined;
+                            };
+                        };
+                        reason?: string | undefined;
                     };
                     title?: string | undefined;
                     exclusiveGroup?: string | undefined;
@@ -1056,10 +3033,10 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
                         timeoutMs?: number | undefined;
                     } | undefined;
                 } | {
+                    format: "reminder/v4";
                     id: string;
                     priority: number;
                     text: string;
-                    format: "reminder/v3";
                     on: "assistant.output";
                     when: {
                         blockTypes: ("text" | "reasoning")[];
@@ -1082,19 +3059,179 @@ export declare function createReminderRuntime({ config: input, entries, save, ex
                         } | undefined;
                         condition?: import("zod").JSONType | undefined;
                     };
-                    deliver: {
-                        model: {
-                            once: "window" | "surface";
-                            shared?: {
-                                reset: "lifetime";
-                                lifetime: string;
-                                limit: number;
-                            } | {
-                                reset: "window";
-                                limit: number;
-                            } | undefined;
-                            interrupt?: "abort-resume" | undefined;
+                    effect: {
+                        kind: "remind";
+                        deliver: {
+                            model: {
+                                once: "window" | "none" | "surface";
+                                shared?: {
+                                    reset: "lifetime";
+                                    lifetime: string;
+                                    limit: number;
+                                } | {
+                                    reset: "window";
+                                    limit: number;
+                                } | undefined;
+                                interrupt?: "abort-resume" | undefined;
+                                sticky?: {
+                                    lifetime: number;
+                                    cooldown: number;
+                                    clock: "main-request" | "human-turn";
+                                } | undefined;
+                            };
                         };
+                    } | {
+                        kind: "deny-tool";
+                        deliver: {
+                            model: {
+                                once: "window" | "none" | "surface";
+                                shared?: {
+                                    reset: "lifetime";
+                                    lifetime: string;
+                                    limit: number;
+                                } | {
+                                    reset: "window";
+                                    limit: number;
+                                } | undefined;
+                                interrupt?: "abort-resume" | undefined;
+                                sticky?: {
+                                    lifetime: number;
+                                    cooldown: number;
+                                    clock: "main-request" | "human-turn";
+                                } | undefined;
+                            };
+                        };
+                        reason?: string | undefined;
+                    };
+                    title?: string | undefined;
+                    exclusiveGroup?: string | undefined;
+                    scope?: import("./scope.js").RecipientScope | undefined;
+                    judge?: {
+                        ref: string;
+                        revision: number;
+                        params?: import("zod").JSONType | undefined;
+                        timeoutMs?: number | undefined;
+                    } | undefined;
+                } | {
+                    format: "reminder/v4";
+                    id: string;
+                    priority: number;
+                    text: string;
+                    on: "tool.before-execute";
+                    when: {
+                        tool: string;
+                        arguments: Record<string, {
+                            regex: string;
+                            flags: string;
+                        }>;
+                        condition?: import("zod").JSONType | undefined;
+                    };
+                    effect: {
+                        kind: "remind";
+                        deliver: {
+                            model: {
+                                once: "window" | "none" | "surface";
+                                shared?: {
+                                    reset: "lifetime";
+                                    lifetime: string;
+                                    limit: number;
+                                } | {
+                                    reset: "window";
+                                    limit: number;
+                                } | undefined;
+                                interrupt?: "abort-resume" | undefined;
+                                sticky?: {
+                                    lifetime: number;
+                                    cooldown: number;
+                                    clock: "main-request" | "human-turn";
+                                } | undefined;
+                            };
+                        };
+                    } | {
+                        kind: "deny-tool";
+                        deliver: {
+                            model: {
+                                once: "window" | "none" | "surface";
+                                shared?: {
+                                    reset: "lifetime";
+                                    lifetime: string;
+                                    limit: number;
+                                } | {
+                                    reset: "window";
+                                    limit: number;
+                                } | undefined;
+                                interrupt?: "abort-resume" | undefined;
+                                sticky?: {
+                                    lifetime: number;
+                                    cooldown: number;
+                                    clock: "main-request" | "human-turn";
+                                } | undefined;
+                            };
+                        };
+                        reason?: string | undefined;
+                    };
+                    title?: string | undefined;
+                    exclusiveGroup?: string | undefined;
+                    scope?: import("./scope.js").RecipientScope | undefined;
+                    judge?: {
+                        ref: string;
+                        revision: number;
+                        params?: import("zod").JSONType | undefined;
+                        timeoutMs?: number | undefined;
+                    } | undefined;
+                } | {
+                    format: "reminder/v4";
+                    id: string;
+                    priority: number;
+                    text: string;
+                    on: "session.event";
+                    when: {
+                        eventType: string;
+                        condition?: import("zod").JSONType | undefined;
+                    };
+                    effect: {
+                        kind: "remind";
+                        deliver: {
+                            model: {
+                                once: "window" | "none" | "surface";
+                                shared?: {
+                                    reset: "lifetime";
+                                    lifetime: string;
+                                    limit: number;
+                                } | {
+                                    reset: "window";
+                                    limit: number;
+                                } | undefined;
+                                interrupt?: "abort-resume" | undefined;
+                                sticky?: {
+                                    lifetime: number;
+                                    cooldown: number;
+                                    clock: "main-request" | "human-turn";
+                                } | undefined;
+                            };
+                        };
+                    } | {
+                        kind: "deny-tool";
+                        deliver: {
+                            model: {
+                                once: "window" | "none" | "surface";
+                                shared?: {
+                                    reset: "lifetime";
+                                    lifetime: string;
+                                    limit: number;
+                                } | {
+                                    reset: "window";
+                                    limit: number;
+                                } | undefined;
+                                interrupt?: "abort-resume" | undefined;
+                                sticky?: {
+                                    lifetime: number;
+                                    cooldown: number;
+                                    clock: "main-request" | "human-turn";
+                                } | undefined;
+                            };
+                        };
+                        reason?: string | undefined;
                     };
                     title?: string | undefined;
                     exclusiveGroup?: string | undefined;

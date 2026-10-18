@@ -179,8 +179,8 @@ test('reminder service connects tool results to logged pre-step messages through
   const { ensureReminderService } = await pluginModule('reminder-runtime/index.js')
   assert.equal(await ensureReminderService(ctx, {}, ctx.contextCareControls), service)
   ctx.effect(() => service.registerSource({ sourceId: 'integration-reminder', plugin: 'test', revision: 1, rules: [{
-    format: 'reminder/v1', id: 'ts', on: 'tool.succeeded', text: '禁止使用 any',
-    when: { tool: 'reminder_read', arguments: { file_path: { regex: '\\.ts$' } } }, deliver: { model: { once: 'surface' } },
+    format: 'reminder/v4', id: 'ts', on: 'tool.succeeded', text: '禁止使用 any',
+    when: { tool: 'reminder_read', arguments: { file_path: { regex: '\\.ts$' } } }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
   }] }).dispose)
   ctx.effect(() => ctx.tools.register({ name: 'reminder_read', description: 'Read fixture text',
     parameters: { type: 'object', properties: { file_path: { type: 'string' } }, required: ['file_path'] },
@@ -210,8 +210,8 @@ registerRecoveryHostCases({ async exercise(t, scenario) {
   const owned = await fixture(t, false, {}, {}, { reminders: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
   let ctx = await owned.open()
   const source = { sourceId: 'recovery', plugin: 'test', revision: 1, rules: [{
-    format: 'reminder/v1', id: 'notice', on: 'tool.succeeded', text: 'RECOVERED_NOTICE',
-    when: { tool: 'probe' }, deliver: { model: { once: 'surface' } },
+    format: 'reminder/v4', id: 'notice', on: 'tool.succeeded', text: 'RECOVERED_NOTICE',
+    when: { tool: 'probe' }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
   }] }
   let service = ctx.get('reminderRules'), handle = service.registerSource(source)
   await service.submit({ sessionId: 'recovery-session', callId: 'probe', rootCallId: 'probe', name: 'probe', arguments: {} })
@@ -238,8 +238,8 @@ registerTimeoutHostCases({ async exercise(t, outcome, execute) {
   await ctx.loader.create({ name: '@care-test/timeout-policy' })
   await ctx.loader.await()
   ctx.effect(() => ctx.get('reminderRules').registerSource({ sourceId: 'timeout-test', plugin: 'test', revision: 1,
-    rules: [{ format: 'reminder/v1', id: 'timeout', on: 'tool.failed', text: 'TIMEOUT_ONLY_NOTICE',
-      when: { tool: 'timeout_probe', error: { code: 'TOOL_TIMEOUT' } }, deliver: { model: { once: 'surface' } } }] }).dispose)
+    rules: [{ format: 'reminder/v4', id: 'timeout', on: 'tool.failed', text: 'TIMEOUT_ONLY_NOTICE',
+      when: { tool: 'timeout_probe', error: { code: 'TOOL_TIMEOUT' } }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } }] }).dispose)
   ctx.effect(() => ctx.tools.register({ name: 'timeout_probe', description: 'Exercise tool completion',
     parameters: { type: 'object' }, timeoutMs: outcome === 'cancel' ? 10000 : 30,
     output: { schema: { type: 'string' }, render: (_args, text) => [{ type: 'text', text }] },
@@ -268,8 +268,8 @@ registerTimeoutHostCases({ async exercise(t, outcome, execute) {
 test('shared reminder quota limits real concurrent sessions and survives Host restart and source edits', async t => {
   const owned = await fixture(t, false, {}, {}, { reminders: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
   const source = { sourceId: 'shared-life', plugin: 'test', revision: 1, rules: [{
-    format: 'reminder/v2', id: 'notice', on: 'request.before', text: 'SHARED_LIFETIME_NOTICE', when: {},
-    deliver: { model: { once: 'surface', shared: { reset: 'lifetime', lifetime: 'campaign-1', limit: 2 } } },
+    format: 'reminder/v4', id: 'notice', on: 'request.before', text: 'SHARED_LIFETIME_NOTICE', when: {},
+    effect: { kind: 'remind', deliver: { model: { once: 'surface', shared: { reset: 'lifetime', lifetime: 'campaign-1', limit: 2 } } } },
   }] }
   const ctx = await owned.open()
   ctx.effect(() => ctx.get('reminderRules').registerSource(source).dispose)
@@ -312,8 +312,8 @@ test('shared reminder reservations compensate failed session saves and retry fai
     updateClaims: change => { if (failClaim) throw new Error('claim-disk'); return table.update('global', change) } })
   t.after(() => runtime.close())
   runtime.registerSource({ sourceId: 'fault-quota', plugin: 'test', revision: 1, rules: [{
-    format: 'reminder/v1', id: 'one', on: 'tool.succeeded', text: 'One shared notice', when: { tool: 'read' },
-    deliver: { model: { once: 'surface', shared: { reset: 'lifetime', lifetime: 'one', limit: 1 } } },
+    format: 'reminder/v4', id: 'one', on: 'tool.succeeded', text: 'One shared notice', when: { tool: 'read' },
+    effect: { kind: 'remind', deliver: { model: { once: 'surface', shared: { reset: 'lifetime', lifetime: 'one', limit: 1 } } } },
   }] })
   for (const sessionId of ['a', 'b']) await runtime.submit({ sessionId, callId: sessionId, rootCallId: sessionId, name: 'read', arguments: {} })
   failSession = true
@@ -348,9 +348,9 @@ test('shared reminder window grants a new quota on the next night', async t => {
     updateClaims: change => table.update('global', change) })
   t.after(() => runtime.close())
   runtime.registerSource({ sourceId: 'shared-night', plugin: 'test', revision: 1, rules: [{
-    format: 'reminder/v2', id: 'night', on: 'request.before', text: 'Night reminder',
+    format: 'reminder/v4', id: 'night', on: 'request.before', text: 'Night reminder',
     when: { timeWindow: { start: '23:00', end: '06:00' } },
-    deliver: { model: { once: 'window', shared: { reset: 'window', limit: 1 } } },
+    effect: { kind: 'remind', deliver: { model: { once: 'window', shared: { reset: 'window', limit: 1 } } } },
   }] })
   const prepare = sessionId => runtime.prepareRequest({ sessionId, events: [] })
   await Promise.all(['a', 'b'].map(prepare))
@@ -1038,11 +1038,11 @@ registerScopeHostCases({ async exercise(t, scenario) {
   const ctx = await owned.open(), service = ctx.get('reminderRules')
   ctx.effect(() => service.registerSource({ sourceId: 'scope-case', plugin: 'test', revision: 1,
     ...(scenario.sourceScope ? { scope: scenario.sourceScope } : {}), rules: [{
-      format: 'reminder/v1', id: 'notice', on: 'tool.succeeded', text: 'SCOPED_HEADER_NOTICE',
+      format: 'reminder/v4', id: 'notice', on: 'tool.succeeded', text: 'SCOPED_HEADER_NOTICE',
       ...(scenario.ruleScope ? { scope: scenario.ruleScope } : {}), when: { tool: 'scope_probe' },
-      deliver: { model: { once: 'surface', ...(scenario.sharedLimit === undefined ? {} : {
+      effect: { kind: 'remind', deliver: { model: { once: 'surface', ...(scenario.sharedLimit === undefined ? {} : {
         shared: { reset: 'lifetime', lifetime: 'scope-campaign', limit: scenario.sharedLimit },
-      }) } },
+      }) } } },
     }] }).dispose)
   class ScopeAdapter extends CompletionAdapter {
     requests = new Map()
