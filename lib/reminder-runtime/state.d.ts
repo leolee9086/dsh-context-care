@@ -1417,8 +1417,11 @@ export interface Run {
     done: Promise<void>;
     task?: Promise<unknown>;
     timer?: ReturnType<typeof setTimeout>;
-    /** Execution token this round decides, for pre-execution calls only. */
-    denialKey?: object;
+    /** Execution token this round decides and the policy generation it read, for pre-execution calls only. */
+    denialTicket?: {
+        key: object;
+        generation: number;
+    };
     /** Denial chosen by this round; absent means the call stays allowed. */
     denial?: DenialVerdict;
     /** Whether every rule was actually evaluated; an interrupted round must not authorize. */

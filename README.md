@@ -60,6 +60,12 @@ Host 行 `dsh-context-care/requests` 通过官方 `llm/stream` waterfall 拦截�
 
 升级时，Host 会在发布提醒服务前退役持久化记录中的 v1–v3 候选，保存一次 `retired-pre-v4` 诊断，记录候选身份、原状态与消息 ID。旧候选不会转换成 v4 或再次投递；已处理事件、窗口回执、既有诊断与独立共享配额账本保留。现有 v4 候选和 sticky 状态照常恢复。保存失败、损坏的 v4 状态或未知格式会明确拒绝启动；不会清空状态来掩盖错误。
 
+### 工具阻断的边界
+
+`effect.kind: deny-tool` 只在 `on: tool.before-execute` 上成立，规则用 `when.tool` 指定工具名，命中时该次调用在工具体执行前被拒，拒绝理由作为错误结果回到模型，工具本身不会运行。**没有命中的工具调用照常执行**：本会话规则里没有适用项时，评估结论就是放行，而不是“缺票据所以拒绝”。
+
+票据只用于把异步评估和同步守卫对齐。策略变化（来源替换、规则更新、来源卸载）会让**已在途**的票据失效，那次调用会被拒并提示重新评估；之后的调用重新评估、照常放行。只有在服务关闭、评估被取消或超时这类“确实没有结论”的情况下才会持续拒绝，理由会写明是哪一种，不会把四种情况混成一句话。
+
 当伙伴说“今晚不再提醒”，模型调用 `reminder_snooze`。空参数暂停当前会话所有正在生效的窗口提醒；同时传 `sourceId` 与 `ruleId` 可只暂停一条。暂缓持久到窗口结束，重启后仍有效。该工具也可在首次提醒前调用；窗口之外返回当前无可暂停提醒。领域服务提供 `snooze({ sessionId, sourceId?, ruleId? })`，返回被暂停的规则与结束时间。
 
 自然请求入口调用 `prepareRequest({ sessionId, events, visible, accepted, signal })`，读取会话事件后运行分析器与判定器，再按既有 `collect` / `filterMessages` / `rollback` 交付。分析器和判定器可以读取 `event.clock: { at, timeZone }` 与 `event.humanActivity: { at, evidence } | null`。时间和在场条件先由运行时判定，worker 事实不能覆盖它们；投递前再次检查时间和在场有效期。

@@ -9,9 +9,9 @@ type Chunk = { type: 'block-start'; index: number; blockType: Block['type'] }
   | { type: 'finish'; reason: { kind: 'stop' } }
 interface Request { signal?: AbortSignal; messages: readonly object[] }
 interface OutputRule {
-  format: 'reminder/v3'; id: string; on: 'assistant.output'; text: string
+  format: 'reminder/v4'; id: string; on: 'assistant.output'; text: string
   when: { blockTypes: Block['type'][]; pattern: { kind: 'literal'; text: string } }
-  deliver: { model: { once: 'surface'; interrupt?: 'abort-resume'; shared?: { reset: 'lifetime'; lifetime: string; limit: number } } }
+  effect: { kind: 'remind'; deliver: { model: { once: 'surface'; interrupt?: 'abort-resume'; shared?: { reset: 'lifetime'; lifetime: string; limit: number } } } }
 }
 interface HostCase {
   register(rules: OutputRule[]): void
@@ -24,10 +24,10 @@ interface HostCase {
 interface Harness {
   create(t: TestContext, stream: (request: Request) => AsyncGenerator<Chunk>, maxInterrupts?: number): Promise<HostCase>
 }
-const rule = (interrupt = false): OutputRule => ({ format: 'reminder/v3', id: 'marker', on: 'assistant.output', text: 'OUTPUT_NOTICE',
+const rule = (interrupt = false): OutputRule => ({ format: 'reminder/v4', id: 'marker', on: 'assistant.output', text: 'OUTPUT_NOTICE',
   when: { blockTypes: ['reasoning'], pattern: { kind: 'literal', text: 'ARCHIVE' } },
-  deliver: { model: { once: 'surface', ...(interrupt ? { interrupt: 'abort-resume' as const } : {}),
-    shared: { reset: 'lifetime', lifetime: 'output-test', limit: 1 } } } })
+  effect: { kind: 'remind', deliver: { model: { once: 'surface', ...(interrupt ? { interrupt: 'abort-resume' as const } : {}),
+    shared: { reset: 'lifetime', lifetime: 'output-test', limit: 1 } } } } })
 async function* complete(text: string): AsyncGenerator<Chunk> {
   yield { type: 'block-start', index: 0, blockType: 'text' }
   yield { type: 'block-end', index: 0, block: { type: 'text', text } }

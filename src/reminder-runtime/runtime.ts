@@ -249,8 +249,9 @@ export function createReminderRuntime({ config: input, entries = [], templates, 
     }
   }
   function invalidate(sourceId: string) {
-    // A changed source can change a denial, so uncommitted tickets from the old policy must not authorize.
-    tickets.revoke()
+    // A changed source can change a denial, so tickets from the old policy must not authorize.
+    // Retiring them leaves the policy usable: the next round records the new generation.
+    tickets.invalidate()
     if (sources.has(sourceId)) for (const state of records.values()) {
       for (const candidate of state.candidates) if (candidate.sourceId === sourceId) recovered.delete(candidate.id)
     }
@@ -277,7 +278,7 @@ export function createReminderRuntime({ config: input, entries = [], templates, 
     const { event, items, controller, deadline } = run
     const blockedGroups = new Set<string>(), winners = new Set<string>(), results: CandidateValue[] = []
     // Only a pre-execution round can still stop its call; correlation uses the registry's execution token.
-    const denialKey = event.type === 'tool.before-execute' ? run.denialKey : undefined
+    const denialTicket = event.type === 'tool.before-execute' ? run.denialTicket : undefined
     const diagnostics: Record<string, unknown>[] = []
     // Every analyzer reads the same base input; only the matching phase sees their combined facts.
     event.facts = {}
@@ -364,7 +365,7 @@ export function createReminderRuntime({ config: input, entries = [], templates, 
       if (controller.signal.aborted || closed) return
       const target = await identity(event.sessionId, event.agentPreset, controller.signal)
       // Recorded after the identity recheck, so a decision revoked during the round never survives it.
-      if (denialKey) tickets.record(denialKey, run.denial, run.evaluated === true)
+      if (denialTicket) tickets.record(denialTicket.key, run.denial, run.evaluated === true, denialTicket.generation)
       for (const candidate of results) {
         if (controller.signal.aborted || closed || !current(candidate, target) || !eligible(event.sessionId, candidate.sourceId, candidate.ruleId)
           || epoch(event.sessionId, candidate.sourceId, candidate.ruleId) !== candidate.policy) continue
@@ -374,7 +375,7 @@ export function createReminderRuntime({ config: input, entries = [], templates, 
     })
   }
   /** Single admission path for composed events; a pre-execution round also carries its ticket key. */
-  function admit(rawEvent: unknown, signal?: AbortSignal, denialKey?: object): Promise<void> {
+  function admit(rawEvent: unknown, signal?: AbortSignal, denialTicket?: { key: object; generation: number }): Promise<void> {
     if (closed || signal?.aborted) return Promise.resolve()
     // Reserve capacity before the first persistence await; pending writes are part of the queue.
     if (admissions.size >= config.maxQueued + config.maxConcurrent) return Promise.reject(new Error('reminder-capacity-exceeded'))
@@ -392,7 +393,7 @@ export function createReminderRuntime({ config: input, entries = [], templates, 
     let resolve!: () => void
     const done = new Promise<void>(finish => { resolve = finish })
     const run: Run = { event, items: [], analyzers: [...analyzers.values()], controller: admission.controller, deadline: admittedAt + config.roundTimeoutMs, resolve, done,
-      ...(denialKey === undefined ? {} : { denialKey }) }
+      ...(denialTicket === undefined ? {} : { denialTicket }) }
     const abort = () => {
       run.controller.abort(signal?.reason ?? new Error('reminder-round-timeout'))
       const queue = queues.get(event.sessionId), index = queue?.indexOf(run) ?? -1
@@ -415,7 +416,13 @@ export function createReminderRuntime({ config: input, entries = [], templates, 
             window: rule.effect.deliver.model.once === 'window' || rule.effect.deliver.model.shared?.reset === 'window'
               ? localWindow('timeWindow' in rule.when ? rule.when.timeWindow : undefined, event.clock?.at) : undefined })))
         .sort((a, b) => b.rule.priority - a.rule.priority || a.source.sourceId.localeCompare(b.source.sourceId) || a.rule.id.localeCompare(b.rule.id))
-      if (!run.items.length) return false
+      if (!run.items.length) {
+        // No rule in this session's policy applies to this call, so the evaluation is
+        // complete: record that answer. The guard reads a ticket for every call, and an
+        // unmatched tool is a verdict, not a missing one.
+        if (denialTicket) tickets.record(denialTicket.key, undefined, true, denialTicket.generation)
+        return false
+      }
       return update(event.sessionId, state => {
         if (run.controller.signal.aborted || state.seen.includes(event.callId)) return false
         state.seen.push(event.callId); return true
@@ -557,11 +564,14 @@ export function createReminderRuntime({ config: input, entries = [], templates, 
     /** Evaluate denial policy before a tool body runs; the guard later reads this ticket. */
     async prepareToolExecution({ key, sessionId, agentPreset, name, arguments: args, callId, rootCallId, signal }: ToolPreparation) {
       if (closed) return
+      // The round must be judged against the rule set it actually read.
+      const generation = tickets.current()
       const applying = [...sources.values()].some(item => item.compiled.some(rule => rule.on === 'tool.before-execute'))
-      // With no pre-execution rule anywhere there is nothing to decide; the guard then allows without a ticket.
-      if (!applying) return
+      // With no pre-execution rule anywhere nothing can deny this call, so record that answer now.
+      // The guard reads a ticket for every call: an empty policy is a verdict, not a missing one.
+      if (!applying) { tickets.record(key, undefined, true, generation); return }
       await admit(Event.parse(jsonCopy({ type: 'tool.before-execute', sessionId, ...(agentPreset === undefined ? {} : { agentPreset }),
-        callId, rootCallId, name, arguments: args, clock: { at: wallNow() }, facts: {} })), signal, key).catch(report)
+        callId, rootCallId, name, arguments: args, clock: { at: wallNow() }, facts: {} })), signal, { key, generation }).catch(report)
     },
     /**
      * Declare the custom events a rule may select by name. The owner keeps the returned
@@ -762,7 +772,7 @@ export function createReminderRuntime({ config: input, entries = [], templates, 
       await Promise.allSettled([...running.values()].map(run => run.done))
       await Promise.allSettled([...admissions].map(item => item.task))
       await Promise.allSettled([...chains.values(), capacityWrite]); sources.clear(); detectors.clear(); analyzers.clear(); rejectedSources.clear()
-      tickets.revoke()
+      tickets.dispose()
     },
   }
 }

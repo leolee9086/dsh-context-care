@@ -8,6 +8,8 @@ interface Ticket {
   verdict: DenialVerdict | undefined
   evaluated: boolean
   expiresAt: number
+  /** Policy generation the round was evaluated under. */
+  generation: number
 }
 
 export interface DenialTickets {
@@ -15,13 +17,22 @@ export interface DenialTickets {
    * Record one pre-execution round. `evaluated: false` means the round was cut short,
    * which must deny: an unfinished policy check is not permission.
    */
-  record(key: object, verdict: DenialVerdict | undefined, evaluated: boolean): void
+  record(key: object, verdict: DenialVerdict | undefined, evaluated: boolean, generation: number): void
   /** Final synchronous decision for a dispatch; never calls back into asynchronous policy. */
   decide(key: object, at: number): { kind: 'allow' } | { kind: 'deny'; reason: string }
   /** Drop a settled call so the registry does not retain finished executions. */
   settle(key: object): void
-  /** Invalidate every uncommitted ticket after a policy change or unload. */
-  revoke(): void
+  /**
+   * Retire tickets issued under the previous policy, because a changed rule set can
+   * change a verdict. Issuance continues: a later round records the new generation.
+   * Only this generation counter moves, so a revoke can never disable the policy
+   * itself; a source refresh is ordinary operation, not the end of tool use.
+   */
+  invalidate(): void
+  /** The generation a round must capture when it starts evaluating. */
+  current(): number
+  /** Stop issuing and accepting tickets for good; the owning service is shutting down. */
+  dispose(): void
 }
 
 /**
@@ -31,22 +42,28 @@ export interface DenialTickets {
  */
 export function createDenialTickets(ttlMs: number, now: () => number): DenialTickets {
   const issued = new WeakMap<object, Ticket>()
-  let revoked = false
+  let generation = 0
+  let disposed = false
   return {
-    record(key, verdict, evaluated) {
-      if (revoked) return
-      issued.set(key, { verdict, evaluated, expiresAt: now() + ttlMs })
+    record(key, verdict, evaluated, issuedUnder) {
+      if (disposed) return
+      issued.set(key, { verdict, evaluated, expiresAt: now() + ttlMs, generation: issuedUnder })
     },
     decide(key, at) {
-      if (revoked) return { kind: 'deny', reason: '提醒策略已变更，本次调用需重新评估' }
+      // A closed service has no policy left to consult, so nothing can be authorized.
+      if (disposed) return { kind: 'deny', reason: '提醒策略服务已停止，本次调用未执行' }
       const ticket = issued.get(key)
-      // A missing or expired ticket means the evaluation never finished: deny instead of assuming allowed.
+      // A missing ticket means the evaluation never finished: deny instead of assuming allowed.
       if (!ticket) return { kind: 'deny', reason: '提醒策略未能在执行前完成评估' }
+      // The rule set changed after this round read it, so the verdict is no longer that policy's.
+      if (ticket.generation !== generation) return { kind: 'deny', reason: '提醒策略已变更，本次调用需重新评估' }
       if (ticket.expiresAt <= at) return { kind: 'deny', reason: '提醒策略评估已过期' }
       if (!ticket.evaluated) return { kind: 'deny', reason: '提醒策略未能完成全部规则的评估' }
       return ticket.verdict ? { kind: 'deny', reason: ticket.verdict.reason } : { kind: 'allow' }
     },
     settle(key) { issued.delete(key) },
-    revoke() { revoked = true },
+    invalidate() { generation += 1 },
+    current() { return generation },
+    dispose() { disposed = true },
   }
 }

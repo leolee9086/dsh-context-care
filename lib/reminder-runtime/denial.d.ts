@@ -8,7 +8,7 @@ export interface DenialTickets {
      * Record one pre-execution round. `evaluated: false` means the round was cut short,
      * which must deny: an unfinished policy check is not permission.
      */
-    record(key: object, verdict: DenialVerdict | undefined, evaluated: boolean): void;
+    record(key: object, verdict: DenialVerdict | undefined, evaluated: boolean, generation: number): void;
     /** Final synchronous decision for a dispatch; never calls back into asynchronous policy. */
     decide(key: object, at: number): {
         kind: 'allow';
@@ -18,8 +18,17 @@ export interface DenialTickets {
     };
     /** Drop a settled call so the registry does not retain finished executions. */
     settle(key: object): void;
-    /** Invalidate every uncommitted ticket after a policy change or unload. */
-    revoke(): void;
+    /**
+     * Retire tickets issued under the previous policy, because a changed rule set can
+     * change a verdict. Issuance continues: a later round records the new generation.
+     * Only this generation counter moves, so a revoke can never disable the policy
+     * itself; a source refresh is ordinary operation, not the end of tool use.
+     */
+    invalidate(): void;
+    /** The generation a round must capture when it starts evaluating. */
+    current(): number;
+    /** Stop issuing and accepting tickets for good; the owning service is shutting down. */
+    dispose(): void;
 }
 /**
  * Correlates an asynchronous pre-execute evaluation with the later synchronous

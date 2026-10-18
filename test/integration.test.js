@@ -238,6 +238,37 @@ test('pre-v4 persisted candidates retire before Host startup and HTTP routes sur
   }
 })
 
+test('a deny rule stops its own tool through the real registry and leaves other tools runnable', { timeout: 30000 }, async t => {
+  const owned = await fixture(t, false, {}, {}, { reminders: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
+  const ctx = await owned.open()
+  ctx.effect(() => ctx.get('reminderRules').registerSource({ sourceId: 'deny-registry', plugin: 'test', revision: 1,
+    rules: [{ format: 'reminder/v4', id: 'blocked', on: 'tool.before-execute', text: '这次调用被规则拦下',
+      when: { tool: 'deny_probe' }, effect: { kind: 'deny-tool', reason: '不得调用 deny_probe',
+        deliver: { model: { once: 'surface' } } } }] }).dispose)
+  // The bodies record that they ran: a denial must not reach the tool at all.
+  const executed = []
+  for (const name of ['deny_probe', 'allow_probe']) {
+    ctx.effect(() => ctx.tools.register({ name, description: `${name} probe`, parameters: { type: 'object' },
+      output: { schema: { type: 'string' }, render: (_args, text) => [{ type: 'text', text }] },
+      async execute() { executed.push(name); return `${name} body ran` } }))
+  }
+  ctx.llm.registerAdapter(['care-test'], new CompletionAdapter([
+    { blocks: [{ type: 'tool-call', id: 'denied-call', name: 'deny_probe', arguments: '{}' }] },
+    { blocks: [{ type: 'tool-call', id: 'allowed-call', name: 'allow_probe', arguments: '{}' }] },
+    { blocks: [{ type: 'text', text: 'Handled both tool results.' }] },
+  ]))
+  const agent = await ctx.agentLoop.create('deny-registry', { provider: 'care-test', model: 'care-test' })
+  await completionTurn(ctx, agent)
+  const results = agent.session.snapshotEvents().filter(event => event.type === 'tool/result')
+  const resultFor = /** @param {string} id */ id => results.find(event => event.data.message.source.callId === id)
+  const textOf = id => resultFor(id).data.message.content.map(block => block.text ?? '').join('')
+  assert.deepEqual(executed, ['allow_probe'])
+  assert.equal(resultFor('denied-call').data.message.isError, true)
+  assert.match(textOf('denied-call'), /不得调用 deny_probe/)
+  assert.notEqual(resultFor('allowed-call').data.message.isError, true)
+  assert.match(textOf('allowed-call'), /allow_probe body ran/)
+})
+
 registerRecoveryHostCases({ async exercise(t, scenario) {
   const owned = await fixture(t, false, {}, {}, { reminders: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
   let ctx = await owned.open()
