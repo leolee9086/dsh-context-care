@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 import { resolve } from 'node:path'
-import { mkdtemp, readFile, writeFile, rm, copyFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, writeFile, rm, copyFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 const pluginModule = path => import(process.env.DSH_TEST_PLUGIN_ROOT
   ? pathToFileURL(resolve(process.env.DSH_TEST_PLUGIN_ROOT, 'src', path)).href : new URL(`../src/${path}`, import.meta.url).href)
@@ -20,6 +20,7 @@ import { detectorFixture } from './fixtures/detector.js'
 import { registerReminderHostCases } from './reminder-host-cases.ts'
 import { registerTimeoutHostCases } from './reminder-timeout-cases.ts'
 import { registerRecoveryHostCases } from './reminder-recovery-cases.ts'
+import { preV4State } from './fixtures/reminder-upgrade.ts'
 import { registerScopeHostCases } from './reminder-scope-host-cases.ts'
 
 // This explicitly selected test acts as an external Host. The plugin itself never
@@ -206,6 +207,37 @@ test('reminder service connects tool results to logged pre-step messages through
   assert.equal(ctx.get('reminderRules'), undefined)
 })
 
+test('pre-v4 persisted candidates retire before Host startup and HTTP routes survive restart', async t => {
+  const owned = await fixture(t, true, {}, {}, { reminders: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
+  const old = preV4State()
+  const directory = resolve(owned.root, 'context_care_reminders', 'sessions')
+  await mkdir(directory, { recursive: true })
+  await writeFile(resolve(directory, 'upgrade-session.json'), JSON.stringify({ version: 1, record: old }))
+
+  // This is the failing upgrade path: real persisted data, Loader activation,
+  // service dependencies and HTTP registration, followed by another restart.
+  for (let restart = 0; restart < 2; restart++) {
+    const ctx = await owned.open()
+    ctx.sessions.create('upgrade-session')
+    const runtime = ctx.get('reminderRules')
+    const state = runtime.snapshot('upgrade-session')
+    assert.deepEqual(state.candidates, [])
+    assert.deepEqual(state.seen, old.seen)
+    assert.deepEqual(state.windows, old.windows)
+    assert.equal(state.diagnostics.filter(item => item.status === 'retired-pre-v4').length, 1)
+    assert.deepEqual(await runtime.collect({ sessionId: 'upgrade-session', visible: [] }), [])
+    assert.throws(() => runtime.registerSource({ sourceId: 'old', plugin: 'test', revision: 1,
+      rules: [old.candidates[0].rule] }), /reminder\/v4/)
+    const { base, cookie } = await controlCookie(ctx)
+    for (const collection of ['actions', 'prompts']) {
+      const response = await fetch(`${base}/context-care/${collection}?sessionId=upgrade-session&limit=20`, { headers: { cookie } })
+      assert.equal(response.status, 200, `${collection} must be registered after upgrade`)
+      assert.ok(Array.isArray((await response.json())[collection]))
+    }
+    await owned.close(ctx)
+  }
+})
+
 registerRecoveryHostCases({ async exercise(t, scenario) {
   const owned = await fixture(t, false, {}, {}, { reminders: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
   let ctx = await owned.open()
@@ -213,12 +245,14 @@ registerRecoveryHostCases({ async exercise(t, scenario) {
     format: 'reminder/v4', id: 'notice', on: 'tool.succeeded', text: 'RECOVERED_NOTICE',
     when: { tool: 'probe' }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
   }] }
+  ctx.sessions.create('recovery-session')
   let service = ctx.get('reminderRules'), handle = service.registerSource(source)
   await service.submit({ sessionId: 'recovery-session', callId: 'probe', rootCallId: 'probe', name: 'probe', arguments: {} })
   assert.equal(service.snapshot('recovery-session').candidates.length, 1)
   if (scenario.restart) {
     await owned.close(ctx)
     ctx = await owned.open(); service = ctx.get('reminderRules')
+    ctx.sessions.create('recovery-session')
     handle = service.registerSource({ ...source, revision: 2,
       rules: scenario.changed ? [{ ...source.rules[0], text: 'CHANGED_NOTICE' }] : source.rules })
   }
@@ -550,6 +584,7 @@ async function fixture(t, completion = true, config = {}, completionConfig = {},
   // Loader writes entry ids and disabled flags: never give it the shared source fixture.
   await copyFile(new URL('./fixtures/cordis.yml', import.meta.url), resolve(root, 'cordis.yml'))
   return {
+    root,
     async open(completionEnabled = completion) { const ctx = await boot(root, completionEnabled, config, completionConfig, requestConfig); contexts.add(ctx); return ctx },
     async close(ctx) { await ctx.fiber.dispose(); contexts.delete(ctx) },
   }

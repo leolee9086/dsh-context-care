@@ -54,9 +54,11 @@ Host 行 `dsh-context-care/requests` 通过官方 `llm/stream` waterfall 拦截�
 
 ## 规则提醒与晚间休息
 
-`reminder/v1` 支持工具成功事件及指定错误码的失败事件；`reminder/v2` 在 `request.before` 判定，纯聊天也能触发；`reminder/v3` 在普通文本或实际可读 reasoning 输出中匹配模式。v1/v2 原有声明继续可用。v2 的 `when` 支持 `timeWindow: { start: "23:00", end: "06:00", timeZone: local }`、`humanActivity: { withinSeconds: 300 }` 和可选条件树 `condition`。时间采用 Host 本机时区，开始包含、结束不包含；两个时间必须不同。近期真人输入根据持久入队事件的 `source.kind: user` 与首次入队时间确定；插件消息、自动续跑和继承的 fork 历史不刷新在场时间。人工审批暂未作为在场证据。
+规则入口只接受 `reminder/v4`。`on` 区分工具成功、指定错误码的工具失败、自然请求、输出、工具执行前和会话事件；`effect` 区分提醒与工具阻断，两者通过 `effect.deliver` 声明投递方式。自然请求 `request.before` 的 `when` 支持 `timeWindow: { start: "23:00", end: "06:00", timeZone: local }`、`humanActivity: { withinSeconds: 300 }` 和可选条件树 `condition`。时间采用 Host 本机时区，开始包含、结束不包含；两个时间必须不同。近期真人输入根据持久入队事件的 `source.kind: user` 与首次入队时间确定；插件消息、自动续跑和继承的 fork 历史不刷新在场时间。人工审批暂未作为在场证据。
 
-`deliver.model.once: window` 要求声明时间窗口，在当前会话、来源和规则身份内每个窗口最多投递一次。跨午夜按开始日期归属；正文编辑、压缩、候选清理和重启保留去重，次晚可重新提醒，即使上晚正文仍可见。窗口占额与候选一起持久确认；已知提交前失败可回滚，无法确定是否提交的交付保留占额。`surface` 沿用可见上下文去重。旧存储记录可由新增的可选 `windows` 字段直接读取；写过窗口记录的存储应使用支持 v2 的版本打开。
+`effect.deliver.model.once: window` 要求声明时间窗口，在当前会话、来源和规则身份内每个窗口最多投递一次。跨午夜按开始日期归属；正文编辑、压缩、候选清理和重启保留去重，次晚可重新提醒，即使上晚正文仍可见。窗口占额与候选一起持久确认；已知提交前失败可回滚，无法确定是否提交的交付保留占额。`surface` 沿用可见上下文去重。
+
+升级时，Host 会在发布提醒服务前退役持久化记录中的 v1–v3 候选，保存一次 `retired-pre-v4` 诊断，记录候选身份、原状态与消息 ID。旧候选不会转换成 v4 或再次投递；已处理事件、窗口回执、既有诊断与独立共享配额账本保留。现有 v4 候选和 sticky 状态照常恢复。保存失败、损坏的 v4 状态或未知格式会明确拒绝启动；不会清空状态来掩盖错误。
 
 当伙伴说“今晚不再提醒”，模型调用 `reminder_snooze`。空参数暂停当前会话所有正在生效的窗口提醒；同时传 `sourceId` 与 `ruleId` 可只暂停一条。暂缓持久到窗口结束，重启后仍有效。该工具也可在首次提醒前调用；窗口之外返回当前无可暂停提醒。领域服务提供 `snooze({ sessionId, sourceId?, ruleId? })`，返回被暂停的规则与结束时间。
 
@@ -70,7 +72,7 @@ Host 行 `dsh-context-care/requests` 通过官方 `llm/stream` waterfall 拦截�
 
 TypeScript 来源插件可从 `dsh-context-care/reminders` 导入 `ReminderService`、`ReminderSource`、`ReminderRuleInput` 与 `ReminderSourceHandle` 类型；类型由实际运行时和校验 schema 派生。此入口也导出纯领域工厂 `createReminderRuntime`，不挂载 Host 服务。来源插件按使用的方法从 `ReminderService` 取 `Pick`，在 Cordis 服务增强中使用完整服务类型。
 
-来源插件使用 `ctx.inject(['reminderRules'], ...)`，在 effect 中调用 `registerSource({ sourceId, plugin, revision, rules, sessionId?, scope? }, { acceptSession? })`，持有返回的 `replace` / `dispose` 句柄。`validateRule(rule)` 统一校验 `reminder/v1`、`reminder/v2` 与 `reminder/v3`。v1 工具规则声明 `on: tool.succeeded`、`when.tool`、可选参数正则、提醒 `text` 和 `deliver.model.once: surface`；`priority` 默认 0，同组 `exclusiveGroup` 按优先级选取。未知字段报错。
+来源插件使用 `ctx.inject(['reminderRules'], ...)`，在 effect 中调用 `registerSource({ sourceId, plugin, revision, rules, sessionId?, scope? }, { acceptSession? })`，持有返回的 `replace` / `dispose` 句柄。`validateRule(rule)` 只接受 `reminder/v4`。工具成功规则声明 `on: tool.succeeded`、`when.tool`、可选参数正则、提醒 `text`、`effect.kind: remind` 和 `effect.deliver.model.once: surface`；`priority` 默认 0，同组 `exclusiveGroup` 按优先级选取。未知字段报错。
 
 只在工具超时后提醒时，使用 `on: tool.failed` 和 `when: { tool: 'pwsh', error: { code: 'TOOL_TIMEOUT' } }`。失败规则必须声明精确错误码，成功规则不能声明 `when.error`。Host 超时策略恢复上游信号并完成工具结算后，服务检查 `result.error.info.code`，在下一请求边界交付。成功文本或普通异常消息里出现 timeout 不会误触发。工具内部业务超时、网络超时与转后台任务可能使用不同结果语义，应按实际结构化错误码配置。
 
@@ -109,16 +111,16 @@ Host 从当前预设投影读取选择，再从注册表读取真实名称；模
 
 服务的 `catalog` 和 `filterMessages` 返回 Promise，调用方必须 `await`；界面通过异步目录显示当前适用规则。同步 `controlCatalog` 只为开关系统提供规则定义，投递仍由运行时按当前会话条件判定。
 
-在 `deliver.model` 中添加 `shared: { reset: 'lifetime', lifetime: 'campaign-1', limit: 2 }`，可让符合范围的多个会话合计消费两次提醒。`limit: 1` 表示合计一次；v2/v3 也可用 `shared: { reset: 'window', limit: 1 }`，要求声明 `when.timeWindow`。`once` 控制会话内去重，`shared` 控制跨会话总次数。共享身份包含来源、规则和生命周期名或窗口；编辑正文/revision、压缩和重启保留已消费次数。更换生命周期名或进入下一窗口才获得新额度。
+在 `effect.deliver.model` 中添加 `shared: { reset: 'lifetime', lifetime: 'campaign-1', limit: 2 }`，可让符合范围的多个会话合计消费两次提醒。`limit: 1` 表示合计一次；自然请求和输出规则也可用 `shared: { reset: 'window', limit: 1 }`，要求声明 `when.timeWindow`。`once` 控制会话内去重，`shared` 控制跨会话总次数。共享身份包含来源、规则和生命周期名或窗口；编辑正文/revision、压缩和重启保留已消费次数。更换生命周期名或进入下一窗口才获得新额度。
 
 共享账本使用同一 Host/runtime 的存储领域原子 `update`。交付先预留再保存会话，失败补偿未提交预留；已经消费的记录不被迟到回滚释放。它不提供跨独立 Host 进程的原子协调。账本默认最多 8 MiB，可用 `reminders.maxClaimBytes` 调整。
 
 ### 输出模式与显式中止续接
 
-v3 示例（思源插件 0.6.0 可直接从 callout 贡献）：
+v4 示例（思源插件 0.8.0 可直接从 callout 贡献）：
 
 ```yaml
-format: reminder/v3
+format: reminder/v4
 id: verify-completion
 on: assistant.output
 text: 请核对验收条件和实际结果，再报告完成情况。
@@ -127,14 +129,16 @@ when:
   pattern:
     kind: literal
     text: 已全部完成
-deliver:
-  model:
-    once: surface
+effect:
+  kind: remind
+  deliver:
+    model:
+      once: surface
 ```
 
 `pattern` 还支持 `{ kind: keywords, values: [已完成, 全部通过], mode: any }`（`all` 要求同块包含所有词）或 `{ kind: regex, regex: '已经?全部完成', flags: u }`。普通文字与供应商提供的可读 reasoning 可匹配，隐藏内容不可读取；不同 attempt、块索引和类型不会拼接。默认命中仅持久保存候选，下一次自然请求交付，空闲会话不会被唤醒。
 
-显式设置 `deliver.model.interrupt: abort-resume` 时，服务完成范围/额度/持久化检查后取消当前 attempt，并用同一个提醒消息续接。`reminders.maxInterruptsPerTurn` 默认 1；设为 0 或额度耗尽时保留候选到下一自然请求。命中处理完成前 attempt 已结束，也使用普通边界交付。
+显式设置 `effect.deliver.model.interrupt: abort-resume` 时，服务完成范围/额度/持久化检查后取消当前 attempt，并用同一个提醒消息续接。`reminders.maxInterruptsPerTurn` 默认 1；设为 0 或额度耗尽时保留候选到下一自然请求。命中处理完成前 attempt 已结束，也使用普通边界交付。
 
 输出检测使用每块最近 `maxStreamChars`（默认32768）字符的滑动窗口，每 `streamEveryChars`（256）字符或 `streamFlushMs`（50ms）派发；`maxStreamBlocks` 默认64。待处理队列受 `maxStreamPending`（32帧）和 `maxStreamPendingBytes`（4MiB）约束，块数或队列超限会记录诊断并停止该 attempt 检测，普通模型输出继续。模式所需跨度应小于保留窗口。完整范围、共享与超时 callout 见[思源规则教程](https://github.com/leolee9086/dsh-plugin-siyuan/blob/main/docs/规则编写教程.md#12-指定接收会话与共享次数)。
 

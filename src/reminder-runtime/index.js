@@ -9,6 +9,7 @@ import { createReminderRuntime, ReminderConfig, REMINDER_DOMAIN, REMINDER_SERVIC
 import { createOutputStream } from './output-stream.js'
 import { createOutputInterrupt } from '../../lib/reminder-runtime/interrupt.js'
 import { createSessionIdentityResolver } from '../../lib/reminder-runtime/session-identity.js'
+import { restoreReminderEntries } from '../../lib/reminder-runtime/restore.js'
 import { createBoundedMatcher } from '../bounded-matcher.js'
 import { CapacitySettings } from '../reminder-capacity.js'
 import { releaseResources } from '../resource-cleanup.js'
@@ -61,11 +62,14 @@ async function startReminderService(ctx, input, controls, facility) {
     const claimTable = claimDomain.table('claims')
     // Service startup is serialized per facility; all later mutations use the domain's atomic update.
     if (!claimTable.get('global')) await claimTable.put('global', { buckets: [] })
+    // Retire obsolete persisted candidates before v4 validation. The service is
+    // published only after these saves succeed; live registrations remain v4-only.
+    const entries = await restoreReminderEntries(table.entries(), (id, state) => table.put(id, state))
     const matcher = createBoundedMatcher({ timeoutMs: config.ruleTimeoutMs,
       maxPending: config.maxConcurrent, maxIdle: config.maxIdle, maxBytes: config.maxBytes })
     resources.unshift(['reminder-worker', () => matcher.close()])
     await matcher.warmup()
-    const runtime = createReminderRuntime({ config, entries: [...table.entries()], templates: createTemplates(), save: (id, value) => table.put(id, value),
+    const runtime = createReminderRuntime({ config, entries, templates: createTemplates(), save: (id, value) => table.put(id, value),
       capacity: settings.get('global'), saveCapacity: value => settings.put('global', value),
       resolveIdentity: createSessionIdentityResolver(ctx),
       updateClaims: change => claimTable.update('global', change),
