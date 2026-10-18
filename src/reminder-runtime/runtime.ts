@@ -11,13 +11,13 @@ import type { MessageView } from './request-context.js'
 import { matchesScope } from './scope.js'
 import type { RecipientIdentity } from './scope.js'
 import { changeClaims, quotaFor, hasClaim } from './claims.js'
-import { createDenialTickets } from './denial.js'
+import { createDenialTickets, openPreExecution } from './denial.js'
 import { SESSION_EVENT_TYPES } from './generated/session-events.js'
 
 /** Built-in names, which a custom event may not shadow. */
 const BUILT_IN_EVENT_NAMES = new Set<string>(SESSION_EVENT_TYPES)
 import { parseOrThrow } from './schema-error.js'
-import type { DenialVerdict } from './denial.js'
+import type { DenialVerdict, PreExecution } from './denial.js'
 import type { ClaimOperation } from './claims.js'
 import { Detector, SessionState, Event, MatchResult, AnalysisFacts, jsonCopy, errorMessage, errorDetail } from './state.js'
 import type { CandidateValue, StateValue, SourceValue, RuleValue, DetectorValue, Rejection, RegisteredSource, Run, RuntimeOptions, RequestInput, CollectInput, ToolPreparation, EventValue } from './state.js'
@@ -278,7 +278,7 @@ export function createReminderRuntime({ config: input, entries = [], templates, 
     const { event, items, controller, deadline } = run
     const blockedGroups = new Set<string>(), winners = new Set<string>(), results: CandidateValue[] = []
     // Only a pre-execution round can still stop its call; correlation uses the registry's execution token.
-    const denialTicket = event.type === 'tool.before-execute' ? run.denialTicket : undefined
+    const preExecution = event.type === 'tool.before-execute' ? run.preExecution : undefined
     const diagnostics: Record<string, unknown>[] = []
     // Every analyzer reads the same base input; only the matching phase sees their combined facts.
     event.facts = {}
@@ -365,7 +365,7 @@ export function createReminderRuntime({ config: input, entries = [], templates, 
       if (controller.signal.aborted || closed) return
       const target = await identity(event.sessionId, event.agentPreset, controller.signal)
       // Recorded after the identity recheck, so a decision revoked during the round never survives it.
-      if (denialTicket) tickets.record(denialTicket.key, run.denial, run.evaluated === true, denialTicket.generation)
+      preExecution?.settle(run.denial, run.evaluated === true)
       for (const candidate of results) {
         if (controller.signal.aborted || closed || !current(candidate, target) || !eligible(event.sessionId, candidate.sourceId, candidate.ruleId)
           || epoch(event.sessionId, candidate.sourceId, candidate.ruleId) !== candidate.policy) continue
@@ -375,7 +375,7 @@ export function createReminderRuntime({ config: input, entries = [], templates, 
     })
   }
   /** Single admission path for composed events; a pre-execution round also carries its ticket key. */
-  function admit(rawEvent: unknown, signal?: AbortSignal, denialTicket?: { key: object; generation: number }): Promise<void> {
+  function admit(rawEvent: unknown, signal?: AbortSignal, preExecution?: PreExecution): Promise<void> {
     if (closed || signal?.aborted) return Promise.resolve()
     // Reserve capacity before the first persistence await; pending writes are part of the queue.
     if (admissions.size >= config.maxQueued + config.maxConcurrent) return Promise.reject(new Error('reminder-capacity-exceeded'))
@@ -393,7 +393,7 @@ export function createReminderRuntime({ config: input, entries = [], templates, 
     let resolve!: () => void
     const done = new Promise<void>(finish => { resolve = finish })
     const run: Run = { event, items: [], analyzers: [...analyzers.values()], controller: admission.controller, deadline: admittedAt + config.roundTimeoutMs, resolve, done,
-      ...(denialTicket === undefined ? {} : { denialTicket }) }
+      ...(preExecution === undefined ? {} : { preExecution }) }
     const abort = () => {
       run.controller.abort(signal?.reason ?? new Error('reminder-round-timeout'))
       const queue = queues.get(event.sessionId), index = queue?.indexOf(run) ?? -1
@@ -420,7 +420,7 @@ export function createReminderRuntime({ config: input, entries = [], templates, 
         // No rule in this session's policy applies to this call, so the evaluation is
         // complete: record that answer. The guard reads a ticket for every call, and an
         // unmatched tool is a verdict, not a missing one.
-        if (denialTicket) tickets.record(denialTicket.key, undefined, true, denialTicket.generation)
+        preExecution?.settle(undefined, true)
         return false
       }
       return update(event.sessionId, state => {
@@ -436,6 +436,10 @@ export function createReminderRuntime({ config: input, entries = [], templates, 
       await diagnostic(event.sessionId, { eventId: event.callId, status: signal?.aborted ? 'cancelled' : 'queue-timeout' })
     }).finally(() => {
       clearTimeout(run.timer); signal?.removeEventListener('abort', abort); admissions.delete(admission)
+      // Every preparation ends with a verdict. A round that never ran (capacity, cancellation,
+      // queue timeout, duplicate call id) settles as an unfinished evaluation, which denies, so
+      // the guard never has to interpret an absence.
+      preExecution?.settleUnfinished()
     })
     return admission.task
   }
@@ -564,14 +568,13 @@ export function createReminderRuntime({ config: input, entries = [], templates, 
     /** Evaluate denial policy before a tool body runs; the guard later reads this ticket. */
     async prepareToolExecution({ key, sessionId, agentPreset, name, arguments: args, callId, rootCallId, signal }: ToolPreparation) {
       if (closed) return
-      // The round must be judged against the rule set it actually read.
-      const generation = tickets.current()
+      const pre = openPreExecution(key, tickets)
       const applying = [...sources.values()].some(item => item.compiled.some(rule => rule.on === 'tool.before-execute'))
-      // With no pre-execution rule anywhere nothing can deny this call, so record that answer now.
-      // The guard reads a ticket for every call: an empty policy is a verdict, not a missing one.
-      if (!applying) { tickets.record(key, undefined, true, generation); return }
+      // With no pre-execution rule anywhere nothing can deny this call, so the verdict is already
+      // complete. The guard reads one ticket per call: an empty policy is a verdict, not an absence.
+      if (!applying) { pre.settle(undefined, true); return }
       await admit(Event.parse(jsonCopy({ type: 'tool.before-execute', sessionId, ...(agentPreset === undefined ? {} : { agentPreset }),
-        callId, rootCallId, name, arguments: args, clock: { at: wallNow() }, facts: {} })), signal, { key, generation }).catch(report)
+        callId, rootCallId, name, arguments: args, clock: { at: wallNow() }, facts: {} })), signal, pre).catch(report)
     },
     /**
      * Declare the custom events a rule may select by name. The owner keeps the returned

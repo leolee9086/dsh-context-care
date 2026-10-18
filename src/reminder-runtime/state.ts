@@ -6,7 +6,7 @@ import type { ClaimBookValue } from './claims.js'
 import type { HistoryEvent, MessageView } from './request-context.js'
 import type { RecipientFacts } from './scope.js'
 import { TextSamples, type CountLimitValues } from './conditions.js'
-import type { DenialVerdict } from './denial.js'
+import type { DenialVerdict, PreExecution } from './denial.js'
 
 export const Detector = z.object({ ref: z.string().min(1), revision: z.number().int().positive(),
   module: z.string().url().refine(value => new URL(value).protocol === 'file:', 'detector module must be a local file URL'),
@@ -107,8 +107,8 @@ export interface Run {
   done: Promise<void>
   task?: Promise<unknown>
   timer?: ReturnType<typeof setTimeout>
-  /** Execution token this round decides and the policy generation it read, for pre-execution calls only. */
-  denialTicket?: { key: object; generation: number }
+  /** The call this round decides, for pre-execution rounds only. */
+  preExecution?: PreExecution
   /** Denial chosen by this round; absent means the call stays allowed. */
   denial?: DenialVerdict
   /** Whether every rule was actually evaluated; an interrupted round must not authorize. */

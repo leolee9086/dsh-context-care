@@ -4,6 +4,7 @@ import { createRuleControls, ControlPatch } from '../src/rule-controls.js'
 import { createReminderRuntime } from '../src/reminder-runtime/index.js'
 import { visibleReminderControls } from '../lib/reminder-runtime/control-view.js'
 import { createStreamWatch } from '../src/stream-watch.js'
+import { executeReminderMatch } from '../lib/reminder-runtime/matcher.js'
 import { createNoticeChannel } from '../src/notice-channel.js'
 import { controlledGuidance, controlledState, controlledEngineRules } from '../src/control-catalog.js'
 import { GUIDANCE, renderState } from '../src/policy.js'
@@ -193,3 +194,40 @@ test('third-party engine definitions are qualified before execution, preserving 
   const rules = controlledEngineRules(controls, 's', 'notify')
   assert.equal(new Set(rules.map(rule => rule.id)).size, 2)
 })
+// The same error class one layer down: an epoch that moves on a transient event
+// silently discards stored state instead of reporting anything.
+test('策略代数只随移除变化，一次来源刷新不会作废已存的候选', async t => {
+  const controls = createRuleControls({ save: async () => {} })
+  t.after(() => controls.close())
+  const removeFirst = controls.register(source('first'))
+  t.after(removeFirst)
+  const baseline = controls.epoch('session', 'first', 'shared-id')
+  // Registering another source cannot change what the first source's candidates mean.
+  const removeSecond = controls.register(source('second'))
+  assert.equal(controls.epoch('session', 'first', 'shared-id'), baseline)
+  // A removal can: its action or provider is gone.
+  removeSecond()
+  assert.notEqual(controls.epoch('session', 'first', 'shared-id'), baseline)
+})
+
+test('另一来源注册后，挂起的提醒仍然按时投递', async t => {
+  const controls = createRuleControls({ save: async () => {} })
+  t.after(() => controls.close())
+  const runtime = createReminderRuntime({ config: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 },
+    execute: async input => 'reminder' in input ? executeReminderMatch(input.reminder) : { ok: true },
+    epoch: (id, sourceId, ruleId) => controls.epoch(id, sourceId, ruleId) })
+  t.after(() => runtime.close())
+  runtime.registerSource({ sourceId: 'first', plugin: 'test', revision: 1, rules: [
+    { format: 'reminder/v4', id: 'notice', on: 'tool.succeeded', text: 'STILL_DELIVERED', when: { tool: 'probe' },
+      effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } }] })
+  await runtime.submit({ sessionId: 's', callId: 'probe', rootCallId: 'probe', name: 'probe', arguments: {} })
+  assert.equal(runtime.snapshot('s').candidates.filter(candidate => candidate.status === 'pending').length, 1)
+  const other = runtime.registerSource({ sourceId: 'second', plugin: 'test', revision: 1, rules: [
+    { format: 'reminder/v4', id: 'notice', on: 'tool.succeeded', text: 'OTHER', when: { tool: 'other' },
+      effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } }] })
+  t.after(() => other.dispose())
+  const messages = await runtime.collect({ sessionId: 's', visible: [] })
+  assert.equal(messages.length, 1)
+  assert.equal(messages[0].content[0].text, 'STILL_DELIVERED')
+})
+

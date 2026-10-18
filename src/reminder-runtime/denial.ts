@@ -35,6 +35,29 @@ export interface DenialTickets {
   dispose(): void
 }
 
+export interface PreExecution {
+  /** Record this call's verdict once; a later settlement is ignored. */
+  settle(verdict: DenialVerdict | undefined, evaluated: boolean): void
+  /** Fail closed for a preparation that ended without a verdict of its own. */
+  settleUnfinished(): void
+}
+
+/**
+ * One call's denial ticket: the only writer of that execution's verdict. It captures
+ * the policy generation when the call opens, so a round that began under an earlier
+ * rule set cannot record its answer as if the current policy produced it.
+ */
+export function openPreExecution(key: object, tickets: DenialTickets): PreExecution {
+  const generation = tickets.current()
+  let settled = false
+  const settle = (verdict: DenialVerdict | undefined, evaluated: boolean) => {
+    if (settled) return
+    settled = true
+    tickets.record(key, verdict, evaluated, generation)
+  }
+  return { settle, settleUnfinished: () => settle(undefined, false) }
+}
+
 /**
  * Correlates an asynchronous pre-execute evaluation with the later synchronous
  * guard. Tickets are keyed by the execution token, not the call id: a reused

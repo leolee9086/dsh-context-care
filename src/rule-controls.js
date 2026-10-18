@@ -38,7 +38,10 @@ export function createRuleControls({ entries = [], save, boundary = () => -1 }) 
   const chains = new Map()
   const failures = new Map()
   const samples = new Map()
-  let generation = 0
+  // Only a removal can invalidate work that already read the catalog: its action or provider
+  // is gone. An addition leaves committed plans and pending deliveries valid, so advancing this
+  // counter on registration let a routine source refresh discard both.
+  let removed = 0
   let closed = false
   const stored = sessionId => records.get(sessionId) ?? { revision: 0, preferences: [] }
   function validate(source) {
@@ -157,14 +160,14 @@ export function createRuleControls({ entries = [], save, boundary = () => -1 }) 
       if (closed) throw new ControlError(503, 'controls-closed')
       const source = validate(input)
       if (sources.has(source.sourceId)) throw new Error(`context-care: duplicate source ${source.sourceId}`)
-      sources.set(source.sourceId, source); generation++
-      return () => { if (sources.get(source.sourceId) === source) { sources.delete(source.sourceId); generation++ } }
+      sources.set(source.sourceId, source)
+      return () => { if (sources.get(source.sourceId) === source) { sources.delete(source.sourceId); removed++ } }
     },
-    registerProvider(provider) { if (closed) throw new ControlError(503, 'controls-closed'); providers.add(provider); generation++; return () => { providers.delete(provider); generation++ } },
+    registerProvider(provider) { if (closed) throw new ControlError(503, 'controls-closed'); providers.add(provider); return () => { providers.delete(provider); removed++ } },
     catalog, decision, snapshot, patch,
     enabled: (sessionId, sourceId, ruleId, actionId) => decision(sessionId, sourceId, ruleId, actionId).enabled,
     sinceSeq: (sessionId, sourceId, ruleId) => preference(sessionId, sourceId, ruleId)?.sinceSeq ?? -1,
-    epoch: (sessionId, sourceId, ruleId) => `${generation}:${preference(sessionId, sourceId, ruleId)?.epoch ?? 0}:${failures.has(sessionId)}`,
+    epoch: (sessionId, sourceId, ruleId) => `${removed}:${preference(sessionId, sourceId, ruleId)?.epoch ?? 0}:${failures.has(sessionId)}`,
     revision: sessionId => stored(sessionId).revision,
     currentSample: sessionId => samples.get(sessionId),
     sample(sessionId, value) { if (!closed) samples.set(sessionId, { ...value, at: Date.now() }) },
