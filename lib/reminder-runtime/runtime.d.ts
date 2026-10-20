@@ -103,7 +103,8 @@ declare function reminderSource(candidate: CandidateValue): {
                         } | undefined;
                     };
                 };
-                reason?: string | undefined;
+                dangerous: true;
+                reason: string;
             };
             title?: string | undefined;
             exclusiveGroup?: string | undefined;
@@ -173,7 +174,8 @@ declare function reminderSource(candidate: CandidateValue): {
                         } | undefined;
                     };
                 };
-                reason?: string | undefined;
+                dangerous: true;
+                reason: string;
             };
             title?: string | undefined;
             exclusiveGroup?: string | undefined;
@@ -243,7 +245,8 @@ declare function reminderSource(candidate: CandidateValue): {
                         } | undefined;
                     };
                 };
-                reason?: string | undefined;
+                dangerous: true;
+                reason: string;
             };
             title?: string | undefined;
             exclusiveGroup?: string | undefined;
@@ -323,7 +326,8 @@ declare function reminderSource(candidate: CandidateValue): {
                         } | undefined;
                     };
                 };
-                reason?: string | undefined;
+                dangerous: true;
+                reason: string;
             };
             title?: string | undefined;
             exclusiveGroup?: string | undefined;
@@ -390,7 +394,8 @@ declare function reminderSource(candidate: CandidateValue): {
                         } | undefined;
                     };
                 };
-                reason?: string | undefined;
+                dangerous: true;
+                reason: string;
             };
             title?: string | undefined;
             exclusiveGroup?: string | undefined;
@@ -453,7 +458,8 @@ declare function reminderSource(candidate: CandidateValue): {
                         } | undefined;
                     };
                 };
-                reason?: string | undefined;
+                dangerous: true;
+                reason: string;
             };
             title?: string | undefined;
             exclusiveGroup?: string | undefined;
@@ -572,7 +578,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                     } | undefined;
                 };
             };
-            reason?: string | undefined;
+            dangerous: true;
+            reason: string;
         };
         title?: string | undefined;
         exclusiveGroup?: string | undefined;
@@ -643,7 +650,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                     } | undefined;
                 };
             };
-            reason?: string | undefined;
+            dangerous: true;
+            reason: string;
         };
         title?: string | undefined;
         exclusiveGroup?: string | undefined;
@@ -714,7 +722,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                     } | undefined;
                 };
             };
-            reason?: string | undefined;
+            dangerous: true;
+            reason: string;
         };
         title?: string | undefined;
         exclusiveGroup?: string | undefined;
@@ -795,7 +804,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                     } | undefined;
                 };
             };
-            reason?: string | undefined;
+            dangerous: true;
+            reason: string;
         };
         title?: string | undefined;
         exclusiveGroup?: string | undefined;
@@ -863,7 +873,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                     } | undefined;
                 };
             };
-            reason?: string | undefined;
+            dangerous: true;
+            reason: string;
         };
         title?: string | undefined;
         exclusiveGroup?: string | undefined;
@@ -927,7 +938,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                     } | undefined;
                 };
             };
-            reason?: string | undefined;
+            dangerous: true;
+            reason: string;
         };
         title?: string | undefined;
         exclusiveGroup?: string | undefined;
@@ -1013,7 +1025,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                             } | undefined;
                         };
                     };
-                    reason?: string | undefined;
+                    dangerous: true;
+                    reason: string;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -1083,7 +1096,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                             } | undefined;
                         };
                     };
-                    reason?: string | undefined;
+                    dangerous: true;
+                    reason: string;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -1153,7 +1167,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                             } | undefined;
                         };
                     };
-                    reason?: string | undefined;
+                    dangerous: true;
+                    reason: string;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -1233,7 +1248,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                             } | undefined;
                         };
                     };
-                    reason?: string | undefined;
+                    dangerous: true;
+                    reason: string;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -1300,7 +1316,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                             } | undefined;
                         };
                     };
-                    reason?: string | undefined;
+                    dangerous: true;
+                    reason: string;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -1363,7 +1380,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                             } | undefined;
                         };
                     };
-                    reason?: string | undefined;
+                    dangerous: true;
+                    reason: string;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -1454,7 +1472,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                             } | undefined;
                         };
                     };
-                    reason?: string | undefined;
+                    dangerous: true;
+                    reason: string;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -1524,7 +1543,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                             } | undefined;
                         };
                     };
-                    reason?: string | undefined;
+                    dangerous: true;
+                    reason: string;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -1594,7 +1614,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                             } | undefined;
                         };
                     };
-                    reason?: string | undefined;
+                    dangerous: true;
+                    reason: string;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -1674,7 +1695,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                             } | undefined;
                         };
                     };
-                    reason?: string | undefined;
+                    dangerous: true;
+                    reason: string;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -1741,7 +1763,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                             } | undefined;
                         };
                     };
-                    reason?: string | undefined;
+                    dangerous: true;
+                    reason: string;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -1804,7 +1827,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                             } | undefined;
                         };
                     };
-                    reason?: string | undefined;
+                    dangerous: true;
+                    reason: string;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -1934,7 +1958,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                             } | undefined;
                         };
                     };
-                    reason?: string | undefined;
+                    dangerous: true;
+                    reason: string;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -2004,7 +2029,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                             } | undefined;
                         };
                     };
-                    reason?: string | undefined;
+                    dangerous: true;
+                    reason: string;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -2074,7 +2100,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                             } | undefined;
                         };
                     };
-                    reason?: string | undefined;
+                    dangerous: true;
+                    reason: string;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -2154,7 +2181,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                             } | undefined;
                         };
                     };
-                    reason?: string | undefined;
+                    dangerous: true;
+                    reason: string;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -2221,7 +2249,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                             } | undefined;
                         };
                     };
-                    reason?: string | undefined;
+                    dangerous: true;
+                    reason: string;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -2284,7 +2313,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                             } | undefined;
                         };
                     };
-                    reason?: string | undefined;
+                    dangerous: true;
+                    reason: string;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -2379,7 +2409,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                             } | undefined;
                         };
                     };
-                    reason?: string | undefined;
+                    dangerous: true;
+                    reason: string;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -2449,7 +2480,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                             } | undefined;
                         };
                     };
-                    reason?: string | undefined;
+                    dangerous: true;
+                    reason: string;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -2519,7 +2551,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                             } | undefined;
                         };
                     };
-                    reason?: string | undefined;
+                    dangerous: true;
+                    reason: string;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -2599,7 +2632,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                             } | undefined;
                         };
                     };
-                    reason?: string | undefined;
+                    dangerous: true;
+                    reason: string;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -2666,7 +2700,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                             } | undefined;
                         };
                     };
-                    reason?: string | undefined;
+                    dangerous: true;
+                    reason: string;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -2729,7 +2764,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                             } | undefined;
                         };
                     };
-                    reason?: string | undefined;
+                    dangerous: true;
+                    reason: string;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -2881,7 +2917,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                                 } | undefined;
                             };
                         };
-                        reason?: string | undefined;
+                        dangerous: true;
+                        reason: string;
                     };
                     title?: string | undefined;
                     exclusiveGroup?: string | undefined;
@@ -2951,7 +2988,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                                 } | undefined;
                             };
                         };
-                        reason?: string | undefined;
+                        dangerous: true;
+                        reason: string;
                     };
                     title?: string | undefined;
                     exclusiveGroup?: string | undefined;
@@ -3021,7 +3059,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                                 } | undefined;
                             };
                         };
-                        reason?: string | undefined;
+                        dangerous: true;
+                        reason: string;
                     };
                     title?: string | undefined;
                     exclusiveGroup?: string | undefined;
@@ -3101,7 +3140,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                                 } | undefined;
                             };
                         };
-                        reason?: string | undefined;
+                        dangerous: true;
+                        reason: string;
                     };
                     title?: string | undefined;
                     exclusiveGroup?: string | undefined;
@@ -3168,7 +3208,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                                 } | undefined;
                             };
                         };
-                        reason?: string | undefined;
+                        dangerous: true;
+                        reason: string;
                     };
                     title?: string | undefined;
                     exclusiveGroup?: string | undefined;
@@ -3231,7 +3272,8 @@ export declare function createReminderRuntime({ config: input, entries, template
                                 } | undefined;
                             };
                         };
-                        reason?: string | undefined;
+                        dangerous: true;
+                        reason: string;
                     };
                     title?: string | undefined;
                     exclusiveGroup?: string | undefined;

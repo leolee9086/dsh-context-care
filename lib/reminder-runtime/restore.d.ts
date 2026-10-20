@@ -82,7 +82,8 @@ export declare function restoreReminderState(input: unknown, at: number): {
                             } | undefined;
                         };
                     };
-                    reason?: string | undefined;
+                    dangerous: true;
+                    reason: string;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -152,7 +153,8 @@ export declare function restoreReminderState(input: unknown, at: number): {
                             } | undefined;
                         };
                     };
-                    reason?: string | undefined;
+                    dangerous: true;
+                    reason: string;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -222,7 +224,8 @@ export declare function restoreReminderState(input: unknown, at: number): {
                             } | undefined;
                         };
                     };
-                    reason?: string | undefined;
+                    dangerous: true;
+                    reason: string;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -302,7 +305,8 @@ export declare function restoreReminderState(input: unknown, at: number): {
                             } | undefined;
                         };
                     };
-                    reason?: string | undefined;
+                    dangerous: true;
+                    reason: string;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -369,7 +373,8 @@ export declare function restoreReminderState(input: unknown, at: number): {
                             } | undefined;
                         };
                     };
-                    reason?: string | undefined;
+                    dangerous: true;
+                    reason: string;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -432,7 +437,8 @@ export declare function restoreReminderState(input: unknown, at: number): {
                             } | undefined;
                         };
                     };
-                    reason?: string | undefined;
+                    dangerous: true;
+                    reason: string;
                 };
                 title?: string | undefined;
                 exclusiveGroup?: string | undefined;
@@ -578,7 +584,8 @@ export declare function restoreReminderEntries(entries: Iterable<readonly [strin
                         } | undefined;
                     };
                 };
-                reason?: string | undefined;
+                dangerous: true;
+                reason: string;
             };
             title?: string | undefined;
             exclusiveGroup?: string | undefined;
@@ -648,7 +655,8 @@ export declare function restoreReminderEntries(entries: Iterable<readonly [strin
                         } | undefined;
                     };
                 };
-                reason?: string | undefined;
+                dangerous: true;
+                reason: string;
             };
             title?: string | undefined;
             exclusiveGroup?: string | undefined;
@@ -718,7 +726,8 @@ export declare function restoreReminderEntries(entries: Iterable<readonly [strin
                         } | undefined;
                     };
                 };
-                reason?: string | undefined;
+                dangerous: true;
+                reason: string;
             };
             title?: string | undefined;
             exclusiveGroup?: string | undefined;
@@ -798,7 +807,8 @@ export declare function restoreReminderEntries(entries: Iterable<readonly [strin
                         } | undefined;
                     };
                 };
-                reason?: string | undefined;
+                dangerous: true;
+                reason: string;
             };
             title?: string | undefined;
             exclusiveGroup?: string | undefined;
@@ -865,7 +875,8 @@ export declare function restoreReminderEntries(entries: Iterable<readonly [strin
                         } | undefined;
                     };
                 };
-                reason?: string | undefined;
+                dangerous: true;
+                reason: string;
             };
             title?: string | undefined;
             exclusiveGroup?: string | undefined;
@@ -928,7 +939,8 @@ export declare function restoreReminderEntries(entries: Iterable<readonly [strin
                         } | undefined;
                     };
                 };
-                reason?: string | undefined;
+                dangerous: true;
+                reason: string;
             };
             title?: string | undefined;
             exclusiveGroup?: string | undefined;

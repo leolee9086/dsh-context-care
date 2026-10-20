@@ -10,6 +10,7 @@ import { createOutputStream } from './output-stream.js'
 import { createOutputInterrupt } from '../../lib/reminder-runtime/interrupt.js'
 import { createSessionIdentityResolver } from '../../lib/reminder-runtime/session-identity.js'
 import { restoreReminderEntries } from '../../lib/reminder-runtime/restore.js'
+import { availableParallelism } from 'node:os'
 import { createBoundedMatcher } from '../bounded-matcher.js'
 import { CapacitySettings } from '../reminder-capacity.js'
 import { releaseResources } from '../resource-cleanup.js'
@@ -65,8 +66,13 @@ async function startReminderService(ctx, input, controls, facility) {
     // Retire obsolete persisted candidates before v4 validation. The service is
     // published only after these saves succeed; live registrations remain v4-only.
     const entries = await restoreReminderEntries(table.entries(), (id, state) => table.put(id, state))
+    // 线程池大小按机器算，不按配置文件猜：参考实现用核心数的一半，
+    // 我们沿用同一个尺度——匹配是后台计算，不该和用户抢满整机。
+    const threads = config.maxIdle ?? Math.max(1, Math.floor(availableParallelism() / 2))
+    // 在途任务上限不在这里给：那是背压，和线程数无关。并发轮次由 runtime 控制，
+    // 这里只让 matcher 用自己的防御性默认值。
     const matcher = createBoundedMatcher({ timeoutMs: config.ruleTimeoutMs,
-      maxPending: config.maxConcurrent, maxIdle: config.maxIdle, maxBytes: config.maxBytes })
+      maxIdle: threads, maxBytes: config.maxBytes })
     resources.unshift(['reminder-worker', () => matcher.close()])
     await matcher.warmup()
     const runtime = createReminderRuntime({ config, entries, templates: createTemplates(), save: (id, value) => table.put(id, value),

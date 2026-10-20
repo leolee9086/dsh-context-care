@@ -100,7 +100,8 @@ export declare const ReminderRule: z.ZodDiscriminatedUnion<[z.ZodObject<{
                 }, z.core.$strict>>;
             }, z.core.$strict>;
         }, z.core.$strict>;
-        reason: z.ZodOptional<z.ZodString>;
+        dangerous: z.ZodLiteral<true>;
+        reason: z.ZodString;
     }, z.core.$strict>], "kind">;
 }, z.core.$strict>, z.ZodObject<{
     format: z.ZodLiteral<"reminder/v4">;
@@ -192,7 +193,8 @@ export declare const ReminderRule: z.ZodDiscriminatedUnion<[z.ZodObject<{
                 }, z.core.$strict>>;
             }, z.core.$strict>;
         }, z.core.$strict>;
-        reason: z.ZodOptional<z.ZodString>;
+        dangerous: z.ZodLiteral<true>;
+        reason: z.ZodString;
     }, z.core.$strict>], "kind">;
 }, z.core.$strict>, z.ZodObject<{
     format: z.ZodLiteral<"reminder/v4">;
@@ -284,7 +286,8 @@ export declare const ReminderRule: z.ZodDiscriminatedUnion<[z.ZodObject<{
                 }, z.core.$strict>>;
             }, z.core.$strict>;
         }, z.core.$strict>;
-        reason: z.ZodOptional<z.ZodString>;
+        dangerous: z.ZodLiteral<true>;
+        reason: z.ZodString;
     }, z.core.$strict>], "kind">;
 }, z.core.$strict>, z.ZodObject<{
     format: z.ZodLiteral<"reminder/v4">;
@@ -392,7 +395,8 @@ export declare const ReminderRule: z.ZodDiscriminatedUnion<[z.ZodObject<{
                 }, z.core.$strict>>;
             }, z.core.$strict>;
         }, z.core.$strict>;
-        reason: z.ZodOptional<z.ZodString>;
+        dangerous: z.ZodLiteral<true>;
+        reason: z.ZodString;
     }, z.core.$strict>], "kind">;
 }, z.core.$strict>, z.ZodObject<{
     format: z.ZodLiteral<"reminder/v4">;
@@ -481,7 +485,8 @@ export declare const ReminderRule: z.ZodDiscriminatedUnion<[z.ZodObject<{
                 }, z.core.$strict>>;
             }, z.core.$strict>;
         }, z.core.$strict>;
-        reason: z.ZodOptional<z.ZodString>;
+        dangerous: z.ZodLiteral<true>;
+        reason: z.ZodString;
     }, z.core.$strict>], "kind">;
 }, z.core.$strict>, z.ZodObject<{
     format: z.ZodLiteral<"reminder/v4">;
@@ -566,7 +571,8 @@ export declare const ReminderRule: z.ZodDiscriminatedUnion<[z.ZodObject<{
                 }, z.core.$strict>>;
             }, z.core.$strict>;
         }, z.core.$strict>;
-        reason: z.ZodOptional<z.ZodString>;
+        dangerous: z.ZodLiteral<true>;
+        reason: z.ZodString;
     }, z.core.$strict>], "kind">;
 }, z.core.$strict>], "on">;
 export declare const ReminderConfig: z.ZodPrefault<z.ZodObject<{
@@ -578,6 +584,7 @@ export declare const ReminderConfig: z.ZodPrefault<z.ZodObject<{
     }, z.core.$strict>>;
     ruleTimeoutMs: z.ZodDefault<z.ZodNumber>;
     roundTimeoutMs: z.ZodDefault<z.ZodNumber>;
+    storageTimeoutMs: z.ZodDefault<z.ZodNumber>;
     maxConcurrent: z.ZodDefault<z.ZodNumber>;
     maxQueued: z.ZodDefault<z.ZodNumber>;
     maxReminderChain: z.ZodDefault<z.ZodNumber>;
@@ -592,7 +599,7 @@ export declare const ReminderConfig: z.ZodPrefault<z.ZodObject<{
     streamFlushMs: z.ZodDefault<z.ZodNumber>;
     maxInterruptsPerTurn: z.ZodDefault<z.ZodNumber>;
     maxCandidates: z.ZodDefault<z.ZodNumber>;
-    maxIdle: z.ZodDefault<z.ZodNumber>;
+    maxIdle: z.ZodOptional<z.ZodNumber>;
     maxContextMessages: z.ZodDefault<z.ZodNumber>;
     maxContextChars: z.ZodDefault<z.ZodNumber>;
     maxToolExecutions: z.ZodDefault<z.ZodNumber>;
@@ -701,7 +708,8 @@ export declare const Source: z.ZodObject<{
                     }, z.core.$strict>>;
                 }, z.core.$strict>;
             }, z.core.$strict>;
-            reason: z.ZodOptional<z.ZodString>;
+            dangerous: z.ZodLiteral<true>;
+            reason: z.ZodString;
         }, z.core.$strict>], "kind">;
     }, z.core.$strict>, z.ZodObject<{
         format: z.ZodLiteral<"reminder/v4">;
@@ -793,7 +801,8 @@ export declare const Source: z.ZodObject<{
                     }, z.core.$strict>>;
                 }, z.core.$strict>;
             }, z.core.$strict>;
-            reason: z.ZodOptional<z.ZodString>;
+            dangerous: z.ZodLiteral<true>;
+            reason: z.ZodString;
         }, z.core.$strict>], "kind">;
     }, z.core.$strict>, z.ZodObject<{
         format: z.ZodLiteral<"reminder/v4">;
@@ -885,7 +894,8 @@ export declare const Source: z.ZodObject<{
                     }, z.core.$strict>>;
                 }, z.core.$strict>;
             }, z.core.$strict>;
-            reason: z.ZodOptional<z.ZodString>;
+            dangerous: z.ZodLiteral<true>;
+            reason: z.ZodString;
         }, z.core.$strict>], "kind">;
     }, z.core.$strict>, z.ZodObject<{
         format: z.ZodLiteral<"reminder/v4">;
@@ -993,7 +1003,8 @@ export declare const Source: z.ZodObject<{
                     }, z.core.$strict>>;
                 }, z.core.$strict>;
             }, z.core.$strict>;
-            reason: z.ZodOptional<z.ZodString>;
+            dangerous: z.ZodLiteral<true>;
+            reason: z.ZodString;
         }, z.core.$strict>], "kind">;
     }, z.core.$strict>, z.ZodObject<{
         format: z.ZodLiteral<"reminder/v4">;
@@ -1082,7 +1093,8 @@ export declare const Source: z.ZodObject<{
                     }, z.core.$strict>>;
                 }, z.core.$strict>;
             }, z.core.$strict>;
-            reason: z.ZodOptional<z.ZodString>;
+            dangerous: z.ZodLiteral<true>;
+            reason: z.ZodString;
         }, z.core.$strict>], "kind">;
     }, z.core.$strict>, z.ZodObject<{
         format: z.ZodLiteral<"reminder/v4">;
@@ -1167,7 +1179,8 @@ export declare const Source: z.ZodObject<{
                     }, z.core.$strict>>;
                 }, z.core.$strict>;
             }, z.core.$strict>;
-            reason: z.ZodOptional<z.ZodString>;
+            dangerous: z.ZodLiteral<true>;
+            reason: z.ZodString;
         }, z.core.$strict>], "kind">;
     }, z.core.$strict>], "on">>;
     diagnostics: z.ZodDefault<z.ZodArray<z.ZodObject<{
@@ -1241,7 +1254,8 @@ export declare function compileRule(input: unknown, limits?: CountLimitValues, d
                 } | undefined;
             };
         };
-        reason?: string | undefined;
+        dangerous: true;
+        reason: string;
     };
     title?: string | undefined;
     exclusiveGroup?: string | undefined;
@@ -1312,7 +1326,8 @@ export declare function compileRule(input: unknown, limits?: CountLimitValues, d
                 } | undefined;
             };
         };
-        reason?: string | undefined;
+        dangerous: true;
+        reason: string;
     };
     title?: string | undefined;
     exclusiveGroup?: string | undefined;
@@ -1383,7 +1398,8 @@ export declare function compileRule(input: unknown, limits?: CountLimitValues, d
                 } | undefined;
             };
         };
-        reason?: string | undefined;
+        dangerous: true;
+        reason: string;
     };
     title?: string | undefined;
     exclusiveGroup?: string | undefined;
@@ -1464,7 +1480,8 @@ export declare function compileRule(input: unknown, limits?: CountLimitValues, d
                 } | undefined;
             };
         };
-        reason?: string | undefined;
+        dangerous: true;
+        reason: string;
     };
     title?: string | undefined;
     exclusiveGroup?: string | undefined;
@@ -1532,7 +1549,8 @@ export declare function compileRule(input: unknown, limits?: CountLimitValues, d
                 } | undefined;
             };
         };
-        reason?: string | undefined;
+        dangerous: true;
+        reason: string;
     };
     title?: string | undefined;
     exclusiveGroup?: string | undefined;
@@ -1596,7 +1614,8 @@ export declare function compileRule(input: unknown, limits?: CountLimitValues, d
                 } | undefined;
             };
         };
-        reason?: string | undefined;
+        dangerous: true;
+        reason: string;
     };
     title?: string | undefined;
     exclusiveGroup?: string | undefined;

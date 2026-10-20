@@ -1,8 +1,13 @@
-import test, { type TestContext } from 'node:test'
+import test, { after, type TestContext } from 'node:test'
 import assert from 'node:assert/strict'
 import { createDenialTickets } from '../lib/reminder-runtime/denial.js'
 import { createReminderRuntime, type RuntimeOptions } from '../lib/reminder-runtime/runtime.js'
 import { executeReminderMatch } from '../lib/reminder-runtime/matcher.js'
+import { createBoundedMatcher } from '../src/bounded-matcher.js'
+// 真实执行端口：匹配、判定器、线程池全是真的，测试只驱动事件与边界。
+const matcher = createBoundedMatcher({ timeoutMs: 2000, startupMs: 5000 })
+after(async () => { await matcher.close() })
+const port: NonNullable<RuntimeOptions['execute']> = (input, signal, timing) => matcher.detect(input, signal, timing)
 
 const verdict = { sourceId: 's', ruleId: 'r', reason: '不得删除文件' }
 const tickets = (now = () => 1000) => createDenialTickets(50, now)
@@ -13,13 +18,13 @@ type Outcome = { kind: 'allow' } | { kind: 'deny'; reason: string }
 /** A live reminder runtime whose matching is the shipped implementation, not a stub. */
 function runtime(t: TestContext, options: Partial<RuntimeOptions> = {}) {
   const instance = createReminderRuntime({ config: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 },
-    execute: async input => 'reminder' in input ? executeReminderMatch(input.reminder) : { ok: true }, ...options })
+    execute: port, ...options })
   t.after(() => instance.close())
   return instance
 }
 
 const denyRule = (reason: string, tool = 'blocked') => ({ format: 'reminder/v4', id: 'blocked', on: 'tool.before-execute',
-  text: '这次调用被规则拦下', when: { tool }, effect: { kind: 'deny-tool', reason, deliver: { model: { once: 'surface' } } } })
+  text: '这次调用被规则拦下', when: { tool }, effect: { kind: 'deny-tool', dangerous: true, reason, deliver: { model: { once: 'surface' } } } })
 const remindRule = { format: 'reminder/v4', id: 'notice', on: 'tool.succeeded', text: 'NOTICE', when: { tool: 'probe' },
   effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } }
 
@@ -124,7 +129,7 @@ const exits: Exit[] = [
   { name: '前置规则存在但工具名不同时放行', rules: [denyRule('不得删除文件')], expected: 'allow' },
   { name: '工具名相同但参数条件不满足时放行', rules: [{ format: 'reminder/v4', id: 'blocked', on: 'tool.before-execute',
     text: '只能读 D 盘', when: { tool: 'blocked', arguments: { path: { regex: '^D:' } } },
-    effect: { kind: 'deny-tool', reason: '只能读 D 盘', deliver: { model: { once: 'surface' } } } }],
+    effect: { kind: 'deny-tool', dangerous: true, reason: '只能读 D 盘', deliver: { model: { once: 'surface' } } } }],
     drive: instance => callWith(instance, 'blocked', undefined, {}) , expected: 'allow' },
   { name: '规则范围不含本会话时放行', rules: [denyRule('不得删除文件')], scope: { sessionIds: ['other'] }, expected: 'allow' },
   { name: '规则被开关关闭时放行，不把停用当成拒绝', rules: [denyRule('不得删除文件')],
@@ -145,7 +150,9 @@ const exits: Exit[] = [
     }, expected: '提醒策略已变更，本次调用需重新评估' },
   { name: '同一个调用ID被重复评估时拒绝，不去猜旧结论', rules: [denyRule('不得删除文件')],
     drive: async instance => { await callWith(instance, 'blocked', 'call-twice'); return callWith(instance, 'blocked', 'call-twice') },
-    expected: '提醒策略未能完成全部规则的评估' },
+    // 第二次同 callId 的调用没有属于自己的评估，所以拒绝。原因是「重复」而不是「规则没评完」：
+    // 两者都拒绝，但一个是入口去重、一个是规则超时，修起来完全不是一回事。
+    expected: '同一调用已有一次未完成的评估，本次调用未执行' },
   { name: '一次拒绝不污染后一次调用', rules: [denyRule('不得删除文件')],
     drive: async instance => { assert.equal(reason(await call(instance, 'blocked')), '不得删除文件'); return call(instance, 'read') },
     expected: 'allow' },

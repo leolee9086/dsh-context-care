@@ -1,9 +1,16 @@
-import test from 'node:test'
+import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
+import { createBoundedMatcher } from '../src/bounded-matcher.js'
 import { createReminderRuntime } from '../lib/reminder-runtime/runtime.js'
 import { ReminderRule } from '../lib/reminder-runtime/schema.js'
 import type { MessageView } from '../lib/reminder-runtime/request-context.js'
 import type { ClaimBookValue } from '../lib/reminder-runtime/claims.js'
+// 真实的执行端口：匹配由 worker 线程池完成。规则条件与事件本来就互相匹配，
+// 不需要替身来伪造"命中"。
+const matcher = createBoundedMatcher({ timeoutMs: 2000, startupMs: 5000 })
+after(async () => { await matcher.close() })
+const port = (input: Parameters<typeof matcher.detect>[0], signal: AbortSignal, timing: Parameters<typeof matcher.detect>[2]) =>
+  matcher.detect(input, signal, timing)
 
 const config = { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 }
 const stickyRule = (sticky: { lifetime: number; cooldown: number; clock?: 'main-request' | 'human-turn' }) => ({
@@ -33,7 +40,7 @@ async function rounds(runtime: ReturnType<typeof createReminderRuntime>, count: 
 }
 
 test('sticky 首次投递后按寿命继续，然后冷却，再需新事件', async t => {
-  const runtime = createReminderRuntime({ config, execute: async () => ({ ok: true }) })
+  const runtime = createReminderRuntime({ config, execute: port })
   t.after(() => runtime.close())
   runtime.registerSource({ sourceId: 'sticky-source', plugin: 'test', revision: 1,
     rules: [stickyRule({ lifetime: 3, cooldown: 2 })] })
@@ -48,7 +55,7 @@ test('sticky 首次投递后按寿命继续，然后冷却，再需新事件', a
 })
 
 test('激活期间的重复命中被吸收，不重投也不延长寿命', async t => {
-  const runtime = createReminderRuntime({ config, execute: async () => ({ ok: true }) })
+  const runtime = createReminderRuntime({ config, execute: port })
   t.after(() => runtime.close())
   runtime.registerSource({ sourceId: 'sticky-source', plugin: 'test', revision: 1,
     rules: [stickyRule({ lifetime: 2, cooldown: 0 })] })
@@ -64,7 +71,7 @@ test('激活期间的重复命中被吸收，不重投也不延长寿命', async
 })
 
 test('human-turn 时钟只在新的真人输入时推进', async t => {
-  const runtime = createReminderRuntime({ config, execute: async () => ({ ok: true }) })
+  const runtime = createReminderRuntime({ config, execute: port })
   t.after(() => runtime.close())
   runtime.registerSource({ sourceId: 'sticky-source', plugin: 'test', revision: 1,
     rules: [stickyRule({ lifetime: 2, cooldown: 0, clock: 'human-turn' })] })
@@ -81,7 +88,7 @@ test('human-turn 时钟只在新的真人输入时推进', async t => {
 
 test('sticky 激活只在开启时占用一次共享额度', async t => {
   let book: ClaimBookValue = { buckets: [] }
-  const runtime = createReminderRuntime({ config, execute: async () => ({ ok: true }),
+  const runtime = createReminderRuntime({ config, execute: port,
     updateClaims: async change => { book = change(book); return book } })
   t.after(() => runtime.close())
   runtime.registerSource({ sourceId: 'sticky-quota', plugin: 'test', revision: 1, rules: [{

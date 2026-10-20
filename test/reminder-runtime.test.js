@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { createReminderRuntime } from '../src/reminder-runtime/index.js'
 import { createBoundedMatcher } from '../src/bounded-matcher.js'
 import { setTimeout as delay } from 'node:timers/promises'
+import { asBatch } from './batch-execute.ts'
 
 const rule = { format: 'reminder/v4', id: 'no-any', on: 'tool.succeeded', text: '禁止使用 any',
   when: { tool: 'read', arguments: { file_path: { regex: '\\.ts$', flags: 'i' } } }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } }
@@ -70,7 +71,7 @@ test('async judge resolves; CPU loop is terminated and later independent rules c
 test('source replacement during analysis cannot publish old results', async t => {
   let started
   const ready = new Promise(resolve => { started = resolve })
-  const runtime = fixture(t, { execute: async (_input, signal) => { started(); await delay(1000, null, { signal }); return { ok: true } } })
+  const runtime = fixture(t, { execute: asBatch(async (_input, signal) => { started(); await delay(1000, null, { signal }); return { ok: true } }) })
   const handle = runtime.registerSource(source)
   const pending = runtime.submit(event('1'))
   await ready
@@ -100,7 +101,7 @@ test('admission freezes sources before storage waits and bounds pending writes',
   let writes = 0, executions = 0
   const runtime = fixture(t, { config: { maxQueued: 1, maxConcurrent: 1 },
     save: async () => { if (++writes === 1) { entered(); await gate } },
-    execute: async () => { executions++; return { ok: true } } })
+    execute: asBatch(async () => { executions++; return { ok: true } }) })
   t.after(() => release())
   const handle = runtime.registerSource(source)
   const first = runtime.submit(event('1'))
@@ -120,7 +121,7 @@ test('cancellation during storage admission prevents evaluation and close drains
   const ready = new Promise(resolve => { entered = resolve })
   let writes = 0, executions = 0
   const runtime = fixture(t, { save: async () => { if (++writes === 1) { entered(); await gate } },
-    execute: async () => { executions++; return { ok: true } } })
+    execute: asBatch(async () => { executions++; return { ok: true } }) })
   t.after(() => release())
   runtime.registerSource(source)
   const controller = new AbortController()
@@ -153,10 +154,10 @@ test('restart reconciles committed reservations and inherited surface suppresses
 test('analyzers share a base input and stale disposers preserve replacements', async t => {
   const module = new URL('./fixtures/reminder-analysis.js', import.meta.url).href
   const observed = []
-  const runtime = fixture(t, { execute: async input => {
+  const runtime = fixture(t, { execute: asBatch(async input => {
     if (input.analysis) { observed.push(Object.keys(input.analysis.event.facts)); return { ready: true } }
     return { ok: true }
-  } })
+  }) })
   const dispose = runtime.registerAnalyzer({ ref: 'one', revision: 1, module })
   await dispose()
   runtime.registerAnalyzer({ ref: 'one', revision: 2, module })
@@ -259,7 +260,7 @@ test('production deadlines execute short async judges on hot workers and retain 
 })
 
 test('session and preset scopes apply to catalog, submission and delivery', async t => {
-  const runtime = fixture(t, { execute: async () => ({ ok: true }) })
+  const runtime = fixture(t, { execute: asBatch(async () => ({ ok: true })) })
   const scopedRule = { ...rule, id: 'scoped-rule', scope: { agentPresets: ['preset-a'] } }
   runtime.registerSource({ ...source, sourceId: 'scoped-source',
     scope: { sessionIds: ['s'], agentPresets: ['preset-a'] }, rules: [scopedRule] })

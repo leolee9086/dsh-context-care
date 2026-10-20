@@ -22,6 +22,7 @@ import { registerTimeoutHostCases } from './reminder-timeout-cases.ts'
 import { registerRecoveryHostCases } from './reminder-recovery-cases.ts'
 import { preV4State } from './fixtures/reminder-upgrade.ts'
 import { registerScopeHostCases } from './reminder-scope-host-cases.ts'
+import { asBatch } from './batch-execute.ts'
 
 // This explicitly selected test acts as an external Host. The plugin itself never
 // locates or imports a Harness checkout, and the default test suite is standalone.
@@ -243,7 +244,7 @@ test('a deny rule stops its own tool through the real registry and leaves other 
   const ctx = await owned.open()
   ctx.effect(() => ctx.get('reminderRules').registerSource({ sourceId: 'deny-registry', plugin: 'test', revision: 1,
     rules: [{ format: 'reminder/v4', id: 'blocked', on: 'tool.before-execute', text: '这次调用被规则拦下',
-      when: { tool: 'deny_probe' }, effect: { kind: 'deny-tool', reason: '不得调用 deny_probe',
+      when: { tool: 'deny_probe' }, effect: { kind: 'deny-tool', dangerous: true, reason: '不得调用 deny_probe',
         deliver: { model: { once: 'surface' } } } }] }).dispose)
   // The bodies record that they ran: a denial must not reach the tool at all.
   const executed = []
@@ -372,7 +373,7 @@ test('shared reminder reservations compensate failed session saves and retry fai
   const table = ctx.storageDomain.get('context_care_reminder_claims').table('claims')
   const sessions = ctx.storageDomain.get('context_care_reminders').table('sessions')
   let failSession = false, failClaim = false
-  const runtime = createReminderRuntime({ execute: async () => ({ ok: true }),
+  const runtime = createReminderRuntime({ execute: asBatch(async () => ({ ok: true })),
     save: (id, state) => { if (failSession) throw new Error('session-disk'); return sessions.put(id, state) },
     updateClaims: change => { if (failClaim) throw new Error('claim-disk'); return table.update('global', change) } })
   t.after(() => runtime.close())
@@ -409,7 +410,7 @@ test('shared reminder window grants a new quota on the next night', async t => {
   const { createReminderRuntime } = await pluginModule('reminder-runtime/index.js')
   const table = ctx.storageDomain.get('context_care_reminder_claims').table('claims')
   let at = new Date(2026, 9, 14, 23).getTime()
-  const runtime = createReminderRuntime({ wallNow: () => at, execute: async () => ({ ok: true }),
+  const runtime = createReminderRuntime({ wallNow: () => at, execute: asBatch(async () => ({ ok: true })),
     updateClaims: change => table.update('global', change) })
   t.after(() => runtime.close())
   runtime.registerSource({ sourceId: 'shared-night', plugin: 'test', revision: 1, rules: [{

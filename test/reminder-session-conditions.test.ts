@@ -1,8 +1,13 @@
-import test, { type TestContext } from 'node:test'
+import test, { after, type TestContext } from 'node:test'
 import assert from 'node:assert/strict'
 import { createReminderRuntime, type RuntimeOptions, type ReminderSource } from '../lib/reminder-runtime/runtime.js'
 import { normalizeScope, matchesScope, type RecipientFacts, type RecipientCondition } from '../lib/reminder-runtime/scope.js'
 import type { ClaimBookValue } from '../lib/reminder-runtime/claims.js'
+import { createBoundedMatcher } from '../src/bounded-matcher.js'
+const matcher = createBoundedMatcher({ timeoutMs: 2000, startupMs: 5000 })
+after(async () => { await matcher.close() })
+const port = (input: Parameters<typeof matcher.detect>[0], signal: AbortSignal, timing: Parameters<typeof matcher.detect>[2]) =>
+  matcher.detect(input, signal, timing)
 
 const name: RecipientCondition = { kind: 'compare', field: 'session.agentPresetName', op: 'eq', value: '织' }
 const model: RecipientCondition = { kind: 'compare', field: 'session.model', op: 'contains', value: 'gpt-' }
@@ -12,7 +17,7 @@ const source: ReminderSource = { sourceId: 'notes', plugin: 'siyuan', revision: 
 const event = (callId: string, sessionId = 's') => ({ sessionId, callId, rootCallId: callId, name: 'write' })
 const facts = (): RecipientFacts => ({ agentPreset: 'zhi', agentPresetName: '织', provider: 'route', model: 'gpt-6' })
 function fixture(t: TestContext, options: RuntimeOptions) {
-  const runtime = createReminderRuntime({ execute: async () => ({ ok: true }), ...options })
+  const runtime = createReminderRuntime({ execute: port, ...options })
   t.after(() => runtime.close())
   return runtime
 }
@@ -73,10 +78,13 @@ test('来源、规则与核心资格相交；宿主名称和模型覆盖事件�
 
 test('模型在匹配期间或候选等待期间改变，都在下一阶段重新判定', async t => {
   let current = facts(), changeDuringMatch = true
-  const runtime = fixture(t, { resolveIdentity: async () => current, execute: async () => {
-    if (changeDuringMatch) current = { ...facts(), model: 'other' }
-    return { ok: true }
-  } })
+  // 身份在匹配期间改变：把改变挂到真实端口的调用上，不再伪造判定结果。
+  let switched = false
+  const runtime = fixture(t, { resolveIdentity: async () => current,
+    execute: (input, signal, timing) => {
+      if (changeDuringMatch && !switched) { switched = true; current = { ...facts(), model: 'other' } }
+      return port(input, signal, timing)
+    } })
   runtime.registerSource(source)
   await runtime.submit(event('switch-during-match'))
   assert.equal(runtime.snapshot('s').candidates.length, 0)

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { ZodError } from 'zod'
 // pnpm test builds the same runtime that the public JS adapter imports.
 import { createReminderRuntime } from '../lib/reminder-runtime/runtime.js'
+import { asBatch } from './batch-execute.ts'
 
 const config = { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 }
 const source = () => ({ sourceId: 'boundary-source', plugin: 'test', revision: 1, rules: [{
@@ -24,7 +25,7 @@ test('runtime rejects malformed persisted records before accepting work', () => 
 })
 
 test('runtime restores legacy records without windows or source signatures', async t => {
-  const original = createReminderRuntime({ config, execute: async () => ({ ok: true }) })
+  const original = createReminderRuntime({ config, execute: asBatch(async () => ({ ok: true })) })
   t.after(() => original.close())
   original.registerSource(source())
   await original.submit(event())
@@ -43,7 +44,7 @@ test('runtime restores legacy records without windows or source signatures', asy
 
 test('runtime restores string policy epochs and rejects candidates after a policy change', async t => {
   let policy = '1:0:false'
-  const original = createReminderRuntime({ config, epoch: () => policy, execute: async () => ({ ok: true }) })
+  const original = createReminderRuntime({ config, epoch: () => policy, execute: asBatch(async () => ({ ok: true })) })
   t.after(() => original.close())
   original.registerSource(source())
   await original.submit(event())
@@ -63,7 +64,7 @@ test('runtime restores string policy epochs and rejects candidates after a polic
 })
 
 test('runtime restores signed pending candidates and isolates entry snapshots', async t => {
-  const original = createReminderRuntime({ config, execute: async () => ({ ok: true }) })
+  const original = createReminderRuntime({ config, execute: asBatch(async () => ({ ok: true })) })
   t.after(() => original.close())
   original.registerSource(source())
   await original.submit(event())
@@ -86,7 +87,7 @@ for (const [name, result] of [
   ['non-JSON evidence', { ok: true, evidence: () => 'invalid' }],
 ] satisfies [string, unknown][]) {
   test(`runtime records invalid executor ${name} as failure without delivering`, async t => {
-    const runtime = createReminderRuntime({ config, execute: async () => result })
+    const runtime = createReminderRuntime({ config, execute: asBatch(async () => result) })
     t.after(() => runtime.close())
     runtime.registerSource(source())
     await runtime.submit(event())
@@ -100,8 +101,8 @@ for (const [name, result] of [
 }
 
 test('runtime rejects invalid analyzer facts and still evaluates independent rules', async t => {
-  const runtime = createReminderRuntime({ config, execute: async input =>
-    'analysis' in input ? ['not-a-fact-record'] : { ok: true } })
+  const runtime = createReminderRuntime({ config, execute: asBatch(async input =>
+    'analysis' in input ? ['not-a-fact-record'] : { ok: true }) })
   t.after(() => runtime.close())
   // The injected execution port does not import this module; it returns invalid wire data.
   runtime.registerAnalyzer({ ref: 'boundary-analyzer', revision: 1, module: import.meta.url })
@@ -115,13 +116,13 @@ test('runtime rejects invalid analyzer facts and still evaluates independent rul
 
 test('runtime detaches registration, submitted events and returned snapshots from callers', async t => {
   let observedPath: unknown
-  const runtime = createReminderRuntime({ config, execute: async input => {
+  const runtime = createReminderRuntime({ config, execute: asBatch(async input => {
     if ('reminder' in input) {
       const args = input.reminder.event.arguments
       if (args && typeof args === 'object' && !Array.isArray(args)) observedPath = args.file_path
     }
     return { ok: true }
-  } })
+  }) })
   t.after(() => runtime.close())
   const definition = source(), submitted = event()
   runtime.registerSource(definition)

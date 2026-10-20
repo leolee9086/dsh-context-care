@@ -11,16 +11,16 @@ import type { MessageView } from './request-context.js'
 import { matchesScope } from './scope.js'
 import type { RecipientIdentity } from './scope.js'
 import { changeClaims, quotaFor, hasClaim } from './claims.js'
-import { createDenialTickets, openPreExecution } from './denial.js'
+import { createDenialTickets, openPreExecution, codeForReason, codeForFailure } from './denial.js'
 import { SESSION_EVENT_TYPES } from './generated/session-events.js'
 
 /** Built-in names, which a custom event may not shadow. */
 const BUILT_IN_EVENT_NAMES = new Set<string>(SESSION_EVENT_TYPES)
 import { parseOrThrow } from './schema-error.js'
-import type { DenialVerdict, PreExecution } from './denial.js'
+import type { DenialVerdict, PreExecution, UnfinishedCode } from './denial.js'
 import type { ClaimOperation } from './claims.js'
-import { Detector, SessionState, Event, MatchResult, AnalysisFacts, jsonCopy, errorMessage, errorDetail } from './state.js'
-import type { CandidateValue, StateValue, SourceValue, RuleValue, DetectorValue, Rejection, RegisteredSource, Run, RuntimeOptions, RequestInput, CollectInput, ToolPreparation, EventValue } from './state.js'
+import { Detector, SessionState, Event, MatchResult, BatchResult, BatchAnswer, AnalysisFacts, jsonCopy, errorMessage, errorDetail } from './state.js'
+import type { CandidateValue, StateValue, SourceValue, RuleValue, DetectorValue, Rejection, RegisteredSource, Run, RuntimeOptions, RequestInput, CollectInput, ToolPreparation, EventValue, WorkItem } from './state.js'
 export { ReminderConfig } from './schema.js'
 export { REMINDER_DOMAIN } from './state.js'
 export type { RuntimeOptions } from './state.js'
@@ -135,6 +135,80 @@ export function createReminderRuntime({ config: input, entries = [], templates, 
     if (!updateClaims) throw new Error('reminder-shared-storage-unavailable')
     return updateClaims(book => changeClaims(book, { ...operation, at: wallNow(), maxBytes: config.maxClaimBytes }))
   }
+  /**
+   * 待落盘的最新快照，每个会话一份。
+   *
+   * 状态是整份覆盖的，所以"写最新的一份"与"把每一次中间态都写一遍"等价，
+   * 但前者在慢盘时只写一次、后者会把队列堆成 N 份。只留最新那份是关键：
+   * 顺序由"只有一个写者"保证，积压由"合并"消除。
+   */
+  const dirty = new Map<string, StateValue>()
+  /** 每个会话当前正在跑的写盘循环；有它就意味着写者已经存在，不再另起一个。 */
+  const flushing = new Map<string, Promise<void>>()
+
+  /**
+   * 一个会话只有一个写者，从头到尾把当前最新快照写出去，写完再看有没有新的。
+   * 失败不重试：把快照放回待写位，等下一次状态变更再试——
+   * 无限重试会把一次坏盘变成忙等。
+   */
+  /**
+   * 写者刻意**不设**自己的超时。
+   *
+   * 底层 save 一旦发出就取消不了；这里若放弃等待，下一次写入就会和它并发，
+   * 落盘顺序又乱了——那正是这套机制要修的东西。所以写者只做两件事：
+   * 严格串行、只留最新一份。慢盘时它只是慢，不会错。
+   *
+   * 失败的那份留在 dirty 里，等下一次状态变更、或者 close 时重试。
+   * 没有新变更时它就躺着——这是写回策略的固有性质：盘上可能暂时落后于内存，
+   * 但永远不会比内存新。failures 让这个落后可观测。
+   */
+  async function flush(id: string) {
+    while (dirty.has(id)) {
+      const next = dirty.get(id) as StateValue
+      dirty.delete(id)
+      try { await save(id, next) }
+      catch (error) {
+        // 快照放回待写位，等下一次状态变更重试；错误照抛给等着的那一方——
+        // 写入失败必须能被调用方看见，否则回滚和预留补偿就都不会发生。
+        dirty.set(id, next)
+        throw error
+      }
+      failures.delete(id)
+    }
+  }
+
+  /**
+   * 把一份状态交给写者，最多等 storageTimeoutMs。
+   * 超时不抛错：内存状态照常前进，下一次写入会把整份快照补上。
+   * 真正的失败仍然抛给调用方，让同一次收集里的补偿逻辑照常跑。
+   */
+  async function persist(id: string, next: StateValue) {
+    // 关闭之后的变更不再入队：没有写者会来认领它，等它只会让 close 白等。
+    if (closed) return
+    dirty.set(id, next)
+    let writing = flushing.get(id)
+    if (writing === undefined) {
+      writing = flush(id).finally(() => flushing.delete(id))
+      // 写者自己的失败由每一个 await 它的调用方各自接收；这里先吞一次，
+      // 免得"没人等它"的时刻变成未处理拒绝。
+      writing.catch(() => {})
+      flushing.set(id, writing)
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        writing,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('reminder-storage-timeout')), config.storageTimeoutMs)
+        }),
+      ])
+    } catch (error) {
+      failures.set(id, error)
+      // 超时是盘慢，不是内容错：让状态在内存里前进，这一轮的判定不该被磁盘速度决定。
+      if (errorMessage(error) === 'reminder-storage-timeout') return
+      throw error
+    } finally { clearTimeout(timer) }
+  }
   async function update<T>(id: string, change: (state: StateValue) => T | Promise<T>, onFailure?: () => Promise<unknown>) {
     return serial(id, async () => {
       try {
@@ -154,8 +228,7 @@ export function createReminderRuntime({ config: input, entries = [], templates, 
           next.candidates.splice(index, 1)
         }
         if (Buffer.byteLength(JSON.stringify(next)) > config.maxBytes) throw new Error('reminder-retained-budget-exceeded')
-        try { await save(id, next); failures.delete(id) }
-        catch (error) { failures.set(id, error); throw error }
+        await persist(id, next)
         records.set(id, next)
         return value
       } catch (error) {
@@ -275,6 +348,8 @@ export function createReminderRuntime({ config: input, entries = [], templates, 
     } finally { pumping = false }
   }
   async function evaluate(run: Run) {
+    // 预算从评估真正开始时起算，只覆盖分析器与规则匹配。
+    run.startBudget?.()
     const { event, items, controller, deadline } = run
     const blockedGroups = new Set<string>(), winners = new Set<string>(), results: CandidateValue[] = []
     // Only a pre-execution round can still stop its call; correlation uses the registry's execution token.
@@ -303,25 +378,177 @@ export function createReminderRuntime({ config: input, entries = [], templates, 
           ...errorDetail(error), eventId: event.callId })
       } finally { clearTimeout(timer); controller.signal.removeEventListener('abort', abort) }
     }
-    for (const item of items) {
-      const { source, token, rule, policy } = item
-      if (controller.signal.aborted || now() >= deadline) { diagnostics.push({ status: 'round-timeout', eventId: event.callId }); break }
-      if (rule.exclusiveGroup && (blockedGroups.has(rule.exclusiveGroup) || winners.has(rule.exclusiveGroup))) continue
-      if (sources.get(source.sourceId)?.token !== token || epoch(event.sessionId, source.sourceId, rule.id) !== policy) continue
+    // 一次投递把这一轮的规则全送过去：事件只序列化一次，这是批量唯一的收益。
+    // 但「批量完成」不等于「规则完成」——每条规则各自持有一份结局，
+    // 批量只是送它们过去的那趟车，车翻了不等于乘客都出事了。
+    type BatchEntry = { item: WorkItem; skip?: string }
+    const entries: BatchEntry[] = items.map(item => {
+      const { source, rule, token, policy } = item
+      // 只有主线程才知道的两件事，在交给 worker 之前先查一遍：来源是否已经换代，
+      // 判定器是否已经不在了。两者处理方式不同，所以不合并成一个 skip。
+      if (sources.get(source.sourceId)?.token !== token || epoch(event.sessionId, source.sourceId, rule.id) !== policy) {
+        return { item, skip: 'reminder-source-changed' }
+      }
+      if (rule.judge && (item.judge?.revision !== rule.judge.revision || detectors.get(rule.judge.ref) !== item.judge)) {
+        return { item, skip: 'reminder-judge-unavailable' }
+      }
+      return { item }
+    })
+    const queued = entries.filter(entry => entry.skip === undefined).map(entry => entry.item)
+    // 判定器是别人的代码，需要它自己的一份时间预算，也需要只掐它一个的终止边界。
+    // 这两件事都建立在「一次往返只跑这一条」上，所以带判定器的规则不进批量。
+    const batched = queued.filter(item => item.rule.judge === undefined)
+    const solo = queued.filter(item => item.rule.judge !== undefined)
+    type Answer = { match?: unknown; error?: unknown }
+    const answers = new Map<WorkItem, Answer>()
+    // 每条规则一个结算口：谁的回执先到谁先落定，和同批的其它规则毫无关系。
+    const settled = new Map<WorkItem, (value: Answer) => void>()
+    const settles = queued.map(item => new Promise<Answer>(resolve => settled.set(item, resolve)))
+    const settleItem = (item: WorkItem, value: Answer) => {
+      const finish = settled.get(item)
+      if (finish === undefined) return
+      settled.delete(item)
+      answers.set(item, value)
+      finish(value)
+    }
+    const outstanding = () => queued.filter(item => settled.has(item))
+    /** 这条规则的一行代码还没被执行过（线程被换掉了），换一趟重投不会重复任何副作用。 */
+    const restarted = (error: unknown) => (error as { retryable?: unknown } | null | undefined)?.retryable === true
+    /** 一条规则单飞：批量没把它送到时，用它自己的一趟往返，结局依然只属于它自己。 */
+    const alone = async (item: WorkItem): Promise<Answer> => {
       const child = new AbortController()
       const abort = () => child.abort(controller.signal.reason)
       controller.signal.addEventListener('abort', abort, { once: true })
-      const workTimeoutMs = Math.min(config.ruleTimeoutMs, rule.judge?.timeoutMs ?? config.ruleTimeoutMs)
+      const workTimeoutMs = Math.min(config.ruleTimeoutMs, item.rule.judge?.timeoutMs ?? config.ruleTimeoutMs)
       let timer: ReturnType<typeof setTimeout> | undefined
       const onDispatch = () => { timer ??= setTimeout(() => child.abort(new Error('reminder-rule-timeout')), Math.max(0, Math.min(workTimeoutMs, deadline - now()))) }
       if (!dispatches) onDispatch()
       try {
-        const judge = item.judge
-        if (rule.judge && (judge?.revision !== rule.judge.revision || detectors.get(rule.judge.ref) !== judge)) throw new Error('reminder-judge-unavailable')
-        const result = MatchResult.parse(await execute({ reminder: { condition: rule.condition, event, maxBytes: config.maxBytes, countLimits: config.countLimits,
-          ...(judge && rule.judge ? { judge, params: rule.judge.params ?? null } : {}) } }, child.signal, { onDispatch, workTimeoutMs }))
-        if (child.signal.aborted || controller.signal.aborted || now() >= deadline) throw child.signal.reason ?? new Error('reminder-round-timeout')
-        if (sources.get(source.sourceId)?.token !== token || epoch(event.sessionId, source.sourceId, rule.id) !== policy) continue
+        const result = MatchResult.parse(await execute({ reminder: { condition: item.rule.condition, event,
+          maxBytes: config.maxBytes,
+          ...(item.judge ? { judge: item.judge, params: item.rule.judge?.params ?? null } : {}) } }, child.signal, { onDispatch, workTimeoutMs }))
+        if (child.signal.aborted || controller.signal.aborted) throw child.signal.reason ?? new Error('reminder-round-timeout')
+        return { match: result }
+      } catch (error) {
+        return { error }
+      } finally { clearTimeout(timer); controller.signal.removeEventListener('abort', abort) }
+    }
+    /** 单飞两次：第二趟时线程上只有它，再失败就是它自己的结局，不再是别人牵连的。 */
+    const resolveAlone = async (item: WorkItem) => {
+      const first = await alone(item)
+      settleItem(item, restarted(first.error) ? await alone(item) : first)
+    }
+    // 一条回执的处置只有这一处：形状坏掉的只算它自己失败，不牵连同批的其它规则。
+    const record = (back: unknown) => {
+      if (back === null || typeof back !== 'object') return
+      const key = (back as { key?: unknown }).key
+      if (typeof key !== 'string') return
+      const item = batched[Number(key)]
+      if (!item) return
+      const parsed = BatchAnswer.safeParse(back)
+      settleItem(item, !parsed.success ? { error: new Error('reminder-result-invalid') }
+        : 'match' in parsed.data ? { match: parsed.data.match } : { error: parsed.data.error })
+    }
+    // 整轮在投递前就被取消了：每条规则立刻拿到自己的结局，不让谁等一个不会来的回执。
+    if (controller.signal.aborted) for (const item of queued) settleItem(item, { error: controller.signal.reason })
+    // 判定器规则各自单飞，立刻出发：它们互不等待，也不等那趟批量。
+    // 判定器规则不进批量：它们要自己的一份预算，也要能只掐自己。
+    // 注意：批量被打断后，对没拿到回执的规则会重投一次。纯条件匹配是幂等的，
+    // 判定器是插件代码——契约要求它无副作用，有副作用的判定器会因此执行两次。
+    for (const item of solo) if (!controller.signal.aborted) void resolveAlone(item)
+    if (batched.length && !controller.signal.aborted) {
+      const child = new AbortController()
+      const abort = () => child.abort(controller.signal.reason)
+      controller.signal.addEventListener('abort', abort, { once: true })
+      // 批量只省往返，不该让一批获得比单条更多的时间。
+      // 原来这里拿的是「整轮剩余」，于是一条规则卡死就能把整轮预算吃光：
+      // 同批其它规则的重投全部立刻超时，诊断里把「我没算过」写成 timed-out。
+      // 取单条上限之后，卡死那条只吃掉自己那份，剩下的预算够其它规则重投。
+      const workTimeoutMs = Math.min(config.ruleTimeoutMs, Math.max(1, deadline - now()))
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const onDispatch = () => { timer ??= setTimeout(() => child.abort(new Error('reminder-rule-timeout')), workTimeoutMs) }
+      if (!dispatches) onDispatch()
+      // 这趟车不等它的整体完成：每条规则自己等自己的回执，谁先到谁先落定。
+      // 收尾用自吞的 async 块：.finally() 返回的是新 promise，收尾链自己出错时
+      // 没有任何人接，会变成进程级的未处理拒绝，被算到别的用例头上。
+      void (async () => {
+        try {
+          const raw = await execute({ reminderBatch: {
+            event, maxBytes: config.maxBytes,
+            // 留一点余量，让工作侧先于观察侧停下：这样已经算完的规则才能把结果带回来。
+            budgetMs: Math.max(0, workTimeoutMs - 5),
+            rules: batched.map((item, index) => ({ key: String(index), condition: item.rule.condition })),
+          } }, child.signal, { onDispatch, workTimeoutMs, onItem: record })
+          // 收尾回执再走一遍同一条处置：中途上报的已经落地，这里补的是最后那几条。
+          for (const back of BatchResult.parse(raw).items) record(back)
+        } catch (error) {
+          // 车翻了。已经落定的规则不受影响，还在等回执的各自补一趟——
+          // 线程虽然没了，这些规则一行都没执行过，换线程重投是安全的。
+          diagnostics.push({ status: 'batch-failed', message: errorMessage(error), ...errorDetail(error), eventId: event.callId })
+        } finally {
+          clearTimeout(timer); controller.signal.removeEventListener('abort', abort)
+        }
+        // 工作侧提前停下或整趟失败时，没拿到回执的规则各自单飞，而不是一起作废。
+        await Promise.all(outstanding().map(resolveAlone))
+      })().catch(() => {})
+    }
+    // 等每条规则自己的结局。一条卡住不会拖住别的条，它们的结算口早已调用。
+    // 但不能只押在 settles 上：外部执行端口不保证会返回，端口一旦不回，
+    // 这个 await 就没有出口，evaluate 不返回、run.done 不完成，
+    // 这个会话之后所有 submit/collect 都会等在 settle(sessionId) 上。
+    // 轮次到点就把还没结算的按超时收掉，让这一轮一定收得了尾。
+    await Promise.race([
+      Promise.all(settles),
+      new Promise<void>(resolve => {
+        const timer = setTimeout(resolve, Math.max(0, deadline - now()))
+        timer.unref?.()
+      }),
+    ])
+    for (const item of outstanding()) settleItem(item, { error: new Error('reminder-round-timeout') })
+    // 整轮被取消时还没结局的规则：补一趟单飞，让每条规则都有属于自己的答案。
+    for (const item of outstanding()) {
+      if (controller.signal.aborted) break
+      await resolveAlone(item)
+    }
+    for (const entry of entries) {
+      const { item } = entry
+      const { source, token, rule, policy } = item
+      // 预算只由 run.timer 的中止表达；此处再比一次墙钟会让同一份工作出现两种判定。
+      if (controller.signal.aborted) { diagnostics.push({ status: 'round-timeout', eventId: event.callId }); break }
+      if (rule.exclusiveGroup && (blockedGroups.has(rule.exclusiveGroup) || winners.has(rule.exclusiveGroup))) continue
+      // 预检就不可用：来源换代只是跳过这一条，判定器没了则是这一轮少了一个答案。
+      if (entry.skip === 'reminder-source-changed') continue
+      if (entry.skip === 'reminder-judge-unavailable') {
+        if (rule.exclusiveGroup) blockedGroups.add(rule.exclusiveGroup)
+        run.incomplete ??= 'rule-failed'
+        diagnostics.push({ ruleId: rule.id, sourceId: source.sourceId, eventId: event.callId, status: 'failed', message: entry.skip })
+        continue
+      }
+      const answer = answers.get(item)
+      // 没有回执：工作侧还没算到这条就停了，或者整批失败。未完成的原因上面已经记过。
+      if (answer === undefined) continue
+      if (answer.error !== undefined) {
+        const failure = errorMessage(answer.error)
+        if (rule.exclusiveGroup) blockedGroups.add(rule.exclusiveGroup)
+        // 启动失败和规则超时对使用者是两件事，分类不能只看有没有 timeout 字样。
+        run.incomplete ??= codeForFailure(failure)
+        diagnostics.push({ ruleId: rule.id, sourceId: source.sourceId, eventId: event.callId,
+          status: /timeout/.test(failure) ? 'timed-out' : 'failed', message: failure, ...errorDetail(answer.error) })
+        continue
+      }
+      // 结果回来了也要再确认一次来源：批量期间别人可能已经换掉了这组规则。
+      if (sources.get(source.sourceId)?.token !== token || epoch(event.sessionId, source.sourceId, rule.id) !== policy) continue
+      // 回执的形状由批量协议保证，语义仍按单条契约校验：一条结果不合法只算它自己失败。
+      const parsed = MatchResult.safeParse(answer.match)
+      if (!parsed.success) {
+        if (rule.exclusiveGroup) blockedGroups.add(rule.exclusiveGroup)
+        run.incomplete ??= 'rule-failed'
+        diagnostics.push({ ruleId: rule.id, sourceId: source.sourceId, eventId: event.callId,
+          status: 'failed', message: 'reminder-result-invalid' })
+        continue
+      }
+      const result = parsed.data
+      try {
         if (result.ok) {
           const output = rule.on === 'assistant.output' ? event.output : undefined
           if (rule.on === 'assistant.output' && !output) throw new Error('reminder-output-evidence-missing')
@@ -353,19 +580,27 @@ export function createReminderRuntime({ config: input, entries = [], templates, 
           ...(result.status === 'unavailable' ? { evidence: result } : {}) })
       } catch (error) {
         if (rule.exclusiveGroup) blockedGroups.add(rule.exclusiveGroup)
+        // 这条规则没有答案：整轮不能算完成，否则会把“没评估”当成“没有命中”。
+        // 超时和报错都算没有答案，但它们是两种不同的故障，拒绝理由要分开。
+        run.incomplete ??= codeForFailure(errorMessage(error))
         diagnostics.push({ ruleId: rule.id, sourceId: source.sourceId, eventId: event.callId,
-          status: child.signal.aborted || /timeout/.test(errorMessage(error)) ? 'timed-out' : 'failed', message: errorMessage(error),
+          status: /timeout/.test(errorMessage(error)) ? 'timed-out' : 'failed', message: errorMessage(error),
           ...errorDetail(error) })
-      } finally { clearTimeout(timer); controller.signal.removeEventListener('abort', abort) }
+      }
     }
     // Reaching the end of the loop is the only proof that no denial rule was skipped.
-    run.evaluated = !controller.signal.aborted && now() < deadline
+    // 完成与否只看这一轮有没有被中止：墙钟里还混着状态克隆、磁盘写入和别的主线程占用，
+    // 用它判断“评估是否完成”会把与匹配无关的开销算成规则没评完。
+    // 中止是整轮级别的事实，比单条规则失败更接近真相，所以它优先决定原因。
+    if (controller.signal.aborted) run.incomplete ??= codeForReason(controller.signal.reason)
+    run.evaluated = run.incomplete === undefined
     await update(event.sessionId, async state => {
       state.diagnostics.push(...diagnostics.map(detail => AnalysisFacts.parse(jsonCopy(detail))))
       if (controller.signal.aborted || closed) return
       const target = await identity(event.sessionId, event.agentPreset, controller.signal)
       // Recorded after the identity recheck, so a decision revoked during the round never survives it.
-      preExecution?.settle(run.denial, run.evaluated === true)
+      // 未完成时把原因一并交给票据：拒绝理由要说得出是从哪一步失去评估的。
+      preExecution?.settle(run.denial, run.evaluated === true, run.incomplete)
       for (const candidate of results) {
         if (controller.signal.aborted || closed || !current(candidate, target) || !eligible(event.sessionId, candidate.sourceId, candidate.ruleId)
           || epoch(event.sessionId, candidate.sourceId, candidate.ruleId) !== candidate.policy) continue
@@ -376,17 +611,31 @@ export function createReminderRuntime({ config: input, entries = [], templates, 
   }
   /** Single admission path for composed events; a pre-execution round also carries its ticket key. */
   function admit(rawEvent: unknown, signal?: AbortSignal, preExecution?: PreExecution): Promise<void> {
-    if (closed || signal?.aborted) return Promise.resolve()
+    // 每条早退都要先给票据一个明确的结论：缺票据会被读成“评估没做完”，
+    // 那就把“服务停了”“队列满了”“事件坏了”说成同一件事，谁也没法据此修。
+    if (closed) { preExecution?.settleUnfinished('closed'); return Promise.resolve() }
+    if (signal?.aborted) { preExecution?.settleUnfinished('cancelled'); return Promise.resolve() }
     // Reserve capacity before the first persistence await; pending writes are part of the queue.
-    if (admissions.size >= config.maxQueued + config.maxConcurrent) return Promise.reject(new Error('reminder-capacity-exceeded'))
+    if (admissions.size >= config.maxQueued + config.maxConcurrent) {
+      preExecution?.settleUnfinished('capacity')
+      return Promise.reject(new Error('reminder-capacity-exceeded'))
+    }
     const admittedAt = now(), serialized = JSON.stringify(rawEvent)
-    if (Buffer.byteLength(serialized) > config.maxBytes) return Promise.reject(new Error('reminder-input-budget-exceeded'))
+    if (Buffer.byteLength(serialized) > config.maxBytes) {
+      preExecution?.settleUnfinished('input-budget')
+      return Promise.reject(new Error('reminder-input-budget-exceeded'))
+    }
     // A rejected submission is reported through the public service, so its reason must survive relay.
-    const event = parseOrThrow('提醒事件无效', () => Event.parse(JSON.parse(serialized)))
+    // 解析失败是事件本身坏了，不是评估没跑完：这一档也要自己说清楚。
+    let event: EventValue
+    try { event = parseOrThrow('提醒事件无效', () => Event.parse(JSON.parse(serialized))) }
+    catch (error) { preExecution?.settleUnfinished('parse-failed'); throw error }
     // A human turn breaks the reminder chain; a reminder-caused event extends it. Only
     // derived activations are affected by this count (see loopBlocked).
     if (event.origin === 'human') reminderChains.delete(event.sessionId)
     else if (event.origin === 'reminder') reminderChains.set(event.sessionId, (reminderChains.get(event.sessionId) ?? 0) + 1)
+    // 这一轮最终没给出答案的原因；走不到终点时由它记录，票据据此写出拒绝理由。
+    let unfinished: UnfinishedCode = 'unclassified'
     const admission: { sessionId: string; controller: AbortController; task?: Promise<void> } = { sessionId: event.sessionId, controller: new AbortController() }
     admissions.add(admission)
     // Promise invokes its executor synchronously before this resolver is read.
@@ -396,14 +645,20 @@ export function createReminderRuntime({ config: input, entries = [], templates, 
       ...(preExecution === undefined ? {} : { preExecution }) }
     const abort = () => {
       run.controller.abort(signal?.reason ?? new Error('reminder-round-timeout'))
+      // 从队列里撤下这一轮：调用方主动取消，还是它自己等到超时，是两种不同的结局。
+      unfinished = signal?.aborted ? 'cancelled' : 'round-timeout'
       const queue = queues.get(event.sessionId), index = queue?.indexOf(run) ?? -1
       if (queue && index >= 0) {
         queue.splice(index, 1); if (!queue.length) queues.delete(event.sessionId)
-        void diagnostic(event.sessionId, { eventId: event.callId, status: signal?.aborted ? 'cancelled' : 'queue-timeout' }).finally(resolve)
+        void diagnostic(event.sessionId, { eventId: event.callId, status: signal?.aborted ? 'cancelled' : 'queue-timeout' }).catch(() => {}).finally(resolve)
       }
     }
     signal?.addEventListener('abort', abort, { once: true })
-    run.timer = setTimeout(abort, Math.max(0, run.deadline - now()))
+    // 预算推迟到 evaluate 开头才起算：准入是 I/O，不是评估工作。
+    run.startBudget = () => {
+      run.deadline = now() + config.roundTimeoutMs
+      run.timer = setTimeout(abort, config.roundTimeoutMs)
+    }
     // Identity lookup occupies admission capacity and uses the same round deadline as matching.
     admission.task = identity(event.sessionId, event.agentPreset, run.controller.signal).then(target => {
       if (closed || run.controller.signal.aborted) return false
@@ -424,22 +679,25 @@ export function createReminderRuntime({ config: input, entries = [], templates, 
         return false
       }
       return update(event.sessionId, state => {
-        if (run.controller.signal.aborted || state.seen.includes(event.callId)) return false
+        if (run.controller.signal.aborted) return false
+        // 同一个 callId 已经有一轮在跑：这次提交没得到属于自己的答案。
+        if (state.seen.includes(event.callId)) { unfinished = 'duplicate-call'; return false }
         state.seen.push(event.callId); return true
       })
     }).then(admitted => {
-      if (!admitted || closed || run.controller.signal.aborted || now() >= run.deadline) return
+      if (!admitted || closed || run.controller.signal.aborted) return
       const queue = queues.get(event.sessionId) ?? []; queue.push(run); queues.set(event.sessionId, queue); pump()
       return done
     }).catch(async error => {
-      if (!run.controller.signal.aborted) throw error
+      // 身份查询失败：还没看过任何规则，和规则超时不是一回事。
+      if (!run.controller.signal.aborted) { unfinished = 'identity'; throw error }
       await diagnostic(event.sessionId, { eventId: event.callId, status: signal?.aborted ? 'cancelled' : 'queue-timeout' })
     }).finally(() => {
       clearTimeout(run.timer); signal?.removeEventListener('abort', abort); admissions.delete(admission)
       // Every preparation ends with a verdict. A round that never ran (capacity, cancellation,
       // queue timeout, duplicate call id) settles as an unfinished evaluation, which denies, so
       // the guard never has to interpret an absence.
-      preExecution?.settleUnfinished()
+      preExecution?.settleUnfinished(unfinished)
     })
     return admission.task
   }
@@ -569,10 +827,12 @@ export function createReminderRuntime({ config: input, entries = [], templates, 
     async prepareToolExecution({ key, sessionId, agentPreset, name, arguments: args, callId, rootCallId, signal }: ToolPreparation) {
       if (closed) return
       const pre = openPreExecution(key, tickets)
-      const applying = [...sources.values()].some(item => item.compiled.some(rule => rule.on === 'tool.before-execute'))
-      // With no pre-execution rule anywhere nothing can deny this call, so the verdict is already
-      // complete. The guard reads one ticket per call: an empty policy is a verdict, not an absence.
-      if (!applying) { pre.settle(undefined, true); return }
+      const before = [...sources.values()].flatMap(item => item.compiled.filter(rule => rule.on === 'tool.before-execute'))
+      // 只有 deny-tool 能改变行为。纯提醒规则即使挂在执行前，也不得拦住这次调用：
+      // 先把票据结为放行，再照常评估投递——提醒晚一拍没有代价，卡住工具却有很大代价。
+      if (!before.some(rule => rule.effect.kind === 'deny-tool')) pre.settle(undefined, true)
+      // 一条执行前规则都没有时无需评估。
+      if (!before.length) return
       await admit(Event.parse(jsonCopy({ type: 'tool.before-execute', sessionId, ...(agentPreset === undefined ? {} : { agentPreset }),
         callId, rootCallId, name, arguments: args, clock: { at: wallNow() }, facts: {} })), signal, pre).catch(report)
     },
@@ -774,6 +1034,22 @@ export function createReminderRuntime({ config: input, entries = [], templates, 
       for (const run of running.values()) run.controller.abort(new Error('reminder-runtime-closed'))
       await Promise.allSettled([...running.values()].map(run => run.done))
       await Promise.allSettled([...admissions].map(item => item.task))
+      // 写回策略把落盘推迟了，关闭前必须把待写的快照交出去：
+      // 那些快照就是内存里的最终状态，丢掉等于真丢数据。
+      // 待写的（dirty）和正在写的（flushing）都要等：只等其中一边，
+      // 另一边就会在 close 返回之后继续往盘上写。
+      const owed = new Set([...dirty.keys(), ...flushing.keys()])
+      // 写者是按顺序排空的：一次慢写没完，后面的快照都在等它。
+      // 关窗只给一个 storageTimeoutMs 的话，盘只要比这个窗口稍慢，
+      // close 就会在最后一份快照落地前撒手——而那正是内存里的最终状态。
+      // 所以这里给两个窗口：足够排空一次慢写加它后面那份。
+      const closeWaitMs = config.storageTimeoutMs * 2
+      await Promise.allSettled([...owed].map(id => {
+        const writing = flushing.get(id) ?? flush(id).finally(() => flushing.delete(id))
+        return Promise.race([writing,
+          new Promise<void>(resolve => { const timer = setTimeout(resolve, closeWaitMs); timer.unref?.() })])
+      }))
+      dirty.clear(); flushing.clear()
       await Promise.allSettled([...chains.values(), capacityWrite]); sources.clear(); detectors.clear(); analyzers.clear(); rejectedSources.clear()
       tickets.dispose()
     },

@@ -1,8 +1,13 @@
-import test from 'node:test'
+import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createReminderRuntime } from '../lib/reminder-runtime/runtime.js'
 import { createTemplates } from '../src/templates.js'
 import type { MessageView } from '../lib/reminder-runtime/request-context.js'
+import { createBoundedMatcher } from '../src/bounded-matcher.js'
+const matcher = createBoundedMatcher({ timeoutMs: 2000, startupMs: 5000 })
+after(async () => { await matcher.close() })
+const port = (input: Parameters<typeof matcher.detect>[0], signal: AbortSignal, timing: Parameters<typeof matcher.detect>[2]) =>
+  matcher.detect(input, signal, timing)
 
 const config = { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 }
 const templates = createTemplates()
@@ -14,7 +19,7 @@ const texts = (messages: MessageView[]) => messages.map(message =>
   (message.content ?? []).map(block => block.text ?? '').join(''))
 const ids = (visible: MessageView[]) => visible.flatMap(message => message.id === undefined ? [] : [message.id])
 const fixture = (t: { after: (fn: () => unknown) => void }) => {
-  const runtime = createReminderRuntime({ config, templates, execute: async () => ({ ok: true }) })
+  const runtime = createReminderRuntime({ config, templates, execute: port })
   t.after(() => runtime.close())
   return runtime
 }
@@ -37,7 +42,7 @@ test('固定文本不受影响，且没有模板引擎时拒绝含占位符的�
   runtime.registerSource({ sourceId: 'fixed', plugin: 'test', revision: 1, rules: [rule('普通提醒')] })
   await runtime.submit(probe('hit'))
   assert.deepEqual(texts(await runtime.collect({ sessionId: 's', visible: [] })), ['普通提醒'])
-  const bare = createReminderRuntime({ config, execute: async () => ({ ok: true }) })
+  const bare = createReminderRuntime({ config, execute: port })
   t.after(() => bare.close())
   // Without an injected engine a placeholder could never be substituted, so it is refused.
   assert.throws(() => bare.registerSource({ sourceId: 'no-engine', plugin: 'test', revision: 1,

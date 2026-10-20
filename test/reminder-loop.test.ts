@@ -1,16 +1,20 @@
-import test from 'node:test'
+import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createReminderRuntime } from '../lib/reminder-runtime/runtime.js'
 import { executeReminderMatch } from '../lib/reminder-runtime/matcher.js'
 import type { MessageView } from '../lib/reminder-runtime/request-context.js'
+import { createBoundedMatcher } from '../src/bounded-matcher.js'
+const matcher = createBoundedMatcher({ timeoutMs: 2000, startupMs: 5000 })
+after(async () => { await matcher.close() })
+const port = (input: Parameters<typeof matcher.detect>[0], signal: AbortSignal, timing: Parameters<typeof matcher.detect>[2]) =>
+  matcher.detect(input, signal, timing)
 
 const config = { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 }
 const texts = (messages: MessageView[]) => messages.map(message =>
   (message.content ?? []).map(block => block.text ?? '').join(''))
 
 function fixture(t: { after: (fn: () => unknown) => void }) {
-  const runtime = createReminderRuntime({ config, execute: async input =>
-    'reminder' in input ? executeReminderMatch(input.reminder) : { ok: true } })
+  const runtime = createReminderRuntime({ config, execute: port })
   t.after(() => runtime.close())
   return runtime
 }
@@ -57,7 +61,7 @@ test('防循环不放行本该被拒绝的工具调用', async t => {
   const runtime = fixture(t)
   runtime.registerSource({ sourceId: 'guard', plugin: 'test', revision: 1, rules: [{
     format: 'reminder/v4', id: 'deny', on: 'tool.before-execute', text: '不许',
-    when: { tool: 'read' }, effect: { kind: 'deny-tool', deliver: { model: { once: 'surface' } } } }] })
+    when: { tool: 'read' }, effect: { kind: 'deny-tool', dangerous: true, reason: '不许读', deliver: { model: { once: 'surface' } } } }] })
   // Even a reminder-originated pre-execution event must still produce the denial.
   await runtime.submit({ type: 'tool.before-execute', sessionId: 's', callId: 'c1', rootCallId: 'c1',
     name: 'read', arguments: {}, origin: 'reminder', causationId: 'guard:deny', clock: { at: 1000 } })

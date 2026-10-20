@@ -6,7 +6,7 @@ import type { ClaimBookValue } from './claims.js'
 import type { HistoryEvent, MessageView } from './request-context.js'
 import type { RecipientFacts } from './scope.js'
 import { TextSamples, type CountLimitValues } from './conditions.js'
-import type { DenialVerdict, PreExecution } from './denial.js'
+import type { DenialVerdict, PreExecution, UnfinishedCode } from './denial.js'
 
 export const Detector = z.object({ ref: z.string().min(1), revision: z.number().int().positive(),
   module: z.string().url().refine(value => new URL(value).protocol === 'file:', 'detector module must be a local file URL'),
@@ -34,6 +34,26 @@ export const Event = z.object({
 }).catchall(z.json())
 export const MatchResult = z.object({ ok: z.boolean(), status: z.enum(['matched', 'unmatched', 'unavailable']).optional() }).catchall(z.json())
   .refine(value => value.status === undefined || value.ok === (value.status === 'matched'), 'inconsistent reminder result')
+/**
+ * 一条规则的回执。它只保证「有这么一条」，不保证内容合法：
+ * 合法性由消费层按单条契约判定——否则一条坏结果会把整批判废，与逐条时的行为不同。
+ */
+export const BatchAnswer = z.union([
+  z.object({ key: z.string(), ms: z.number().nonnegative(), match: z.json() }).strict(),
+  z.object({ key: z.string(), ms: z.number().nonnegative(),
+    error: z.object({ name: z.string(), message: z.string() }).catchall(z.json()) }).strict(),
+])
+export type BatchAnswerValue = z.infer<typeof BatchAnswer>
+/**
+ * worker 批量求值的收尾回执。`items` 故意收成 unknown[]：
+ * 每一份回执单独过 BatchAnswer，一条坏掉只是那一条没答案。
+ */
+export const BatchResult = z.object({
+  items: z.array(z.unknown()).max(2048),
+  stopped: z.boolean(),
+  elapsedMs: z.number().nonnegative(),
+}).strict()
+export type BatchResultValue = z.infer<typeof BatchResult>
 export const AnalysisFacts = z.record(z.string(), z.json())
 const Candidate = z.object({
   id: z.string(), sessionId: z.string(), agentPreset: z.string().optional(),
@@ -107,21 +127,54 @@ export interface Run {
   done: Promise<void>
   task?: Promise<unknown>
   timer?: ReturnType<typeof setTimeout>
+  /**
+   * 开始计算本轮预算。
+   * 准入阶段做的是身份查询与状态写入，属于 I/O；把它们算进评估预算，
+   * 会让磁盘抖动直接决定工具能否执行。
+   */
+  startBudget?: () => void
   /** The call this round decides, for pre-execution rounds only. */
   preExecution?: PreExecution
   /** Denial chosen by this round; absent means the call stays allowed. */
   denial?: DenialVerdict
   /** Whether every rule was actually evaluated; an interrupted round must not authorize. */
   evaluated?: boolean
-}export type Work = { analysis: { analyzer: DetectorValue; event: EventValue; maxBytes: number } }
-  | { reminder: { condition: CompiledRule['condition']; event: EventValue; maxBytes: number; countLimits: CountLimitValues; judge?: DetectorValue; params?: z.infer<ReturnType<typeof z.json>> } }
+  /**
+   * 这一轮是从哪一步失去确定答案的（规则超时、失败、整轮超时、取消……）。
+   * 完成度是逐规则记账的离散事实：只要有一条没有结论，整轮就不算完成，
+   * 不能因为“整体耗时在预算内”就当作评估过了。有值即代表这一轮不完整。
+   */
+  incomplete?: UnfinishedCode
+}/** 交给 worker 的一条待匹配规则。`key` 只是把结果对回原位的标签，不参与匹配。 */
+export interface BatchRuleInput {
+  key: string
+  condition: CompiledRule['condition']
+  judge?: DetectorValue
+  params?: z.infer<ReturnType<typeof z.json>>
+}
+/**
+ * 条件树在注册时编译好之后，执行期就只剩"拿树去匹配"这一件事，
+ * 所以这几个工作形状里都不再带 countLimits —— 上限已经烘进树里了。
+ */
+export type Work = { analysis: { analyzer: DetectorValue; event: EventValue; maxBytes: number } }
+  | { reminder: { condition: CompiledRule['condition']; event: EventValue; maxBytes: number; judge?: DetectorValue; params?: z.infer<ReturnType<typeof z.json>> } }
+  /**
+   * 一次往返算完多条规则。逐条往返的固定开销按规则数线性增长，
+   * 而单条规则真正的匹配只有几十微秒，所以往返次数本身才是瓶颈。
+   */
+  | { reminderBatch: { event: EventValue; maxBytes: number; budgetMs?: number; rules: BatchRuleInput[] } }
 export interface RuntimeOptions {
   config?: unknown
   entries?: Iterable<readonly [string, unknown]>
   /** Strict, single-pass prompt templates reused from context-care's engine. */
   templates?: TemplateRenderer
   save?: (id: string, state: StateValue) => Promise<unknown> | void
-  execute?: (input: Work, signal: AbortSignal, timing: { onDispatch: () => void; workTimeoutMs: number }) => Promise<unknown>
+  /**
+   * 执行端口。`onItem` 只对批量工作有意义：worker 每算完一条就上报一条，
+   * 这样即使这一批因为超时被终止，已经算完的规则也不会跟着蒸发。
+   */
+  execute?: (input: Work, signal: AbortSignal, timing: { onDispatch: () => void; workTimeoutMs: number
+    onItem?: (answer: unknown) => void }) => Promise<unknown>
   capacity?: unknown
   saveCapacity?: (value: z.infer<typeof CapacitySettings>) => Promise<unknown> | void
   dispatches?: boolean

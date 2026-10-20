@@ -1,4 +1,4 @@
-import test from 'node:test'
+import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createRuleControls, ControlPatch } from '../src/rule-controls.js'
 import { createReminderRuntime } from '../src/reminder-runtime/index.js'
@@ -8,6 +8,10 @@ import { executeReminderMatch } from '../lib/reminder-runtime/matcher.js'
 import { createNoticeChannel } from '../src/notice-channel.js'
 import { controlledGuidance, controlledState, controlledEngineRules } from '../src/control-catalog.js'
 import { GUIDANCE, renderState } from '../src/policy.js'
+import { createBoundedMatcher } from '../src/bounded-matcher.js'
+const matcher = createBoundedMatcher({ timeoutMs: 2000, startupMs: 5000 })
+after(async () => { await matcher.close() })
+const port = (input, signal, timing) => matcher.detect(input, signal, timing)
 const source = (id = 'external') => ({ sourceId: id, plugin: 'example-plugin', registration: 'plugin-entry', executor: 'dsh-context-care',
   rules: [{ id: 'shared-id', actions: [{ id: 'notice' }, { id: 'abort' }, { id: 'resume', requires: ['abort'] }] }] })
 const patch = (controls, input) => controls.patch('session-one', { revision: controls.snapshot('session-one').revision, sourceId: 'external', ruleId: 'shared-id', ...input })
@@ -17,7 +21,7 @@ test('reminder catalogs preserve scoped recipients and string policy epochs acro
   t.after(() => controls.close())
   const entries = new Map()
   const ports = { config: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 },
-    execute: async () => ({ ok: true }), resolvePreset: id => id === 'included' ? 'alpha' : 'beta',
+    execute: port, resolvePreset: id => id === 'included' ? 'alpha' : 'beta',
     eligible: (id, source, rule) => controls.enabled(id, source, rule, 'model'),
     epoch: (id, source, rule) => controls.epoch(id, source, rule),
     save: async (id, value) => { entries.set(id, JSON.parse(JSON.stringify(value))) } }
@@ -214,7 +218,7 @@ test('另一来源注册后，挂起的提醒仍然按时投递', async t => {
   const controls = createRuleControls({ save: async () => {} })
   t.after(() => controls.close())
   const runtime = createReminderRuntime({ config: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 },
-    execute: async input => 'reminder' in input ? executeReminderMatch(input.reminder) : { ok: true },
+    execute: port,
     epoch: (id, sourceId, ruleId) => controls.epoch(id, sourceId, ruleId) })
   t.after(() => runtime.close())
   runtime.registerSource({ sourceId: 'first', plugin: 'test', revision: 1, rules: [

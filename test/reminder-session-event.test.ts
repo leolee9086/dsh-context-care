@@ -1,4 +1,4 @@
-import test from 'node:test'
+import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createReminderRuntime } from '../lib/reminder-runtime/runtime.js'
 import { executeReminderMatch } from '../lib/reminder-runtime/matcher.js'
@@ -6,6 +6,11 @@ import { ReminderRule, compileRule } from '../lib/reminder-runtime/schema.js'
 import { SESSION_EVENT_COUNT, SESSION_EVENT_TYPES,
   SESSION_EVENT_SOURCE_VERSION } from '../lib/reminder-runtime/generated/session-events.js'
 import type { MessageView } from '../lib/reminder-runtime/request-context.js'
+import { createBoundedMatcher } from '../src/bounded-matcher.js'
+const matcher = createBoundedMatcher({ timeoutMs: 2000, startupMs: 5000 })
+after(async () => { await matcher.close() })
+const port = (input: Parameters<typeof matcher.detect>[0], signal: AbortSignal, timing: Parameters<typeof matcher.detect>[2]) =>
+  matcher.detect(input, signal, timing)
 
 const config = { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 }
 const texts = (messages: MessageView[]) => messages.map(message =>
@@ -19,8 +24,7 @@ const rule = (eventType: string, condition?: unknown) => ({ format: 'reminder/v4
 
 function fixture(t: { after: (fn: () => unknown) => void }) {
   // Evaluate the real condition tree in-process instead of stubbing the result out.
-  const runtime = createReminderRuntime({ config, execute: async input =>
-    'reminder' in input ? executeReminderMatch(input.reminder) : { ok: true } })
+  const runtime = createReminderRuntime({ config, execute: port })
   t.after(() => runtime.close())
   return runtime
 }
@@ -55,7 +59,7 @@ test('session.event 按住事件名匹配，载荷字段供条件使用', async 
 test('模板能读到本次日志事件的冻结载荷', async t => {
   const runtime = createReminderRuntime({ config, templates: { validate: () => {},
     render: (source: string, snapshot: unknown) => source.replace('{{event.arguments.tool}}',
-      String((snapshot as { event?: { arguments?: { tool?: unknown } } }).event?.arguments?.tool)) }, execute: async () => ({ ok: true }) })
+      String((snapshot as { event?: { arguments?: { tool?: unknown } } }).event?.arguments?.tool)) }, execute: port })
   t.after(() => runtime.close())
   runtime.registerSource({ sourceId: 'log', plugin: 'test', revision: 1,
     rules: [{ ...rule('tool/result'), text: '工具 {{event.arguments.tool}} 结束了' }] })
@@ -128,7 +132,7 @@ test('未声明的事件名在加载时被拒，不能悄悄永不命中', t => 
 test('阻断只能在执行前声明，日志事件不能拒绝已经发生的事', () => {
   const deny = { format: 'reminder/v4', id: 'r', on: 'session.event', text: 't',
     when: { eventType: 'tool/result' },
-    effect: { kind: 'deny-tool', deliver: { model: { once: 'surface' } } } }
+    effect: { kind: 'deny-tool', dangerous: true, reason: '已发生的事不能拒绝', deliver: { model: { once: 'surface' } } } }
   assert.equal(ReminderRule.safeParse(deny).success, false)
 })
 
