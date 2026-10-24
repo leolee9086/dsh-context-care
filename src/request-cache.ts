@@ -27,7 +27,8 @@ interface Options {
   sessions: Pick<Context['sessions'], 'get' | 'list' | 'flush' | 'prepare'>
   measureInput: (session: Session, request: GenerateOptions) => { textTokens: number; visualTokens: number }
   now?: () => number
-  changed?: (sessionId: string) => void
+  /** Publish the admitted record, so observers invalidate its own view only. */
+  changed?: (sessionId: string, record: CacheRecord) => void
 }
 
 /**
@@ -124,7 +125,7 @@ export function createRequestCache({ sessions, measureInput, now = Date.now, cha
           cache.recent.set(`${family}${String(data.phase)}`, merged)
         }
       }
-      changed(String(sessionId))
+      changed(String(sessionId), value)
     },
     /** The durability checkpoint belongs to Session, not to a second writer. */
     async flush(sessionId?: string) {

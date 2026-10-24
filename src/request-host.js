@@ -24,6 +24,7 @@ import { MatcherFailure } from './bounded-matcher.js'
 import { ensureReminderService, ReminderConfig } from './reminder-runtime/index.js'
 import { createSummaryProposalHistory } from '../lib/summary-proposal-history.js'
 import { createCareChanges } from '../lib/care-changes.js'
+import { producerOf, producedUnder, isCheckpointSource } from './producer-source.js'
 
 export const name = 'context-care-requests'
 export const inject = ['agents', 'sessions', 'sessionQuery', 'tools', 'llm', 'tokenMeter', 'storageDomain']
@@ -75,11 +76,28 @@ export async function openRequestHost(ctx, config = {}) {
   ctx.provide('contextCareChanges', changes)
   ctx.effect(() => () => changes.close())
   ctx.on('session/event', (session, event) => {
-    // Streaming deltas do not change any of these diagnostic snapshots.
-    if (['user/message', 'assistant/message', 'assistant/attempt', 'request/header', 'compaction/summary'].includes(event.type)) changes.changed(String(session.id))
+    const id = String(session.id)
+    // These views read committed plugin contributions. Ordinary conversation
+    // headers and assistant settlements cannot create actions or rewrite rows.
+    if (event.type === 'user/message') {
+      const source = event.data.source
+      if (isCheckpointSource(source) && typeof event.surfaceOp === 'object' && event.surfaceOp.op === 'replace') changes.changed(id, ['actions', 'prompts'])
+      else if (producerOf(source) === 'dsh-context-care' || producedUnder(source, 'dsh-context-care:')) changes.changed(id, ['prompts'])
+    } else if (event.type === 'system/message') {
+      if (requestCareInstructions({ messages: [event.data.message] }).length) changes.changed(id, ['prompts'])
+    } else if (event.type === 'request/header') {
+      if ('contextCarePrompt' in event.data && event.data.contextCarePrompt) changes.changed(id, ['prompts'])
+    } else if (event.type === 'assistant/message' || event.type === 'assistant/attempt') {
+      // A settlement updates prompt call references, not the action collection.
+      changes.changed(id, ['prompts'])
+    } else if (event.type === 'compaction/summary') changes.changed(id, ['actions', 'prompts'])
   })
-  const journal = await openRequestJournal({ sessions: ctx.sessions, changed: id => changes.changed(id, ['actions', 'prompts']),
-    measureInput: (session, request) => captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session }).decomposeRequest(request) })
+  const journal = await openRequestJournal({ sessions: ctx.sessions, changed: (id, record) => {
+    if (record.kind === 'request') changes.changed(id, record.data.budget === undefined ? ['prompts'] : ['actions', 'prompts'])
+    else if (record.data.action === 'request-rewrite') changes.changed(id, ['rewrites'])
+    else if (record.data.action === 'rule-evaluation') changes.changed(id, ['prompts'])
+    else changes.changed(id, ['actions', 'prompts'])
+  }, measureInput: (session, request) => captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session }).decomposeRequest(request) })
   /** @type {Awaited<ReturnType<typeof openRuleControls>> | undefined} */
   let controls
   /** @type {Awaited<ReturnType<typeof openOutputFeedback>>} */
@@ -94,7 +112,7 @@ export async function openRequestHost(ctx, config = {}) {
     await journal.close().catch(closeError => ctx.logger.warn(`context-care: journal rollback failed: ${String(closeError)}`))
     throw error
   }
-  try { controls = await openRuleControls(ctx.storageDomain, { changed: /** @param {string | undefined} id */ id => changes.changed(id, ['controls', 'runtime']), boundary: /** @param {string} id */ id => (ctx.sessions.get(/** @type {SessionId} */ (id))?.seq ?? 0) - 1 }) }
+  try { controls = await openRuleControls(ctx.storageDomain, { changed: /** @param {string | undefined} id */ id => changes.changed(id, ['status', 'actions', 'controls', 'runtime']), boundary: /** @param {string} id */ id => (ctx.sessions.get(/** @type {SessionId} */ (id))?.seq ?? 0) - 1 }) }
   catch (error) {
     for (const [label, resource] of /** @type {const} */ ([['feedback', feedback], ['journal', journal]])) {
       await resource.close().catch(closeError => ctx.logger.warn(`context-care: ${label} rollback failed: ${String(closeError)}`))

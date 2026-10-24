@@ -29,21 +29,21 @@ export function createControlRecords({ fetcher = fetch, changes } = {}) {
     snapshot = new Map(snapshot).set(id, value)
     for (const listener of listeners) listener()
   }
-  async function read(watch) {
+  function receive(watch, update) {
     if (disposed || watch.controller.signal.aborted) return
-    if (watch.reading || watch.saving) { watch.dirty = true; return }
-    watch.reading = true; watch.dirty = false
-    const ticket = ++watch.ticket
     try {
-      const response = await fetcher(`/context-care/rules?sessionId=${encodeURIComponent(watch.id)}`, {
-        signal: watch.controller.signal, headers: { accept: 'application/json' } })
-      if (!response.ok) throw await httpFailure(response, '/context-care/rules')
-      const data = SnapshotWire.parse(await response.json())
-      if (!Array.isArray(data.sources) || data.sessionId !== watch.id || !Number.isSafeInteger(data.revision)) throw new Error('Invalid rule controls response')
-      if (watch.ticket === ticket && !watch.controller.signal.aborted) publish(watch.id, { status: 'ready', ...data, error: watch.saveError })
+      if (update.type === 'error') throw new Error(`${update.error.name}: ${update.error.message}`)
+      if (update.type !== 'snapshot') throw new Error('Unexpected rule controls delta')
+      const data = SnapshotWire.parse(update.value)
+      if (data.sessionId !== watch.id) throw new Error('Invalid rule controls session')
+      // A pushed commit can arrive before the PATCH acknowledgement. Keep the
+      // save pending until its own response arrives, without discarding newer data.
+      const previous = snapshot.get(watch.id)
+      if (previous?.revision > data.revision) return
+      publish(watch.id, { ...data, status: 'ready', saving: watch.saving, error: watch.saveError })
     } catch (error) {
-      if (watch.ticket === ticket && !watch.controller.signal.aborted) publish(watch.id, { ...snapshot.get(watch.id), status: 'error', error: String(error) })
-    } finally { watch.reading = false; if (watch.dirty && !watch.controller.signal.aborted) void read(watch) }
+      publish(watch.id, { ...snapshot.get(watch.id), status: 'error', error: String(error) })
+    }
   }
   return {
     source: { getSnapshot: () => snapshot, subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener) } },
@@ -51,20 +51,23 @@ export function createControlRecords({ fetcher = fetch, changes } = {}) {
       if (disposed) return () => {}
       let watch = watches.get(id)
       if (!watch) {
-        watch = { id, count: 0, ticket: 0, controller: new AbortController(), reading: false, saving: false }
+        watch = { id, count: 0, ticket: 0, controller: new AbortController(), saving: false }
         watches.set(id, watch)
-        watch.unsubscribe = changes?.subscribe(id, topics => { if (topics.includes('controls')) void read(watch) })
-        publish(id, { status: 'loading' }); void read(watch)
+        publish(id, { status: 'loading' })
+        watch.unsubscribe = changes.subscribe({ sessionId: id, topic: 'controls' }, update => receive(watch, update))
       }
       watch.count++
+      let released = false
       return () => {
+        if (released) return
+        released = true
         if (--watch.count) return
         watch.controller.abort(); watch.unsubscribe?.(); watch.ticket++; watches.delete(id)
         snapshot = new Map(snapshot); snapshot.delete(id)
         for (const listener of listeners) listener()
       }
     },
-    refresh(id) { changes?.retry?.(); const watch = watches.get(id); if (watch) void read(watch) },
+    refresh() { changes.refresh() },
     async change(id, change) {
       const watch = watches.get(id)
       const previous = snapshot.get(id)
@@ -80,14 +83,15 @@ export function createControlRecords({ fetcher = fetch, changes } = {}) {
         if (!Array.isArray(data.sources) || data.sessionId !== id || data.revision !== previous.revision + 1) throw new Error('Invalid save acknowledgement')
         if (ticket === watch.ticket && !watch.controller.signal.aborted) {
           watch.saveError = undefined
-          publish(id, { status: 'ready', ...data, saved: true })
+          const current = snapshot.get(id)
+          publish(id, { ...(current?.revision > data.revision ? current : data), status: 'ready', saved: true, saving: false, error: undefined })
         }
       } catch (error) {
         if (ticket === watch.ticket && !watch.controller.signal.aborted) {
           watch.saveError = String(error)
-          publish(id, { ...previous, status: 'error', saving: false, saved: false, error: watch.saveError })
+          publish(id, { ...snapshot.get(id), status: 'error', saving: false, saved: false, error: watch.saveError })
         }
-      } finally { watch.saving = false; if (watch.dirty && !watch.controller.signal.aborted) void read(watch) }
+      } finally { watch.saving = false }
     },
     dispose() { disposed = true; for (const watch of watches.values()) { watch.controller.abort(); watch.unsubscribe?.() } watches.clear(); listeners.clear(); snapshot = new Map() },
   }

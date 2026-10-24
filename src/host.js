@@ -14,6 +14,7 @@ import { installControlRoute } from './control-route.js'
 import { installWorkbenchRoute } from './workbench-route.js'
 import { installDisplayRoute } from './display-route.js'
 import { installChangeRoute } from '../lib/change-route.js'
+import { createCareViewReader } from './care-view-data.js'
 
 // 通用入口:挂在 profile 层一次,对所有会话生效。
 //
@@ -45,13 +46,13 @@ export function apply(ctx, config = {}) {
     config,
     /** @param {Agent} agent */ agent => ctx.get('agentPresets')?.serviceFor(agent, 'compaction') ?? ctx.get('compaction'),
   )
-  ctx.effect(() => installChangeRoute(ctx, ctx.contextCareChanges))
   ctx.effect(() => installDisplayRoute(ctx))
   ctx.effect(() => installControlRoute(ctx))
   ctx.effect(() => installWorkbenchRoute(ctx))
   ctx.effect(() => installWorkbenchRoute(ctx, '/context-care/rule-runtime'))
   const journal = care?.rewriteJournal
   if (journal === undefined) return
+  ctx.effect(() => installChangeRoute(ctx, ctx.contextCareChanges, createCareViewReader(ctx, journal)))
 
   // 两者都已在 inject 里声明,所以直接用属性代理读:**声明的服务用 ctx.<name>,
   // 未声明的可选服务才用 ctx.get**(见 packages/AGENTS.md 的 Optional services 那条)。

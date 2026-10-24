@@ -20,6 +20,9 @@ import { resolveConfig } from '../src/policy.js'
 import { contextCarePrompts } from '../src/prompt-view-data.js'
 import { contextCareActions } from '../src/action-view-data.js'
 import { openRequestJournal } from '../src/request-journal.js'
+import { createClientChanges } from '../lib/client-changes.js'
+import { createActionRecords } from '../src/action-records.js'
+import { createRewriteRecords } from '../src/rewrite-records.js'
 import { detectorFixture } from './fixtures/detector.js'
 import { registerReminderHostCases } from './reminder-host-cases.ts'
 import { registerTimeoutHostCases } from './reminder-timeout-cases.ts'
@@ -563,6 +566,39 @@ test('a deny rule stops its own tool through the real registry and leaves other 
   assert.match(textOf('denied-call'), /不得调用 deny_probe/)
   assert.notEqual(resultFor('allowed-call').data.message.isError, true)
   assert.match(textOf('allowed-call'), /allow_probe body ran/)
+})
+
+test('real tool registry preserves preparation failure details and recovers after the cause is removed', { timeout: 30000 }, async t => {
+  const owned = await fixture(t, false, {}, {}, { reminders: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
+  const ctx = await owned.open()
+  const runtime = ctx.get('reminderRules')
+  ctx.effect(() => runtime.registerSource({ sourceId: 'failure-detail', plugin: 'test', revision: 1,
+    rules: [{ format: 'reminder/v4', id: 'unmatched', on: 'tool.before-execute', text: 'Unmatched denial',
+      when: { tool: 'failure_detail_probe', arguments: { block: { regex: '^yes$' } } }, effect: { kind: 'deny-tool', dangerous: true, reason: 'unmatched',
+        deliver: { model: { once: 'surface' } } } }] }).dispose)
+  let executed = 0
+  ctx.effect(() => ctx.tools.register({ name: 'failure_detail_probe', description: 'Observe preparation failure propagation',
+    parameters: { type: 'object' }, output: { schema: { type: 'string' }, render: (_args, text) => [{ type: 'text', text }] },
+    async execute() { executed++; return 'FAILURE_DETAIL_BODY_RAN' } }))
+  const { agent } = await ctx.agents.create({ sessionId: 'failure-detail', agentOptions: { provider: 'care-test', model: 'care-test' } })
+  // Exercise the real controls extension point. No fake Context or replacement
+  // runtime is involved; the registry must turn the actual guard failure into text.
+  const remove = ctx.contextCareRequests.controls.registerProvider(() => { throw new Error('ORIGINAL_CONTROL_READ_FAILED') })
+  try {
+    const failed = await ctx.tools.execute({ callId: 'preparation-failed', name: 'failure_detail_probe', arguments: {}, agent,
+      signal: new AbortController().signal })
+    const text = failed.content.map(block => block.text ?? '').join('')
+    assert.equal(executed, 0)
+    assert.equal(failed.isError, true)
+    assert.match(text, /ORIGINAL_CONTROL_READ_FAILED/)
+    assert.match(text, /\[unclassified\]/)
+    assert.doesNotMatch(text, /无法确认会话归属/)
+    t.diagnostic(text)
+  } finally { remove() }
+  const recovered = await ctx.tools.execute({ callId: 'preparation-recovered', name: 'failure_detail_probe', arguments: {}, agent,
+    signal: new AbortController().signal })
+  assert.equal(executed, 1)
+  assert.match(JSON.stringify(recovered), /FAILURE_DETAIL_BODY_RAN/)
 })
 
 registerDenialLifetimeHostCases({ async open(t, ruleTimeoutMs) {
@@ -2803,6 +2839,51 @@ test('Loader registrants execute declared rules, respect toggles, and unload wit
   assert.equal(ctx.contextCareControls.enabled('other-session', 'test-memory', 'remember', 'notify'), true)
 })
 
+test('native activity pushes retained pages and rewrite deltas without follow-up HTTP requests', { timeout: 30000 }, async t => {
+  const owned = await fixture(t, false); const ctx = await owned.open()
+  const { base, cookie } = await controlCookie(ctx)
+  const session = ctx.sessions.create('direct-push')
+  const routes = []; const errors = []; const frames = []
+  const changes = createClientChanges({ fetcher: (url, options) => {
+    routes.push(new URL(url, base).pathname)
+    return fetch(new URL(url, base), { ...options, headers: { ...options.headers, cookie } })
+  }, report: error => errors.push(error) })
+  const status = createActionRecords({ changes, collection: 'status' })
+  const actions = createActionRecords({ changes })
+  const prompts = createActionRecords({ changes, collection: 'prompts' })
+  const rewrites = createRewriteRecords({ changes, report: error => errors.push(error) })
+  const releases = [status.watch(session.id), actions.watch(session.id), prompts.watch(session.id), rewrites.watch(session.id),
+    changes.subscribe({ sessionId: session.id, topic: 'rewrites' }, frame => frames.push(frame))]
+  t.after(() => { for (const release of releases) release(); status.dispose(); actions.dispose(); prompts.dispose(); rewrites.dispose(); changes.dispose() })
+  const wait = (source, predicate) => new Promise((resolve, reject) => {
+    if (predicate()) { resolve(); return }
+    const timer = setTimeout(() => { stop(); reject(new Error(`pushed data did not arrive: ${JSON.stringify(errors.map(String))}`)) }, 5000)
+    const stop = source.subscribe(() => { if (predicate()) { clearTimeout(timer); stop(); resolve() } })
+  })
+  await wait(actions.source, () => actions.source.getSnapshot().get(`${session.id}:0`)?.status === 'ready')
+  await wait(rewrites.health, () => rewrites.health.getSnapshot().get(session.id)?.status === 'ready')
+  assert.deepEqual(routes, ['/context-care/changes'])
+  const initialRewriteFrames = frames.length
+  const config = { provider: 'care-test', model: 'care-test' }
+  for (let index = 0; index < 12; index++) {
+    session.append('user/message', createMessage({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: `Turn ${index}` }] }), { surfaceOp: 'append' })
+    session.append('request/header', { header: { config }, reason: 'series' })
+    session.append('assistant/message', { turn: index + 1, step: 1, stream: [], message: createMessage({ role: 'assistant',
+      source: { kind: 'model', ...config }, content: [{ type: 'text', text: 'Ordinary answer.' }] }) }, { surfaceOp: 'append' })
+    ctx.contextCareControls.sample(session.id, { fatigue: 'normal', fatigueValue: index, wakefulness: 'normal', wakefulnessValue: 50 })
+    await wait(status.source, () => status.source.getSnapshot().get(`${session.id}:0`)?.currentState?.fatigueValue === index)
+  }
+  assert.equal(frames.length, initialRewriteFrames, 'ordinary dialogue never invalidates rewrite records')
+  await ctx.contextCareRequests.recordAction(session, { action: 'request-rewrite', phase: 'recorded', rewrite: { sessionId: session.id, hash: 'new-rewrite' } })
+  await wait(rewrites.records, () => rewrites.records.getSnapshot().has(`${session.id}:new-rewrite`))
+  assert.equal(frames.at(-1).type, 'delta'); assert.equal(frames.at(-1).value.records.length, 1)
+  await ctx.contextCareRequests.recordAction(session, { action: 'prune', phase: 'completed', operationId: 'native-action' })
+  await wait(actions.source, () => actions.source.getSnapshot().get(`${session.id}:0`)?.actions.some(action => action.id === 'native-action'))
+  assert.deepEqual(routes, ['/context-care/changes'], 'continuous activity has no actions, prompts or rewrite-journal GETs')
+  assert.deepEqual(errors, [])
+  t.diagnostic(JSON.stringify({ turns: 12, httpRequests: routes, rewriteFrames: frames.length }))
+})
+
 test('long Session diagnostic queries keep unrelated HTTP responsive and push only actual changes', { timeout: 120000 }, async t => {
   const owned = await fixture(t, false); const ctx = await owned.open()
   const { base, cookie } = await controlCookie(ctx)
@@ -2859,7 +2940,8 @@ test('long Session diagnostic queries keep unrelated HTTP responsive and push on
   t.diagnostic(`long-session-performance ${JSON.stringify(report)}`)
   if (process.env.DSH_PERFORMANCE_REPORT) await writeFile(process.env.DSH_PERFORMANCE_REPORT, JSON.stringify(report, null, 2) + '\n')
   const controller = new AbortController()
-  const response = await fetch(`${base}/context-care/changes?sessionId=${session.id}`, { headers, signal: controller.signal })
+  const query = new URLSearchParams({ subscription: JSON.stringify({ sessionId: session.id, topic: 'actions' }) })
+  const response = await fetch(`${base}/context-care/changes?${query}`, { headers, signal: controller.signal })
   assert.equal(response.status, 200)
   const reader = response.body.getReader(); const decoder = new TextDecoder()
   try {
@@ -2867,11 +2949,12 @@ test('long Session diagnostic queries keep unrelated HTTP responsive and push on
     assert.ok(first.value); assert.equal(JSON.parse(decoder.decode(first.value).trim()).sessionId, session.id)
     const next = reader.read()
     ctx.contextCareChanges.changed('unrelated-session', ['controls'])
-    ctx.contextCareChanges.changed(session.id, ['controls'])
-    ctx.contextCareChanges.changed(session.id, ['actions'])
+    await ctx.contextCareRequests.recordAction(session, { action: 'prune', phase: 'completed', operationId: 'pushed-action' })
     const value = await next
     const change = JSON.parse(decoder.decode(value.value).trim())
-    assert.deepEqual(change.topics.sort(), ['actions', 'controls'])
+    assert.equal(change.type, 'snapshot')
+    assert.equal(change.topic, 'actions')
+    assert.equal(change.value.actions[0].id, 'pushed-action')
   } finally { controller.abort(); await reader.cancel().catch(() => {}); reader.releaseLock() }
 })
 

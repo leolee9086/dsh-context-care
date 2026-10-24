@@ -19,7 +19,8 @@ interface Options {
         visualTokens: number;
     };
     now?: () => number;
-    changed?: (sessionId: string) => void;
+    /** Publish the admitted record, so observers invalidate its own view only. */
+    changed?: (sessionId: string, record: CacheRecord) => void;
 }
 /**
  * Keep in-flight diagnostics in memory and read settled request facts from Session.

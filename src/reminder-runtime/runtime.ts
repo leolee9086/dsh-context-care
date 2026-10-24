@@ -482,8 +482,11 @@ export function createReminderRuntime({ config: input, entries = [], sessionAuth
         queues.delete(id); if (queue.length) queues.set(id, queue)
         running.set(id, run)
         run.task = evaluate(run).catch(error => {
+          // Settlement cannot turn a thrown evaluation error into an ordinary unfinished ticket.
+          run.preExecution?.fail(run.incomplete ?? (run.controller.signal.aborted
+            ? codeForReason(run.controller.signal.reason) : 'unclassified'), error)
           report(error)
-          return diagnostic(id, { eventId: run.event.callId, status: 'failed', message: errorMessage(error) })
+          return diagnostic(id, { eventId: run.event.callId, status: 'failed', message: errorMessage(error), ...errorDetail(error) })
         })
           .finally(() => { running.delete(id); run.resolve(); pump() })
       }
@@ -629,7 +632,11 @@ export function createReminderRuntime({ config: input, entries = [], sessionAuth
     if (preExecution && !controller.signal.aborted && !closed) {
       // Identity is policy input. Disk speed and diagnostic persistence are not.
       try { await identity(event.sessionId, event.agentPreset, controller.signal) }
-      catch (error) { preExecution.settleUnfinished('identity'); throw error }
+      catch (error) {
+        preExecution.fail(controller.signal.aborted && error === controller.signal.reason
+          ? codeForReason(controller.signal.reason) : 'identity', error)
+        throw error
+      }
       preExecution.settle(run.denial, run.evaluated === true, run.incomplete)
     }
     const matched = await update(event.sessionId, async state => {
@@ -685,7 +692,12 @@ export function createReminderRuntime({ config: input, entries = [], sessionAuth
       preExecution?.settleUnfinished('capacity')
       return Promise.reject(new Error('reminder-capacity-exceeded'))
     }
-    const serialized = JSON.stringify(rawEvent)
+    let serialized: string
+    try {
+      const value = JSON.stringify(rawEvent)
+      if (value === undefined) throw new TypeError('reminder-event-not-serializable')
+      serialized = value
+    } catch (error) { preExecution?.fail('parse-failed', error); throw error }
     if (Buffer.byteLength(serialized) > config.maxBytes) {
       preExecution?.settleUnfinished('input-budget')
       return Promise.reject(new Error('reminder-input-budget-exceeded'))
@@ -694,7 +706,7 @@ export function createReminderRuntime({ config: input, entries = [], sessionAuth
     // 解析失败是事件本身坏了，不是评估没跑完：这一档也要自己说清楚。
     let event: EventValue
     try { event = parseOrThrow('提醒事件无效', () => Event.parse(JSON.parse(serialized))) }
-    catch (error) { preExecution?.settleUnfinished('parse-failed'); throw error }
+    catch (error) { preExecution?.fail('parse-failed', error); throw error }
     // A human turn breaks the reminder chain; a reminder-caused event extends it. Only
     // derived activations are affected by this count (see loopBlocked).
     const rememberOrigin = () => {
@@ -727,9 +739,12 @@ export function createReminderRuntime({ config: input, entries = [], sessionAuth
     const resolveTarget = async () => {
       const alias = event.type === 'session.event' && typeof event.name === 'string'
         && customEvents.nativeName(event.name) !== undefined ? event.name : undefined
-      if (alias && event.native?.type !== 'session-event') throw new Error(`自定义事件 ${alias} 需要原生 Session 事件锚点`)
-      if (event.native) {
+      if (alias && event.native?.type !== 'session-event') {
         unfinished = 'parse-failed'
+        throw new Error(`自定义事件 ${alias} 需要原生 Session 事件锚点`)
+      }
+      if (event.native) {
+        unfinished = 'native-event'
         // Discovery owns one native read for many samples. Public submissions still
         // resolve their anchor, while recovered canonical values retain all checks.
         let canonical = nativeResolved ?? event
@@ -740,6 +755,7 @@ export function createReminderRuntime({ config: input, entries = [], sessionAuth
         run.controller.signal.throwIfAborted()
         if (alias) canonical = customEvents.project(alias, canonical)
         if (canonical.sessionId !== event.sessionId) throw new Error('reminder-native-tool-session-mismatch')
+        unfinished = 'parse-failed'
         const value = JSON.stringify(canonical)
         if (Buffer.byteLength(value) > config.maxBytes) {
           unfinished = 'input-budget'
@@ -747,12 +763,17 @@ export function createReminderRuntime({ config: input, entries = [], sessionAuth
         }
         event = Event.parse(JSON.parse(value))
         run.event = event
+        unfinished = 'unclassified'
         await retireNativeCopies(event)
         rememberOrigin()
-        unfinished = 'unclassified'
       }
       run.controller.signal.throwIfAborted()
-      return run.recipient ?? identity(event.sessionId, event.agentPreset, run.controller.signal)
+      if (run.recipient) return run.recipient
+      // Only this lookup owns the identity classification. Later admission work does not.
+      unfinished = 'identity'
+      const target = await identity(event.sessionId, event.agentPreset, run.controller.signal)
+      unfinished = 'unclassified'
+      return target
     }
     admission.task = resolveTarget().then(async target => {
       if (closed || run.controller.signal.aborted) return false
@@ -816,9 +837,10 @@ export function createReminderRuntime({ config: input, entries = [], sessionAuth
       const queue = queues.get(event.sessionId) ?? []; queue.push(run); queues.set(event.sessionId, queue); pump()
       return done.then(() => { if (run.handoffFailure) throw run.handoffFailure })
     }).catch(async error => {
-      // A failed native read/validation or identity lookup has not run any rule.
-      if (!run.controller.signal.aborted) {
-        if (unfinished === 'unclassified') unfinished = 'identity'
+      // Preserve the actual exception before finally settles the ticket. A concurrent
+      // cancellation cannot relabel an unrelated error as an expected abort.
+      if (!run.controller.signal.aborted || error !== run.controller.signal.reason) {
+        preExecution?.fail(unfinished, error)
         throw error
       }
       await diagnostic(event.sessionId, { eventId: event.callId, status: signal?.aborted ? 'cancelled' : 'queue-timeout' })
@@ -996,8 +1018,15 @@ export function createReminderRuntime({ config: input, entries = [], sessionAuth
       if (!before.some(rule => rule.effect.kind === 'deny-tool')) pre.settle(undefined, true)
       // 一条执行前规则都没有时无需评估。
       if (!before.length) return
-      void admit(Event.parse(jsonCopy({ type: 'tool.before-execute', sessionId, ...(agentPreset === undefined ? {} : { agentPreset }),
-        callId, rootCallId, name, arguments: args, ...(native ? { native } : {}), clock: { at: wallNow() }, facts: {} })), signal, pre).catch(report)
+      try {
+        void admit({ type: 'tool.before-execute', sessionId, ...(agentPreset === undefined ? {} : { agentPreset }),
+          callId, rootCallId, name, arguments: args, ...(native ? { native } : {}), clock: { at: wallNow() }, facts: {} }, signal, pre)
+          .catch(error => { pre.fail('unclassified', error); report(error) })
+      } catch (error) {
+        // Serialization and other synchronous entry failures must also reach the guard.
+        pre.fail('unclassified', error)
+        report(error)
+      }
       await pre.done
     },
     /**

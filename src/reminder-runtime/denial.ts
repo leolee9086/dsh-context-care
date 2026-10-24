@@ -18,6 +18,8 @@ export type UnfinishedCode =
   | 'parse-failed'
   /** 同一 callId 已在处理，重复提交被跳过。 */
   | 'duplicate-call'
+  /** 读取或重建原生触发记录失败。 */
+  | 'native-event'
   /** 会话归属查询失败，无法判断规则是否适用。 */
   | 'identity'
   /** 整轮超出时间预算。 */
@@ -44,6 +46,7 @@ const UNFINISHED_REASON: Record<UnfinishedCode, string> = {
   'input-budget': '提醒事件超出体积上限，本次调用未执行',
   'parse-failed': '提醒事件格式无效，本次调用未执行',
   'duplicate-call': '同一调用已有一次未完成的评估，本次调用未执行',
+  'native-event': '提醒原生触发记录读取或重建失败，本次调用未执行',
   identity: '提醒策略无法确认会话归属，本次调用未执行',
   'round-timeout': '提醒策略评估超出时间预算，本次调用未执行',
   cancelled: '调用已被取消，提醒策略未完成评估',
@@ -76,11 +79,23 @@ export function codeForReason(reason: unknown): UnfinishedCode {
   return 'cancelled'
 }
 
+/** A preparation failure retains its actual phase and original exception for the tool result. */
+export class ReminderPreparationError extends Error {
+  constructor(readonly phase: UnfinishedCode, cause: unknown) {
+    const detail = cause instanceof Error ? cause.toString()
+      : cause !== null && typeof cause === 'object' && 'message' in cause ? String(cause.message) : String(cause)
+    super(`${UNFINISHED_REASON[phase]} [${phase}]：${detail}`, { cause })
+    this.name = 'ReminderPreparationError'
+  }
+}
+
 interface Ticket {
   verdict: DenialVerdict | undefined
   evaluated: boolean
   /** 未完成时是哪一步失去的；evaluated 为真时忽略。 */
   code: UnfinishedCode
+  /** Preparation exceptions remain distinct from matched rule denials. */
+  failure?: ReminderPreparationError
   /** Policy generation the round was evaluated under. */
   generation: number
 }
@@ -92,9 +107,9 @@ export interface DenialTickets {
    * step that cut it short so the denial can say which one.
    */
   record(key: object, verdict: DenialVerdict | undefined, evaluated: boolean, generation: number,
-    code?: UnfinishedCode): void
+    code?: UnfinishedCode, failure?: ReminderPreparationError): void
   /** Final synchronous decision for this execution token; valid until settlement or a relevant policy change. */
-  decide(key: object): { kind: 'allow' } | { kind: 'deny'; reason: string }
+  decide(key: object): { kind: 'allow' } | { kind: 'deny'; reason: string; error?: ReminderPreparationError }
   /** Drop a settled call so the registry does not retain finished executions. */
   settle(key: object): void
   /**
@@ -117,6 +132,8 @@ export interface PreExecution {
   settle(verdict: DenialVerdict | undefined, evaluated: boolean, code?: UnfinishedCode): void
   /** Fail closed for a preparation that ended without a verdict of its own. */
   settleUnfinished(code?: UnfinishedCode): void
+  /** Retain the original exception when preparation fails before its verdict. */
+  fail(code: UnfinishedCode, cause: unknown): void
 }
 
 /**
@@ -129,13 +146,16 @@ export function openPreExecution(key: object, tickets: DenialTickets): PreExecut
   let finish!: () => void
   const done = new Promise<void>(resolve => { finish = resolve })
   let settled = false
-  const settle = (verdict: DenialVerdict | undefined, evaluated: boolean, code?: UnfinishedCode) => {
+  const settle = (verdict: DenialVerdict | undefined, evaluated: boolean, code?: UnfinishedCode, failure?: ReminderPreparationError) => {
     if (settled) return
     settled = true
-    tickets.record(key, verdict, evaluated, generation, evaluated ? undefined : code ?? 'unclassified')
+    tickets.record(key, verdict, evaluated, generation, evaluated ? undefined : code ?? 'unclassified', failure)
     finish()
   }
-  return { done, settle, settleUnfinished: (code?: UnfinishedCode) => settle(undefined, false, code) }
+  return { done, settle, settleUnfinished: (code?: UnfinishedCode) => settle(undefined, false, code),
+    fail: (code, cause) => {
+      if (!settled) settle(undefined, false, code, new ReminderPreparationError(code, cause))
+    } }
 }
 
 /**
@@ -150,9 +170,9 @@ export function createDenialTickets(): DenialTickets {
   let generation = 0
   let disposed = false
   return {
-    record(key, verdict, evaluated, issuedUnder, code) {
+    record(key, verdict, evaluated, issuedUnder, code, failure) {
       if (disposed) return
-      issued.set(key, { verdict, evaluated, code: code ?? 'unclassified', generation: issuedUnder })
+      issued.set(key, { verdict, evaluated, code: code ?? 'unclassified', generation: issuedUnder, failure })
     },
     decide(key) {
       // A closed service has no policy left to consult, so nothing can be authorized.
@@ -160,6 +180,8 @@ export function createDenialTickets(): DenialTickets {
       const ticket = issued.get(key)
       // A missing ticket means the evaluation never finished: deny instead of assuming allowed.
       if (!ticket) return { kind: 'deny', reason: '提醒策略未能在执行前完成评估' }
+      // A concurrent policy change must not hide the exception that already stopped preparation.
+      if (ticket.failure) return { kind: 'deny', reason: ticket.failure.message, error: ticket.failure }
       // The rule set changed after this round read it, so the verdict is no longer that policy's.
       if (ticket.generation !== generation) return { kind: 'deny', reason: '提醒策略已变更，本次调用需重新评估' }
       // 未完成时报告具体是哪一步：规则超时和队列已满都该拒绝，但原因不该长得一样。

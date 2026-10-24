@@ -9,6 +9,7 @@ import { GUIDANCE } from '../src/policy.js'
 import { dictionaries } from '../src/client-view.js'
 import { createUserMessage } from '../src/message.js'
 import { createActionRecords } from '../src/action-records.js'
+import { careStreamFixture, turn } from './fixtures/care-stream.js'
 const blocks = text => [{ type: 'text', text }]
 const requestRecord = data => ({ kind: 'request', at: 100, data })
 
@@ -96,18 +97,16 @@ test('optional prompt evidence is a detached JSON snapshot before durable admiss
   assert.deepEqual(JSON.parse(JSON.stringify(message)), message)
 })
 
-test('prompt reads locate historical seq and release pages independently of other sessions', async () => {
-  const requests = []
-  const records = createActionRecords({ endpoint: '/context-care/prompts', collection: 'prompts',
-    fetcher: async (url, options) => { requests.push({ url, signal: options.signal }); return { ok: true, json: async () => ({ prompts: [], offset: 40, selectedFound: true }) } } })
+test('prompt subscriptions locate historical seq and release pages independently', async () => {
+  const transport = careStreamFixture()
+  const records = createActionRecords({ changes: transport.changes, collection: 'prompts' })
   const stop = records.watch('one', 0, 42)
-  const stopOther = records.watch('two', 0)
-  for (let step = 0; step < 8; step++) await Promise.resolve()
-  assert.match(requests[0].url, /prompts\?sessionId=one.*seq=42/)
+  const stopOther = records.watch('two', 0); await turn()
+  assert.equal(transport.opened[0].subscriptions[0].seq, 42)
+  transport.push({ sessionId: 'one', topic: 'prompts', seq: 42 }, { prompts: [], offset: 40, selectedFound: true }); await turn()
   assert.equal(records.source.getSnapshot().get('one:0:42').offset, 40)
-  stop()
-  assert.equal(requests[0].signal.aborted, true)
-  assert.equal(requests[1].signal.aborted, false)
-  records.dispose()
-  stopOther()
+  stop(); await turn()
+  assert.equal(transport.opened[0].signal.aborted, true)
+  assert.deepEqual(transport.opened.at(-1).subscriptions.map(item => item.sessionId), ['two'])
+  records.dispose(); stopOther(); transport.changes.dispose()
 })

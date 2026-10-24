@@ -42,19 +42,19 @@ export function ControlPanel({ value, sessionId, changeControls, refreshControls
 }
 
 /** Framework supplies its own observable hook and session identity. */
-export function ContextCareControls({ useCareControls, watchControls, changeControls, refreshControls, sessionId, t, fetcher, watchRuntime }) {
+export function ContextCareControls({ useCareControls, watchControls, changeControls, refreshControls, sessionId, t, fetcher, watchRuntime, refreshRuntime }) {
   const value = useCareControls(table => table.get(sessionId))
   useEffect(() => watchControls(sessionId), [sessionId, watchControls])
-  return h(SessionRuleManager, { key: sessionId, value, sessionId, changeControls, refreshControls, t, fetcher, watchRuntime })
+  return h(SessionRuleManager, { key: sessionId, value, sessionId, changeControls, refreshControls, t, fetcher, watchRuntime, refreshRuntime })
 }
 
 function SessionRuleManager(props) {
   const [mode, setMode] = useState('rules')
-  const { sessionId, t, fetcher, watchRuntime } = props
+  const { sessionId, t, fetcher, watchRuntime, refreshRuntime } = props
   return h('div', { 'data-care-manager': '', 'data-care-panel': '' }, h(CareStyles),
     h('nav', { 'aria-label': t('runtimeNavigation') }, ...['rules', 'declarations', 'runs', 'preview', 'capacity'].map(view =>
       h('button', { key: view, type: 'button', 'aria-pressed': mode === view, onClick: () => setMode(view) }, t(`runtime_${view}`)))),
-    mode === 'rules' ? h(ControlPanel, props) : mode === 'capacity' ? h(ReminderCapacityPanel, { key: sessionId, sessionId, t, fetcher }) : h(RuleRuntimePanel, { key: `${sessionId}:${mode}`, sessionId, mode, t, fetcher, watchRuntime }))
+    mode === 'rules' ? h(ControlPanel, props) : mode === 'capacity' ? h(ReminderCapacityPanel, { key: sessionId, sessionId, t, fetcher }) : h(RuleRuntimePanel, { key: `${sessionId}:${mode}`, sessionId, mode, t, fetcher, watchRuntime, refreshRuntime }))
 }
 
 /** A direct opener keeps the controls discoverable from the conversation composer. */

@@ -20,9 +20,9 @@ export function createDisplayDefinition() {
 }
 
 /** Rendering a message performs no HTTP read. Only known changes/failures produce a marker. */
-export function DisplayNodeView({ node, sessionId, useCareActions, openDisplay, t }) {
+export function DisplayNodeView({ node, sessionId, useCareStatus, openDisplay, t }) {
   const seq = node.data.seq
-  const health = useCareActions(value => value.get(`${sessionId}:0`))
+  const health = useCareStatus(value => value.get(`${sessionId}:0`))
   const failed = health?.matchingFailures?.some(value => value.sourceSeqs.includes(seq))
   const changed = health?.displayMarkers?.includes(seq)
   if (!changed && !failed) return null
@@ -31,8 +31,9 @@ export function DisplayNodeView({ node, sessionId, useCareActions, openDisplay, 
 }
 
 /** Comparison content lives exclusively in the selected right sidebar. */
-export function DisplayDetails({ sessionId, useDisplaySelection, useDisplayRecords, useCareActions, watchDisplay, refreshDisplay, t }) {
+export function DisplayDetails({ sessionId, useDisplaySelection, useDisplayRecords, useCareActions, watchActions, watchDisplay, refreshDisplay, t }) {
   const seq = useDisplaySelection(value => value.get(sessionId))
+  React.useEffect(() => watchActions(sessionId, 0), [sessionId, watchActions])
   const health = useCareActions(value => value.get(`${sessionId}:0`))
   const failures = health?.matchingFailures?.filter(value => value.sourceSeqs.includes(seq)) ?? []
   React.useEffect(() => Number.isSafeInteger(seq) ? watchDisplay(sessionId, 0, seq) : undefined, [sessionId, seq, watchDisplay])

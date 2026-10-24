@@ -1,4 +1,16 @@
-# v0.13.6 诊断查询延迟验收
+# 诊断查询与数据推送验收
+
+## v0.13.7 直接数据推送（2026-10-25）
+
+v0.13.6 只发送失效通知，客户端收到后仍会发起页面 GET；连续对话会反复触发读取。v0.13.7 将同一鉴权 NDJSON 连接改为发送视图快照及改写增量。状态条订阅轻量状态；动作、提示、规则开关和运行页按当前页码及筛选条件订阅。订阅成员、分页、筛选、显式刷新和原生连接代次变化会重建连接；失败保留到重新订阅，没有定时或焦点重试。
+
+真实 Loader、Session、鉴权 HTTP 与客户端共同运行的 `native activity pushes retained pages and rewrite deltas without follow-up HTTP requests` 用例，连续追加 12 轮原生会话事件及状态采样，再追加一条改写与一条维护动作。请求计数只有 `/context-care/changes` 一条，普通对话没有重复改写帧，真实改写通过 delta 到达客户端；动作与状态也直接更新。该用例包含四类视图和共享观察者，未替换宿主 Context。
+
+发布检查 `pnpm release:check` 475/475、完整源码宿主集成 181/181、源码界面回归 24/24 均通过。新增真实注册表用例确认准备异常的原始消息可见，工具体未执行；故障源移除后下一次调用恢复。界面覆盖分页、筛选、显式刷新、保存确认竞态、取消、预览失效、跨会话隔离与卸载。
+
+这些结果不替代桌面安装验收。原始桌面异常的具体原因尚未捕获；Host 内部仍在相关变更后构建订阅页面，再按签名抑制重复输出，不能据此宣称零计算开销。以下测量和门禁属于 v0.13.6 的历史记录。
+
+## v0.13.6 诊断查询延迟验收
 
 2026-10-25，本机 Windows，明确指定外部 Harness 源码测试宿主。用真实 Cordis Loader、Session、连接鉴权和 HTTP 服务运行；没有替代 Harness Context。对应用例在 `test/integration.test.js`：`long Session diagnostic queries keep unrelated HTTP responsive and push only actual changes`。
 

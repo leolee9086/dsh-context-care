@@ -17,6 +17,8 @@ export type UnfinishedCode =
  | 'parse-failed'
 /** 同一 callId 已在处理，重复提交被跳过。 */
  | 'duplicate-call'
+/** 读取或重建原生触发记录失败。 */
+ | 'native-event'
 /** 会话归属查询失败，无法判断规则是否适用。 */
  | 'identity'
 /** 整轮超出时间预算。 */
@@ -45,19 +47,25 @@ export type UnfinishedCode =
 export declare function codeForFailure(message: string): UnfinishedCode;
 /** 从串到主控制器的中止原因里读回它属于哪一类，让中转站不丢失语义。 */
 export declare function codeForReason(reason: unknown): UnfinishedCode;
+/** A preparation failure retains its actual phase and original exception for the tool result. */
+export declare class ReminderPreparationError extends Error {
+    readonly phase: UnfinishedCode;
+    constructor(phase: UnfinishedCode, cause: unknown);
+}
 export interface DenialTickets {
     /**
      * Record one pre-execution round. `evaluated: false` means the round was cut short,
      * which must deny: an unfinished policy check is not permission. `code` names the
      * step that cut it short so the denial can say which one.
      */
-    record(key: object, verdict: DenialVerdict | undefined, evaluated: boolean, generation: number, code?: UnfinishedCode): void;
+    record(key: object, verdict: DenialVerdict | undefined, evaluated: boolean, generation: number, code?: UnfinishedCode, failure?: ReminderPreparationError): void;
     /** Final synchronous decision for this execution token; valid until settlement or a relevant policy change. */
     decide(key: object): {
         kind: 'allow';
     } | {
         kind: 'deny';
         reason: string;
+        error?: ReminderPreparationError;
     };
     /** Drop a settled call so the registry does not retain finished executions. */
     settle(key: object): void;
@@ -80,6 +88,8 @@ export interface PreExecution {
     settle(verdict: DenialVerdict | undefined, evaluated: boolean, code?: UnfinishedCode): void;
     /** Fail closed for a preparation that ended without a verdict of its own. */
     settleUnfinished(code?: UnfinishedCode): void;
+    /** Retain the original exception when preparation fails before its verdict. */
+    fail(code: UnfinishedCode, cause: unknown): void;
 }
 /**
  * One call's denial ticket: the only writer of that execution's verdict. It captures

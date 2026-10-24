@@ -1,5 +1,5 @@
 /** Process-local invalidations; Session and the owning services retain all facts. */
-export type CareTopic = 'actions' | 'prompts' | 'rewrites' | 'controls' | 'runtime'
+export type CareTopic = 'status' | 'actions' | 'prompts' | 'rewrites' | 'controls' | 'runtime'
 export interface CareChange { sessionId?: string; topics: readonly CareTopic[] }
 export function createCareChanges() {
   const listeners = new Set<(change: CareChange) => void>()
@@ -7,7 +7,7 @@ export function createCareChanges() {
   let queued = false
   let closed = false
   return {
-    changed(sessionId?: string, topics: readonly CareTopic[] = ['actions', 'prompts', 'rewrites', 'controls', 'runtime']) {
+    changed(sessionId: string | undefined, topics: readonly CareTopic[]) {
       if (closed) return
       let selected = pending.get(sessionId)
       if (!selected) { selected = new Set(); pending.set(sessionId, selected) }

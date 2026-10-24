@@ -1937,6 +1937,7 @@ export declare function createReminderRuntime({ config: input, entries, sessionA
     } | {
         kind: "deny";
         reason: string;
+        error?: import("./denial.js").ReminderPreparationError;
     };
     /** Release a settled execution's ticket. */
     settleToolExecution(key: object): void;

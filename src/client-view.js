@@ -118,12 +118,12 @@ function indicator(label, value, level, kind, t) {
 }
 
 /** Pure display receives the framework-owned projection hook. */
-export function ContextCareStatus({ useProjection, useCareActions, useRewriteHealth, watchActions, watchRewrites, openActions, sessionId, t }) {
+export function ContextCareStatus({ useProjection, useCareStatus, useRewriteHealth, watchStatus, refreshStatus, watchRewrites, openActions, sessionId, t }) {
   const projection = useProjection('contextCareNumeric')
-  const actions = useCareActions(table => table.get(`${sessionId}:0`))
+  const actions = useCareStatus(table => table.get(`${sessionId}:0`))
   const state = actions?.currentState ?? projection
   const health = useRewriteHealth(table => table.get(sessionId))
-  useEffect(() => watchActions(sessionId, 0), [sessionId, watchActions])
+  useEffect(() => watchStatus(sessionId, 0), [sessionId, watchStatus])
   useEffect(() => watchRewrites(sessionId), [sessionId, watchRewrites])
   const error = actions?.status === 'error' ? actions.error : health?.status === 'error' ? health.error : undefined
   return React.createElement('div', {
@@ -133,6 +133,6 @@ export function ContextCareStatus({ useProjection, useCareActions, useRewriteHea
   indicator(t('fatigue'), state?.fatigueValue, state?.fatigue ?? 'unknown', 'fatigue', t),
   indicator(t('wakefulness'), state?.wakefulnessValue, state?.wakefulness ?? 'unknown', 'wakefulness', t),
   actions?.matchingFailures?.length ? React.createElement('button', { type: 'button', onClick: () => openActions?.(sessionId) }, t('processingFailed'), ` · ${actions.matchingFailures.length}`) : null,
-  error ? React.createElement('span', { role: 'alert', style: { color: 'var(--dsw-alias-state-error-primary)' } }, `${t('actionsUnavailable')}: ${error}`)
+  error ? React.createElement('span', { role: 'alert', style: { color: 'var(--dsw-alias-state-error-primary)' } }, `${t('actionsUnavailable')}: ${error}`, React.createElement('button', { type: 'button', onClick: refreshStatus }, t('actionsRefresh')))
     : !state ? React.createElement('span', null, t('waiting')) : null)
 }

@@ -125,7 +125,7 @@ async function startReminderService(ctx, input, controls, facility) {
       readHandoffs: id => deliveries.handoffs(id),
       readQueued: id => deliveries.queued(id),
       handoffPending: async (id, ids) => { await handoffPending(ctx, runtime, id, ids) },
-      dispatches: true, execute: (input, signal, timing) => matcher.detect(input, signal, timing), report: error => ctx.logger.warn(`reminder: ${error instanceof Error ? error.message : String(error)}`),
+      dispatches: true, execute: (input, signal, timing) => matcher.detect(input, signal, timing), report: error => ctx.logger.warn('reminder:', error),
       eligible: (id, source, rule) => controls.enabled(id, source, rule, 'model'),
       epoch: (id, source, rule) => controls.epoch(id, source, rule) })
     resources.unshift(['reminder-runtime', () => shutdownReminderRuntime(runtime)])
@@ -141,7 +141,7 @@ async function startReminderService(ctx, input, controls, facility) {
       attemptId: agent => nativeOutputAttempt(agent.session),
       submit: event => runtime.submit(event),
       afterSubmit: interrupt,
-      report: error => ctx.logger.warn(`reminder: ${error instanceof Error ? error.message : String(error)}`),
+      report: error => ctx.logger.warn('reminder:', error),
       enabled: id => runtime.controlCatalog(id).some(source => source.rules.some(rule => rule.definition?.on === 'assistant.output')) })
     resources.unshift(['reminder-output-stream', () => outputStream.close()])
     ctx.effect(() => () => releaseResources(resources, undefined))
@@ -151,15 +151,11 @@ async function startReminderService(ctx, input, controls, facility) {
     // so the synchronous guard below is what actually stops the call.
     ctx.on('tools/pre-execute', async (exec, next) => {
       if (!exec.agent) return next()
-      try {
-        await runtime.prepareToolExecution({ key: exec.token, sessionId: String(exec.agent.session.id),
-          name: exec.name, arguments: exec.arguments, callId: String(exec.callId),
-          rootCallId: String(exec.rootCallId ?? exec.callId),
-          native: toolEvents.preparation(exec.agent.session, String(exec.callId)), signal: exec.signal })
-      } catch (error) {
-        // A failed policy evaluation leaves no ticket, and the guard then refuses the call.
-        ctx.logger.warn(`reminder: 工具前置评估失败: ${error instanceof Error ? error.message : String(error)}`)
-      }
+      // Entry failures propagate to the registry's tool result with their original cause.
+      await runtime.prepareToolExecution({ key: exec.token, sessionId: String(exec.agent.session.id),
+        name: exec.name, arguments: exec.arguments, callId: String(exec.callId),
+        rootCallId: String(exec.rootCallId ?? exec.callId),
+        native: toolEvents.preparation(exec.agent.session, String(exec.callId)), signal: exec.signal })
       return next()
     })
     // Guards have no allow result, so no listener ordering can turn a denial back into permission.
@@ -169,12 +165,14 @@ async function startReminderService(ctx, input, controls, facility) {
       // Settling immediately keeps the registry bounded even when the body never runs.
       const verdict = runtime.decideToolExecution(exec.token)
       runtime.settleToolExecution(exec.token)
-      return verdict.kind === 'deny' ? verdict.reason : undefined
+      if (verdict.kind === 'allow') return undefined
+      if (verdict.error) throw verdict.error
+      return verdict.reason
     }))
     ctx.on('session/event', (session, event) => {
       const submission = toolEvents.observe(session, event)
       if (submission) void runtime.submit(submission.event)
-        .catch(error => ctx.logger.warn(`reminder: ${error.message}`))
+        .catch(error => ctx.logger.warn('reminder:', error))
     })
     ctx.on('tools/result', (exec, result) => {
       if (!exec.agent) return
@@ -193,7 +191,7 @@ async function startReminderService(ctx, input, controls, facility) {
         ...(result.isError ? { error: { code: result.error?.info?.code } } : {}),
         callId: String(exec.callId), rootCallId: String(exec.rootCallId ?? exec.callId),
         context: { messages, truncated: messages.length < visible.length || messages.some(message => message.truncated) } }
-      void runtime.submit(event, exec.signal).catch(error => ctx.logger.warn(`reminder: ${error.message}`))
+      void runtime.submit(event, exec.signal).catch(error => ctx.logger.warn('reminder:', error))
     })
     ctx.on('agent/assistant-stream', ({ agent, frame }) => {
       if (frame.type !== 'end') return outputStream.observe(agent, frame)
@@ -210,7 +208,7 @@ async function startReminderService(ctx, input, controls, facility) {
       if (!runtime.handlesSessionEvent(event.type)) return
       // Reuse the same canonical payload and source classification during replay.
       void runtime.submit(toolEvents.observeSession(session, event))
-        .catch(error => ctx.logger.warn(`reminder: ${error instanceof Error ? error.message : String(error)}`))
+        .catch(error => ctx.logger.warn('reminder:', error))
     })
     return runtime
   } catch (error) { await releaseResources(resources, error); throw error }

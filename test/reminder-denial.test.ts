@@ -164,6 +164,60 @@ const exits: Exit[] = [
     expected: '提醒策略服务已停止，本次调用未执行' },
 ]
 
+for (const phase of ['identity', 'identity-recheck', 'native-event', 'eligible', 'handoff', 'evaluation'] as const) {
+  test(`preparation exposes the original ${phase} exception without misclassifying it`, async t => {
+    const cause = new Error('underlying storage detail')
+    const failure = new TypeError(`original-${phase}`, { cause })
+    const reported: unknown[] = []
+    let identityReads = 0
+    let epochReads = 0
+    const instance = runtime(t, {
+      report: error => { reported.push(error) },
+      resolveIdentity: () => {
+        identityReads++
+        if (phase === 'identity' || (phase === 'identity-recheck' && identityReads === 2)) throw failure
+        return {}
+      },
+      resolveEvent: async event => { if (phase === 'native-event') throw failure; return event },
+      eligible: () => { if (phase === 'eligible') throw failure; return true },
+      wasHanded: async () => { if (phase === 'handoff') throw failure; return false },
+      // The second epoch read happens in evaluate(), beyond the admission promise.
+      epoch: () => { if (phase === 'evaluation' && ++epochReads === 2) throw failure; return 0 },
+    })
+    instance.registerSource({ sourceId: 'policy', plugin: 'test', revision: 1, rules: [denyRule('rule-denial')] })
+    const key = {}
+    await instance.prepareToolExecution({ key, sessionId: 's', name: 'blocked', arguments: {},
+      callId: phase, rootCallId: phase, ...(phase === 'native-event' ? { native: { type: 'tool-call', seq: 0 } as const } : {}) })
+    const outcome = instance.decideToolExecution(key)
+    assert.equal(outcome.kind, 'deny')
+    assert.ok(outcome.kind === 'deny' && outcome.error)
+    const expected = phase.startsWith('identity') ? 'identity' : phase === 'native-event' ? 'native-event' : 'unclassified'
+    assert.equal(outcome.error.phase, expected)
+    assert.equal(outcome.error.cause, failure, 'retain the same Error object, including its stack and cause')
+    assert.equal(failure.cause, cause)
+    assert.match(outcome.reason, new RegExp(`original-${phase}`))
+    if (expected !== 'identity') assert.doesNotMatch(outcome.reason, /会话归属/)
+    instance.settleToolExecution(key)
+    await instance.settle('s')
+    assert.ok(reported.includes(failure), 'the logger receives the original exception rather than only its message')
+  })
+}
+
+test('serialization failure settles preparation with the original parse error', async t => {
+  const instance = runtime(t)
+  instance.registerSource({ sourceId: 'policy', plugin: 'test', revision: 1, rules: [denyRule('rule-denial')] })
+  const args: { self?: object } = {}
+  args.self = args
+  const key = {}
+  await instance.prepareToolExecution({ key, sessionId: 's', name: 'blocked', arguments: args, callId: 'cyclic', rootCallId: 'cyclic' })
+  const outcome = instance.decideToolExecution(key)
+  assert.ok(outcome.kind === 'deny' && outcome.error)
+  assert.equal(outcome.error.phase, 'parse-failed')
+  assert.ok(outcome.error.cause instanceof TypeError)
+  assert.match(outcome.reason, /circular/i)
+  assert.doesNotMatch(outcome.reason, /会话归属/)
+})
+
 for (const exit of exits) {
   test(`工具调用的每条出口都有结论：${exit.name}`, async t => {
     const instance = runtime(t, exit.options)

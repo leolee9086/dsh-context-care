@@ -32,7 +32,10 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
   const tailSeq = session => session.seq - 1
   const externalDocuments = id => [...registrations.values()].filter(source => !source.sessionId || source.sessionId === id).flatMap(source => source.documents)
   const contributor = (id, document) => [...registrations.values()].find(source => (!source.sessionId || source.sessionId === id) && source.documents.includes(document))
-  const store = await openWorkbenchStore(ctx.storageDomain, { templates, report, externalDocuments, changed: id => ctx.get('contextCareChanges')?.changed(id.startsWith('$scope:') ? undefined : id), admissionSeq: id => {
+  // Workbench mutations update diagnostics and rule state. Rewrite records have
+  // their own owner and are published only when that owner records a rewrite.
+  const notifyWorkbench = id => ctx.get('contextCareChanges')?.changed(id?.startsWith('$scope:') ? undefined : id, ['status', 'actions', 'controls', 'runtime'])
+  const store = await openWorkbenchStore(ctx.storageDomain, { templates, report, externalDocuments, changed: notifyWorkbench, admissionSeq: id => {
     const session = ctx.sessions.get(id)
     if (!session) throw new Error('workbench-session-unavailable')
     return tailSeq(session)
@@ -368,7 +371,7 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
               .map(rule => { const key = JSON.stringify([rule.id, rule.revision]); return [key,
                 previous?.document.id === item.document.id ? oldOwner?.ruleAdmissions?.get(key) ?? admission : admission] }))
             registrations.set(`$file:${item.path}`, { plugin: 'dsh-context-care', filePath: item.path, documents: [item.document], admission, ruleAdmissions })
-            fileRecords.set(item.path, item); generation++; ctx.get('contextCareChanges')?.changed()
+            fileRecords.set(item.path, item); generation++; notifyWorkbench()
           }
           if (fileFailure) { fileFailure = undefined; generation++ }
         } catch (error) {
@@ -387,8 +390,8 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
       for (const [id, local] of store.documentSets()) if (!sessionId || id === sessionId)
         validateDocumentSet([...local, ...externalDocuments(id), ...docs], templates)
       const admission = new Map(ctx.sessions.list().filter(session => !sessionId || String(session.id) === sessionId).map(session => [String(session.id), tailSeq(session)]))
-      const value = { plugin, registrationId, sessionId, documents: docs, admission }; registrations.set(registrationId, value); generation++; ctx.get('contextCareChanges')?.changed(sessionId)
-      return () => { if (registrations.get(registrationId) === value) { registrations.delete(registrationId); generation++; ctx.get('contextCareChanges')?.changed(sessionId) } }
+      const value = { plugin, registrationId, sessionId, documents: docs, admission }; registrations.set(registrationId, value); generation++; notifyWorkbench(sessionId)
+      return () => { if (registrations.get(registrationId) === value) { registrations.delete(registrationId); generation++; notifyWorkbench(sessionId) } }
     },
     registerDetector(specification) {
       if (closed) throw new Error('workbench-closed')

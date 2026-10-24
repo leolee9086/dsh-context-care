@@ -16,11 +16,11 @@ const details = (label, value) => h(JsonDetails, { key: label, label, value })
 const fields = values => h('dl', { className: 'care-fields' }, ...values.flatMap(([label, value]) => [h('dt', { key: `${label}:label` }, label), h('dd', { key: label }, value)]))
 
 /** Session-bound inspection has no document authoring path. Mutation is limited to cancelling a run. */
-export function RuleRuntimePanel({ sessionId, mode, t, fetcher = fetch, watchRuntime }) {
+export function RuleRuntimePanel({ sessionId, mode, t, fetcher = fetch, watchRuntime, refreshRuntime }) {
   const [data, setData] = useState(); const [error, setError] = useState(''); const [operationError, setOperationError] = useState('')
   const [busy, setBusy] = useState(false); const [preview, setPreview] = useState(); const [ack, setAck] = useState('')
   const [search, setSearch] = useState(''); const [status, setStatus] = useState(''); const [offset, setOffset] = useState(0)
-  const [refresh, setRefresh] = useState(0); const mutation = useRef(); const lifetime = useRef()
+  const mutation = useRef(); const lifetime = useRef()
   const [loading, setLoading] = useState(true); const [previewStale, setPreviewStale] = useState(false)
   const translated = (key, raw) => t(key) === key ? raw : t(key)
   useEffect(() => {
@@ -28,39 +28,27 @@ export function RuleRuntimePanel({ sessionId, mode, t, fetcher = fetch, watchRun
     return () => { controller.abort(); mutation.current?.abort() }
   }, [sessionId, mode])
   const endpoint = `/context-care/rule-runtime?sessionId=${encodeURIComponent(sessionId)}`
-  const bump = () => setRefresh(value => value + 1)
+  const bump = () => refreshRuntime()
   useEffect(() => {
-    const controller = new AbortController()
-    setLoading(true); setData(undefined)
-    let pending; let ticket = 0; let dirty = false
-    const read = async () => {
-      if (controller.signal.aborted) return
-      if (pending || mutation.current) { dirty = true; return }
-      dirty = false
-      const child = new AbortController(); pending = child; const current = ++ticket
+    let closed = false
+    setLoading(true); setData(undefined); setError('')
+    const stop = watchRuntime({ sessionId, offset, status, search }, update => {
+      if (closed) return
       try {
-        const response = await fetcher(`${endpoint}&limit=20&offset=${offset}&status=${encodeURIComponent(status)}&search=${encodeURIComponent(search)}`, { signal: child.signal })
-        if (!response.ok) throw await httpFailure(response, '/context-care/rule-runtime')
-        const value = RuntimeWire.parse(await response.json())
+        if (update.type === 'error') throw new Error(`${update.error.name}: ${update.error.message}`)
+        if (update.type !== 'snapshot') throw new Error('rule-runtime-unexpected-delta')
+        const value = RuntimeWire.parse(update.value)
         if (value.sessionId !== sessionId) throw new Error('rule-runtime-session-mismatch')
-        if (!controller.signal.aborted && !child.signal.aborted && current === ticket) {
-          setData(value); setError(''); setLoading(false)
-          setPreview(previous => {
-            if (previous && previous.snapshotId !== value.snapshotId) { setPreviewStale(true); return undefined }
-            return previous
-          })
-        }
-      } catch (failure) {
-        if (!controller.signal.aborted && !child.signal.aborted && current === ticket) { setError(String(failure)); setLoading(false) }
-      } finally { if (pending === child) pending = undefined; if (dirty && !mutation.current && !controller.signal.aborted) void read() }
-    }
-    // Visibility suspends only reads. A user-requested cancellation keeps its own lifetime.
-    const visible = () => { if (document.hidden) { pending?.abort(); pending = undefined; ticket++ } else void read() }
-    void read()
-    const stop = watchRuntime?.(sessionId, () => { void read() })
-    document.addEventListener('visibilitychange', visible); window.addEventListener('focus', visible)
-    return () => { controller.abort(); pending?.abort(); ticket++; stop?.(); document.removeEventListener('visibilitychange', visible); window.removeEventListener('focus', visible) }
-  }, [sessionId, endpoint, offset, status, search, refresh, fetcher, watchRuntime])
+        setData(value); setError(''); setLoading(false)
+        setPreview(previous => {
+          if (previous && previous.snapshotId !== value.snapshotId) { setPreviewStale(true); return undefined }
+          return previous
+        })
+      } catch (failure) { setError(String(failure)); setLoading(false) }
+    })
+    // Focus and visibility do not cause reads or cancel a separate requested mutation.
+    return () => { closed = true; stop() }
+  }, [sessionId, offset, status, search, watchRuntime])
   useEffect(() => { setPreview(undefined) }, [mode])
   const act = async (body, parse) => {
     if (mutation.current || !lifetime.current || loading || error) return
@@ -72,7 +60,7 @@ export function RuleRuntimePanel({ sessionId, mode, t, fetcher = fetch, watchRun
       const value = await response.json()
       if (!controller.signal.aborted && !sessionOwner.signal.aborted && lifetime.current === sessionOwner) {
         if (value.sessionId !== sessionId) throw new Error('rule-runtime-session-mismatch')
-        parse(value); bump()
+        parse(value)
       }
     } catch (failure) { if (!controller.signal.aborted && !sessionOwner.signal.aborted && lifetime.current === sessionOwner) setOperationError(String(failure)) }
     finally { if (mutation.current === controller) mutation.current = undefined; if (!controller.signal.aborted && !sessionOwner.signal.aborted && lifetime.current === sessionOwner) setBusy(false) }
