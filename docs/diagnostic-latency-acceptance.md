@@ -10,6 +10,21 @@ v0.13.6 只发送失效通知，客户端收到后仍会发起页面 GET；连�
 
 这些结果不替代桌面安装验收。原始桌面异常的具体原因尚未捕获；Host 内部仍在相关变更后构建订阅页面，再按签名抑制重复输出，不能据此宣称零计算开销。以下测量和门禁属于 v0.13.6 的历史记录。
 
+## 思源时间窗声明的隔离宿主验收（2026-10-25）
+
+从思源 callout `20261014114116-cduofoj` 回读现有 `test-window-1140-1150` 的完整声明和正文，新增 TypeScript 用例 `SiYuan 11:40 window: native delivery, deduplication, expiry and next-day recovery`。通过真实 Loader、Session、Worker 和原生投递投影执行，只向提醒运行时注入测试时钟，不修改系统时间或思源规则，不替换 Harness Context。
+
+| 时刻与状态 | 投递结果 |
+| --- | --- |
+| 11:39:59.999 | 0，窗口外 |
+| 11:40:00.000 | 1，正文及 ruleId 一致，提交原生 user/message |
+| 同窗口重复请求 | 0，原生已提交记录抑制重复 |
+| 清空运行缓存后，11:49:59.999 | 0，同窗口去重仍有效 |
+| 新会话在末毫秒匹配，11:50:00.000 才收集 | 0，投递前再次检查窗口期限 |
+| 次日 11:40，昨日提醒仍可见 | 1，新窗口键；随后重复请求为 0 |
+
+测试会话只提交两条提醒，原生事件序号为 0、1；未打开 `context_care_reminders` 或 `context_care_reminder_claims`。定向源码集成测试退出 0，随后 `pnpm exec tsc -p tsconfig.tests.json` 退出 0。该证据验证现有声明的窗口及去重语义，不代表已安装桌面的真实思源来源加载或自然投递。2026-10-25 04:00 左右回读桌面包清单仍为 0.13.6，现场新版资源、HTTP 请求和全部 14 条规则的触发、投递及去重仍待安装后验收。
+
 ## v0.13.6 诊断查询延迟验收
 
 2026-10-25，本机 Windows，明确指定外部 Harness 源码测试宿主。用真实 Cordis Loader、Session、连接鉴权和 HTTP 服务运行；没有替代 Harness Context。对应用例在 `test/integration.test.js`：`long Session diagnostic queries keep unrelated HTTP responsive and push only actual changes`。

@@ -29,6 +29,7 @@ import { registerTimeoutHostCases } from './reminder-timeout-cases.ts'
 import { registerRecoveryHostCases } from './reminder-recovery-cases.ts'
 import { registerShutdownHostCases } from './reminder-shutdown-host-cases.ts'
 import { registerDenialLifetimeHostCases } from './reminder-denial-lifetime-host-cases.ts'
+import { registerSiyuanWindowHostCases } from './reminder-siyuan-window-host-cases.ts'
 import { preV4State } from './fixtures/reminder-upgrade.ts'
 import { registerScopeHostCases } from './reminder-scope-host-cases.ts'
 import { registerDeliveryReplayCases } from './reminder-delivery-replay-cases.ts'
@@ -613,6 +614,12 @@ registerDenialLifetimeHostCases({ async open(t, ruleTimeoutMs) {
     await completionTurn(ctx, agent)
     return agent.session.snapshotEvents()
   } }
+} })
+
+registerSiyuanWindowHostCases({ async open(t) {
+  const owned = await fixture(t, false)
+  const ctx = await owned.open()
+  return { ctx, session: ctx.sessions.create('siyuan-window'), expirySession: ctx.sessions.create('siyuan-window-expiry') }
 } })
 
 registerShutdownHostCases({ async open(t) {
