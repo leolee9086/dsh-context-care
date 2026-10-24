@@ -4,11 +4,11 @@ import { createControlRecords } from '../src/control-records.js'
 const turn = () => new Promise(resolve => setImmediate(resolve))
 const response = (id, revision = 0) => ({ ok: true, json: async () => ({ sessionId: id, revision, sources: [] }) })
 
-test('saving retains acknowledged preferences and failures stay visible across polling until successful retry', async () => {
-  let tick
+test('saving retains acknowledged preferences and failures stay visible across change notifications until successful retry', async () => {
+  let changed
   let finish
   let failure = true
-  const records = createControlRecords({ setTimer: callback => { tick = callback }, clearTimer() {},
+  const records = createControlRecords({ changes: { subscribe(id, listener) { assert.equal(id, 'one'); changed = listener; return () => {} } },
     fetcher: async (_url, options) => options.method === 'PATCH'
       ? new Promise(resolve => { finish = () => resolve(failure ? { ok: false, status: 409, json: async () => ({ error: 'revision-conflict' }) } : response('one', 1)) })
       : response('one') })
@@ -21,7 +21,7 @@ test('saving retains acknowledged preferences and failures stay visible across p
     finish(); await saving
     assert.equal(records.source.getSnapshot().get('one').status, 'error')
     assert.match(records.source.getSnapshot().get('one').error, /409/)
-    tick(); await turn()
+    changed(['controls']); await turn()
     assert.equal(records.source.getSnapshot().get('one').status, 'ready')
     assert.match(records.source.getSnapshot().get('one').error, /409/)
     failure = false
@@ -34,7 +34,7 @@ test('saving retains acknowledged preferences and failures stay visible across p
 })
 
 test('malformed nested rule responses remain visible errors before reaching the view', async () => {
-  const records = createControlRecords({ setTimer() {}, clearTimer() {}, fetcher: async () => ({ ok: true,
+  const records = createControlRecords({ fetcher: async () => ({ ok: true,
     json: async () => ({ sessionId: 'one', revision: 0, sources: [{ sourceId: 'bad', plugin: 'bad',
       registration: 'entry', executor: 'bad', rules: [{ id: 'r', paused: false }] }] }) }) })
   const unwatch = records.watch('one')
@@ -49,7 +49,7 @@ test('malformed nested rule responses remain visible errors before reaching the 
 
 test('a departed session cannot publish its delayed save into a new watch of the same session', async () => {
   let finish
-  const records = createControlRecords({ setTimer() {}, clearTimer() {}, fetcher: async (_url, options) => options.method === 'PATCH'
+  const records = createControlRecords({ fetcher: async (_url, options) => options.method === 'PATCH'
     ? new Promise(resolve => { finish = () => resolve(response('one', 1)) }) : response('one') })
   const unwatch = records.watch('one')
   await turn()

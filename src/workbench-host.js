@@ -29,10 +29,10 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
   const registrations = new Map(); const observations = new Map(); const admittedSessions = new Map(); let generation = 0; let closed = false; let closing
   let fileFailure; let fileLoad
   const fileRecords = new Map()
-  const tailSeq = session => session.snapshotEvents().at(-1)?.seq ?? -1
+  const tailSeq = session => session.seq - 1
   const externalDocuments = id => [...registrations.values()].filter(source => !source.sessionId || source.sessionId === id).flatMap(source => source.documents)
   const contributor = (id, document) => [...registrations.values()].find(source => (!source.sessionId || source.sessionId === id) && source.documents.includes(document))
-  const store = await openWorkbenchStore(ctx.storageDomain, { templates, report, externalDocuments, admissionSeq: id => {
+  const store = await openWorkbenchStore(ctx.storageDomain, { templates, report, externalDocuments, changed: id => ctx.get('contextCareChanges')?.changed(id.startsWith('$scope:') ? undefined : id), admissionSeq: id => {
     const session = ctx.sessions.get(id)
     if (!session) throw new Error('workbench-session-unavailable')
     return tailSeq(session)
@@ -368,7 +368,7 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
               .map(rule => { const key = JSON.stringify([rule.id, rule.revision]); return [key,
                 previous?.document.id === item.document.id ? oldOwner?.ruleAdmissions?.get(key) ?? admission : admission] }))
             registrations.set(`$file:${item.path}`, { plugin: 'dsh-context-care', filePath: item.path, documents: [item.document], admission, ruleAdmissions })
-            fileRecords.set(item.path, item); generation++
+            fileRecords.set(item.path, item); generation++; ctx.get('contextCareChanges')?.changed()
           }
           if (fileFailure) { fileFailure = undefined; generation++ }
         } catch (error) {
@@ -387,8 +387,8 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
       for (const [id, local] of store.documentSets()) if (!sessionId || id === sessionId)
         validateDocumentSet([...local, ...externalDocuments(id), ...docs], templates)
       const admission = new Map(ctx.sessions.list().filter(session => !sessionId || String(session.id) === sessionId).map(session => [String(session.id), tailSeq(session)]))
-      const value = { plugin, registrationId, sessionId, documents: docs, admission }; registrations.set(registrationId, value); generation++
-      return () => { if (registrations.get(registrationId) === value) { registrations.delete(registrationId); generation++ } }
+      const value = { plugin, registrationId, sessionId, documents: docs, admission }; registrations.set(registrationId, value); generation++; ctx.get('contextCareChanges')?.changed(sessionId)
+      return () => { if (registrations.get(registrationId) === value) { registrations.delete(registrationId); generation++; ctx.get('contextCareChanges')?.changed(sessionId) } }
     },
     registerDetector(specification) {
       if (closed) throw new Error('workbench-closed')
@@ -572,10 +572,20 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
       if (observations.has(id)) return observations.get(id)
       const operation = (async () => {
         const lastSeq = Math.max(record(agent).runtime.state['$observed']?.seq ?? -1, admittedSessions.get(id) ?? -1)
-        const events = agent.session.snapshotEvents()
-        const displayRules = definitions(agent).filter(rule => rule.on.includes('display.render') && rule.actions.some(action => controls.enabled(id, rule.sourceId, rule.id, action.id)))
+        const rules = definitions(agent)
+        const displayRules = rules.filter(rule => rule.on.includes('display.render') && rule.actions.some(action => controls.enabled(id, rule.sourceId, rule.id, action.id)))
+        const relevant = rules.some(rule => ['output.complete', 'tool.result'].some(stage => rule.on.includes(stage)))
+        if (!displayRules.length && !relevant) return
+        const displaySeq = Math.max(record(agent).runtime.state['$displayObserved']?.seq ?? -1, admittedSessions.get(id) ?? -1)
+        const events = []
+        const through = agent.session.seq
+        const start = Math.min(displayRules.length ? displaySeq + 1 : through, relevant ? lastSeq + 1 : through)
+        for (let cursor = start; cursor < through; cursor++) {
+          const event = agent.session.eventAt(cursor)
+          if (!event) throw new Error(`workbench-history-event-missing:${cursor}`)
+          events.push(event)
+        }
         if (displayRules.length) {
-          const displaySeq = Math.max(record(agent).runtime.state['$displayObserved']?.seq ?? -1, admittedSessions.get(id) ?? -1)
           for (const event of events.filter(event => event.seq > displaySeq && ['assistant/message', 'user/message', 'system/message', 'tool/result'].includes(event.type))) {
             let assessment = 'completed'
             try {
@@ -591,9 +601,11 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
             await store.runtime(id, runtime => { runtime.state['$displayObserved'] = { seq: event.seq, assessment } })
           }
         }
-        const relevant = definitions(agent).some(rule => ['output.complete', 'tool.result'].some(stage => rule.on.includes(stage)))
-        const all = relevant ? originalSessionBlocks(agent.session) : []
-        for (const event of events.filter(event => event.seq > lastSeq && (event.type === 'assistant/message' && !event.data.interrupted || event.type === 'tool/result'))) {
+        if (!relevant) return
+        const fresh = events.filter(event => event.seq > lastSeq && (event.type === 'assistant/message' && !event.data.interrupted || event.type === 'tool/result'))
+        if (!fresh.length) return
+        const all = originalSessionBlocks(agent.session)
+        for (const event of fresh) {
           // Later committed messages cannot influence this output's depth window or captures.
           const selected = all.filter(block => block.seq <= event.seq)
           const planned = await plan(agent, { messages: agent.session.deriveMessages(), purpose: 'preview', signal }, event.type === 'tool/result' ? 'tool.result' : 'output.complete', selected, event.seq)

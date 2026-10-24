@@ -23,6 +23,7 @@ import { openWorkbenchHost } from './workbench-host.js'
 import { MatcherFailure } from './bounded-matcher.js'
 import { ensureReminderService, ReminderConfig } from './reminder-runtime/index.js'
 import { createSummaryProposalHistory } from '../lib/summary-proposal-history.js'
+import { createCareChanges } from '../lib/care-changes.js'
 
 export const name = 'context-care-requests'
 export const inject = ['agents', 'sessions', 'sessionQuery', 'tools', 'llm', 'tokenMeter', 'storageDomain']
@@ -70,7 +71,14 @@ export async function apply(ctx, config = {}) {
 /** Own live request operations and Session-derived history using the stream waterfall.
  * @param {Context} ctx @param {import('zod').input<typeof Config>} config */
 export async function openRequestHost(ctx, config = {}) {
-  const journal = await openRequestJournal({ sessions: ctx.sessions,
+  const changes = createCareChanges()
+  ctx.provide('contextCareChanges', changes)
+  ctx.effect(() => () => changes.close())
+  ctx.on('session/event', (session, event) => {
+    // Streaming deltas do not change any of these diagnostic snapshots.
+    if (['user/message', 'assistant/message', 'assistant/attempt', 'request/header', 'compaction/summary'].includes(event.type)) changes.changed(String(session.id))
+  })
+  const journal = await openRequestJournal({ sessions: ctx.sessions, changed: id => changes.changed(id, ['actions', 'prompts']),
     measureInput: (session, request) => captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session }).decomposeRequest(request) })
   /** @type {Awaited<ReturnType<typeof openRuleControls>> | undefined} */
   let controls
@@ -86,7 +94,7 @@ export async function openRequestHost(ctx, config = {}) {
     await journal.close().catch(closeError => ctx.logger.warn(`context-care: journal rollback failed: ${String(closeError)}`))
     throw error
   }
-  try { controls = await openRuleControls(ctx.storageDomain, { boundary: /** @param {string} id */ id => (ctx.sessions.get(/** @type {SessionId} */ (id))?.seq ?? 0) - 1 }) }
+  try { controls = await openRuleControls(ctx.storageDomain, { changed: /** @param {string | undefined} id */ id => changes.changed(id, ['controls', 'runtime']), boundary: /** @param {string} id */ id => (ctx.sessions.get(/** @type {SessionId} */ (id))?.seq ?? 0) - 1 }) }
   catch (error) {
     for (const [label, resource] of /** @type {const} */ ([['feedback', feedback], ['journal', journal]])) {
       await resource.close().catch(closeError => ctx.logger.warn(`context-care: ${label} rollback failed: ${String(closeError)}`))

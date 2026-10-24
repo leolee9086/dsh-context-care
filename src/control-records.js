@@ -16,10 +16,10 @@ const SnapshotWire = z.object({ sessionId: z.string(), revision: z.number().int(
 
 /**
  * Own session subscriptions and acknowledged edits. Never optimistically change an executor switch.
- * @param options fetcher and polling timers
+ * @param options fetcher and shared change subscription
  * @returns observable source, watch/refresh/change callbacks and disposer
  */
-export function createControlRecords({ fetcher = fetch, pollMs = 2000, setTimer = setInterval, clearTimer = clearInterval } = {}) {
+export function createControlRecords({ fetcher = fetch, changes } = {}) {
   let snapshot = new Map()
   let disposed = false
   const listeners = new Set()
@@ -30,8 +30,9 @@ export function createControlRecords({ fetcher = fetch, pollMs = 2000, setTimer 
     for (const listener of listeners) listener()
   }
   async function read(watch) {
-    if (disposed || watch.reading || watch.saving) return
-    watch.reading = true
+    if (disposed || watch.controller.signal.aborted) return
+    if (watch.reading || watch.saving) { watch.dirty = true; return }
+    watch.reading = true; watch.dirty = false
     const ticket = ++watch.ticket
     try {
       const response = await fetcher(`/context-care/rules?sessionId=${encodeURIComponent(watch.id)}`, {
@@ -42,9 +43,8 @@ export function createControlRecords({ fetcher = fetch, pollMs = 2000, setTimer 
       if (watch.ticket === ticket && !watch.controller.signal.aborted) publish(watch.id, { status: 'ready', ...data, error: watch.saveError })
     } catch (error) {
       if (watch.ticket === ticket && !watch.controller.signal.aborted) publish(watch.id, { ...snapshot.get(watch.id), status: 'error', error: String(error) })
-    } finally { watch.reading = false }
+    } finally { watch.reading = false; if (watch.dirty && !watch.controller.signal.aborted) void read(watch) }
   }
-  const timer = setTimer(() => { for (const watch of watches.values()) void read(watch) }, pollMs)
   return {
     source: { getSnapshot: () => snapshot, subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener) } },
     watch(id) {
@@ -52,17 +52,19 @@ export function createControlRecords({ fetcher = fetch, pollMs = 2000, setTimer 
       let watch = watches.get(id)
       if (!watch) {
         watch = { id, count: 0, ticket: 0, controller: new AbortController(), reading: false, saving: false }
-        watches.set(id, watch); publish(id, { status: 'loading' }); void read(watch)
+        watches.set(id, watch)
+        watch.unsubscribe = changes?.subscribe(id, topics => { if (topics.includes('controls')) void read(watch) })
+        publish(id, { status: 'loading' }); void read(watch)
       }
       watch.count++
       return () => {
         if (--watch.count) return
-        watch.controller.abort(); watch.ticket++; watches.delete(id)
+        watch.controller.abort(); watch.unsubscribe?.(); watch.ticket++; watches.delete(id)
         snapshot = new Map(snapshot); snapshot.delete(id)
         for (const listener of listeners) listener()
       }
     },
-    refresh(id) { const watch = watches.get(id); if (watch) void read(watch) },
+    refresh(id) { changes?.retry?.(); const watch = watches.get(id); if (watch) void read(watch) },
     async change(id, change) {
       const watch = watches.get(id)
       const previous = snapshot.get(id)
@@ -85,8 +87,8 @@ export function createControlRecords({ fetcher = fetch, pollMs = 2000, setTimer 
           watch.saveError = String(error)
           publish(id, { ...previous, status: 'error', saving: false, saved: false, error: watch.saveError })
         }
-      } finally { watch.saving = false }
+      } finally { watch.saving = false; if (watch.dirty && !watch.controller.signal.aborted) void read(watch) }
     },
-    dispose() { disposed = true; clearTimer(timer); for (const watch of watches.values()) watch.controller.abort(); watches.clear(); listeners.clear(); snapshot = new Map() },
+    dispose() { disposed = true; for (const watch of watches.values()) { watch.controller.abort(); watch.unsubscribe?.() } watches.clear(); listeners.clear(); snapshot = new Map() },
   }
 }

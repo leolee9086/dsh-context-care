@@ -8,9 +8,9 @@ import { ActionRecord } from '../src/action-detail.js'
 import { createActionRecords } from '../src/action-records.js'
 import { dictionaries } from '../src/client-view.js'
 
-test('action polling preserves the Host storage diagnostic in its visible error state', async () => {
+test('action reads preserve the Host storage diagnostic in their visible error state', async () => {
   const records = createActionRecords({ fetcher: async () => new Response(JSON.stringify({ error: 'journal-unavailable', message: 'Persistent journal write failed' }),
-    { status: 500, headers: { 'content-type': 'application/json' } }), setTimer: () => 1, clearTimer() {} })
+    { status: 500, headers: { 'content-type': 'application/json' } }) })
   const stop = records.watch('failed-session')
   for (let step = 0; step < 16; step++) await Promise.resolve()
   const value = records.source.getSnapshot().get('failed-session:0')
@@ -111,28 +111,31 @@ test('settled deep handoffs and partial durable failures retain one audited acti
   assert.equal(view.admission.dispatched, false)
 })
 
-test('session polling reserves one fetch, releases retained pages, and aborts in-flight work on unload', async () => {
-  const requests = []
-  let tick
-  let cleared = false
+test('change subscriptions share retained pages, preserve changes during reads, and abort on unload', async () => {
+  const requests = []; const subscriptions = new Map()
   const records = createActionRecords({ fetcher: (url, options) => new Promise(resolve => requests.push({ url, options, resolve })),
-    setTimer: callback => { tick = callback; return 1 }, clearTimer: () => { cleared = true } })
+    changes: { subscribe(id, listener) { subscriptions.set(id, listener); return () => subscriptions.delete(id) } } })
   const stopOne = records.watch('s1', 0)
   const stopTwo = records.watch('s1', 0)
   const stopOther = records.watch('s2', 20)
-  tick()
   assert.equal(requests.length, 2)
   assert.match(requests[0].url, /sessionId=s1&limit=20&offset=0/)
+  subscriptions.get('s1')(['controls'])
+  subscriptions.get('s1')(['actions'])
+  subscriptions.get('s1')(['actions'])
+  assert.equal(requests.length, 2)
   requests[0].resolve({ ok: true, json: async () => ({ actions: [], nextOffset: null }) })
-  await Promise.resolve(); await Promise.resolve(); await Promise.resolve()
+  for (let step = 0; step < 8; step++) await Promise.resolve()
   assert.equal(records.source.getSnapshot().get('s1:0').status, 'ready')
+  assert.equal(requests.length, 3, 'changes during a pending read produce one follow-up')
   stopOne()
   assert.equal(requests[0].options.signal.aborted, false)
   stopTwo()
   assert.equal(requests[0].options.signal.aborted, true)
+  assert.equal(subscriptions.has('s1'), false)
   assert.equal(records.source.getSnapshot().has('s1:0'), false)
   records.dispose()
-  assert.equal(cleared, true)
+  assert.equal(subscriptions.size, 0)
   assert.equal(requests[1].options.signal.aborted, true)
   requests[1].resolve({ ok: true, json: async () => ({ actions: [{ id: 'stale' }] }) })
   await Promise.resolve(); await Promise.resolve()

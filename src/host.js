@@ -13,6 +13,7 @@ import { contextCarePrompts } from './prompt-view-data.js'
 import { installControlRoute } from './control-route.js'
 import { installWorkbenchRoute } from './workbench-route.js'
 import { installDisplayRoute } from './display-route.js'
+import { installChangeRoute } from '../lib/change-route.js'
 
 // 通用入口:挂在 profile 层一次,对所有会话生效。
 //
@@ -26,7 +27,7 @@ export { Config }
 // webServer 是路由的硬依赖；connection 在每次请求时现取，未挂载时明确返回 503。
 // 写进 inject(而不是用 ctx.get 碰运气)才会让 Cordis 等到它们就绪再 apply ——
 // 用 ctx.get 的话,本行先于 webServer 加载时拿到 undefined,路由就静默地没了。
-export const inject = ['agents', 'sessions', 'sessionProjections', 'tools', 'systemPrompt', 'tokenMeter', 'llm', 'webServer', 'contextCareRequests']
+export const inject = ['agents', 'sessions', 'sessionProjections', 'tools', 'systemPrompt', 'tokenMeter', 'llm', 'webServer', 'contextCareRequests', 'contextCareChanges']
 
 /**
  * 客户端卡片从这里拿「哪些内容被改写过」。
@@ -44,6 +45,7 @@ export function apply(ctx, config = {}) {
     config,
     /** @param {Agent} agent */ agent => ctx.get('agentPresets')?.serviceFor(agent, 'compaction') ?? ctx.get('compaction'),
   )
+  ctx.effect(() => installChangeRoute(ctx, ctx.contextCareChanges))
   ctx.effect(() => installDisplayRoute(ctx))
   ctx.effect(() => installControlRoute(ctx))
   ctx.effect(() => installWorkbenchRoute(ctx))
@@ -79,9 +81,6 @@ export function apply(ctx, config = {}) {
       res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid-query' })); return
     }
     try {
-      // A readable old table is not evidence that the latest journal write
-      // succeeded. Surface retained storage failures to the status panel.
-      await ctx.contextCareRequests.flush(sessionId)
       const session = ctx.sessions.get(sessionId)
       if (collection === 'prompts' && !session) { res.writeHead(404); res.end(JSON.stringify({ error: 'session-unavailable' })); return }
       const records = ctx.contextCareRequests.list(sessionId)

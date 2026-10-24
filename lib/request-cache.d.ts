@@ -19,6 +19,7 @@ interface Options {
         visualTokens: number;
     };
     now?: () => number;
+    changed?: (sessionId: string) => void;
 }
 /**
  * Keep in-flight diagnostics in memory and read settled request facts from Session.
@@ -26,7 +27,7 @@ interface Options {
  * @param options - the live Session service and optional observation clock.
  * @returns the request query facade and its process-local recorder.
  */
-export declare function createRequestCache({ sessions, measureInput, now }: Options): {
+export declare function createRequestCache({ sessions, measureInput, now, changed }: Options): {
     /** Record only an operation currently owned by this process; never write a JSON side record. */
     put(key: string, sessionId: string, kind: CacheRecord["kind"], input: Record<string, unknown>): Promise<void>;
     /** The durability checkpoint belongs to Session, not to a second writer. */

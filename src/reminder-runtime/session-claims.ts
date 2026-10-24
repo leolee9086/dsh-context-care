@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { setImmediate as yieldToHost } from 'node:timers/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Session, SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-agent'
@@ -87,12 +88,25 @@ export function createSessionClaims(ctx: Context, now: () => number = Date.now) 
     if (!query || !projections) throw new Error('reminder-shared-session-history-unavailable')
     const log = await query.readSession(id)
     if (closed) throw new Error('reminder-claims-closed')
-    for (const event of log.events) if (event.type === 'user/message') record(String(id), event.data, 'consumed')
-    // Use the native inbox projection: a claimed/discarded message is not pending.
-    // Preparing this detached view neither announces an Agent nor runs its rules.
-    const replay = ctx.sessions.get(id) ?? ctx.sessions.prepare(id, { seed: log.events, meta: log.session,
-      inheritedEventCount: log.inheritedEventCount, eventState: 'detached' })
-    readInbox(replay, String(id))
+    let inboxChanged = false
+    let processed = 0
+    for (const event of log.events) {
+      if (event.type === 'user/message') record(String(id), event.data, 'consumed')
+      else if (event.type === 'agent/inbox/spliced' && event.data.inserted.some(message =>
+        message.source.kind === 'plugin:dsh-context-care:reminder' && message.source.reminder.shared !== null)) inboxChanged = true
+      // This is a finite corpus fold, not a timer or a repeated read. Yield on
+      // progress so a large cold Session cannot monopolize Host HTTP dispatch.
+      if (++processed % 2048 === 0) { await yieldToHost(); if (closed) throw new Error('reminder-claims-closed') }
+    }
+    // Use the live inbox when available. A dormant log with no reminder insertion
+    // cannot own a pending reservation and needs no detached full Session replay.
+    const live = ctx.sessions.get(id)
+    if (live) readInbox(live, String(id))
+    else if (inboxChanged) {
+      const replay = ctx.sessions.prepare(id, { seed: log.events, meta: log.session,
+        inheritedEventCount: log.inheritedEventCount, eventState: 'detached' })
+      readInbox(replay, String(id))
+    }
   }
 
   async function initialize() {

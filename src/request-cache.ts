@@ -27,6 +27,7 @@ interface Options {
   sessions: Pick<Context['sessions'], 'get' | 'list' | 'flush' | 'prepare'>
   measureInput: (session: Session, request: GenerateOptions) => { textTokens: number; visualTokens: number }
   now?: () => number
+  changed?: (sessionId: string) => void
 }
 
 /**
@@ -35,10 +36,20 @@ interface Options {
  * @param options - the live Session service and optional observation clock.
  * @returns the request query facade and its process-local recorder.
  */
-export function createRequestCache({ sessions, measureInput, now = Date.now }: Options) {
+export function createRequestCache({ sessions, measureInput, now = Date.now, changed = () => {} }: Options) {
   const history = createRequestHistory()
   let measurements = new WeakMap<Session, Map<number, { rawInput: ReturnType<Options['measureInput']>; calibrationHeaderKey: string }>>()
   let caches = new WeakMap<Session, SessionCache>()
+  let headerKeys = new WeakMap<EpochHeader, string>()
+  // Native request headers are immutable, so hashing each large tool catalog
+  // once is enough even when hundreds of settlements reference that header.
+  const headerKey = (value: EpochHeader | undefined): string => {
+    const cached = value === undefined ? undefined : headerKeys.get(value)
+    if (cached !== undefined) return cached
+    const key = createHash('sha256').update(JSON.stringify({ config: value?.config, tools: value?.tools })).digest('hex')
+    if (value !== undefined) headerKeys.set(value, key)
+    return key
+  }
   const getSession = (id: string) => sessions.get(id as SessionId)
   function cacheOf(session: Session): SessionCache {
     let cache = caches.get(session)
@@ -59,7 +70,10 @@ export function createRequestCache({ sessions, measureInput, now = Date.now }: O
       // Keep the header by reference inside the private fold. Repeating its
       // entire tool schema in every public row is not request evidence.
       const { sourceHeader: _sourceHeader, ...facts } = row.data
-      const data = JsonRecord.parse({ ...diagnostic?.data, ...facts })
+      // These values already crossed the Session or diagnostic admission boundary.
+      // Deep JSON validation here used to traverse every historical request diff
+      // on every read, blocking unrelated Host HTTP handlers in the same process.
+      const data = { ...diagnostic?.data, ...facts }
       return { ...row, data }
     })
     const settled = new Set(committed.map(row => row.data.eventSeq as number))
@@ -110,6 +124,7 @@ export function createRequestCache({ sessions, measureInput, now = Date.now }: O
           cache.recent.set(`${family}${String(data.phase)}`, merged)
         }
       }
+      changed(String(sessionId))
     },
     /** The durability checkpoint belongs to Session, not to a second writer. */
     async flush(sessionId?: string) {
@@ -123,10 +138,25 @@ export function createRequestCache({ sessions, measureInput, now = Date.now }: O
     },
     /** Read a previous dispatched route without trusting a persisted context-care table. */
     previousRoute(session: Session, purpose: string): LlmCallConfig | undefined {
-      const rows = listOne(session).filter(row => row.kind === 'request'
-        && row.data.dispatched === true && row.data.purpose === purpose)
-      rows.sort((a, b) => a.at - b.at)
-      const route = rows.at(-1)?.data.route
+      // Route selection needs one scalar from the newest dispatched request. It
+      // must not materialize all historical diagnostics or copy their input diffs.
+      const committed = history.read(session)
+      let previous: CacheRecord | undefined
+      for (let index = committed.length - 1; index >= 0; index--) {
+        const row = committed[index]
+        if (row.data.dispatched === true && row.data.purpose === purpose) { previous = row; break }
+      }
+      const cache = caches.get(session)
+      for (const rows of [cache?.recent.values(), cache?.active.values()]) for (const row of rows ?? []) {
+        if (row.kind !== 'request' || row.data.dispatched !== true || row.data.purpose !== purpose) continue
+        // A live diagnostic must never override the route of its own settlement.
+        // Only an operation absent from the native committed index is transient.
+        if (committed.some(settled => settled.key === row.key
+          || typeof row.data.eventSeq === 'number' && settled.data.eventSeq === row.data.eventSeq
+          || typeof row.data.compactionId === 'string' && settled.data.compactionId === row.data.compactionId)) continue
+        if (!previous || row.at >= previous.at) previous = row
+      }
+      const route = previous?.data.route
       if (!route || typeof route !== 'object' || Array.isArray(route)
         || !('provider' in route) || !('model' in route)
         || typeof route.provider !== 'string' || typeof route.model !== 'string') return undefined
@@ -136,14 +166,17 @@ export function createRequestCache({ sessions, measureInput, now = Date.now }: O
     /** Reprice a logged input only once per settlement; no cached row is required after restart. */
     calibrationRecords(session: Session, header: EpochHeader | undefined): CacheRecord[] {
       const records = history.read(session)
-      const headerKey = (value: EpochHeader | undefined) => createHash('sha256')
-        .update(JSON.stringify({ config: value?.config, tools: value?.tools })).digest('hex')
       const expected = headerKey(header)
       let sample: (typeof records)[number] | undefined
       for (let index = records.length - 1; index >= 0; index--) {
         const record = records[index]
-        if (record.data.purpose === 'conversation' && record.data.outcome === 'completed'
-          && record.data.usage?.inputTokens !== undefined && headerKey(record.data.sourceHeader) === expected) { sample = record; break }
+        if (record.data.purpose !== 'conversation' || record.data.outcome !== 'completed'
+          || record.data.usage?.inputTokens === undefined) continue
+        const source = record.data.sourceHeader
+        // A different route cannot share a calibration. Reject it before hashing
+        // a dormant epoch's potentially large tool schema.
+        if (source?.config.provider === header?.config.provider && source?.config.model === header?.config.model
+          && headerKey(source) === expected) { sample = record; break }
       }
       if (!sample) return records.length ? [{ ...records[records.length - 1], data: { ...records[records.length - 1].data } }] : []
       let values = measurements.get(session)
@@ -159,6 +192,6 @@ export function createRequestCache({ sessions, measureInput, now = Date.now }: O
     /** Idle/unloaded Agents retain no unfinished request objects. */
     release(session: Session) { caches.get(session)?.active.clear() },
     /** Forgetting the cache does not modify any Session or existing storage files. */
-    async close() { history.clear(); caches = new WeakMap(); measurements = new WeakMap() },
+    async close() { history.clear(); caches = new WeakMap(); measurements = new WeakMap(); headerKeys = new WeakMap() },
   }
 }

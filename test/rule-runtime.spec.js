@@ -116,19 +116,23 @@ test('cancel waits for durable acknowledgement, locks query controls and aborts 
   await act(async () => finish(reply({ sessionId: 'one', acknowledged: true })))
 })
 
-test('preview is explicit and pure on mount; polling invalidates it after context changes', async () => {
+test('preview is explicit and pure on mount; a context change notification invalidates it', async () => {
   vi.useFakeTimers()
-  let current = page()
+  let current = page(); let changed
+  const watchRuntime = vi.fn((_id, listener) => { changed = listener; return () => {} })
   const fetcher = vi.fn(async (_url, options) => reply(options.method === 'POST' ? preview() : current))
-  const view = render(h(RuleRuntimePanel, { sessionId: 'one', mode: 'preview', t, fetcher }))
+  const view = render(h(RuleRuntimePanel, { sessionId: 'one', mode: 'preview', t, fetcher, watchRuntime }))
   await act(async () => {})
   expect(fetcher.mock.calls.filter(([, options]) => options.method === 'POST')).toHaveLength(0)
   fireEvent.click(view.getByRole('button', { name: '生成预览' }))
   await act(async () => {})
   expect(view.getByText('注入字符数: 7')).toBeTruthy()
   expect(view.container.querySelector('.care-code')).toBeNull()
+  const before = fetcher.mock.calls.length
+  await act(async () => vi.advanceTimersByTimeAsync(15000))
+  expect(fetcher.mock.calls).toHaveLength(before)
   current = page({ snapshotId: 'context-changed' })
-  await act(async () => vi.advanceTimersByTimeAsync(5000))
+  await act(async () => changed())
   expect(view.getByText(t('runtimePreviewStale'))).toBeTruthy()
   expect(view.queryByText('注入字符数: 7')).toBeNull()
   expect(fetcher.mock.calls.filter(([, options]) => options.method === 'POST')).toHaveLength(1)

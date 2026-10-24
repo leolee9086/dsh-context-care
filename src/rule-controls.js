@@ -31,7 +31,7 @@ const identity = (sourceId, ruleId) => JSON.stringify([sourceId, ruleId])
  * @param options persisted entries and save(sessionId, record) ACK callback
  * @returns registry, session snapshots, execution decisions and serialized CAS updates
  */
-export function createRuleControls({ entries = [], save, boundary = () => -1 }) {
+export function createRuleControls({ entries = [], save, boundary = () => -1, changed = () => {} }) {
   const records = new Map(entries.map(([id, value]) => [id, Stored.parse(value)]))
   const sources = new Map()
   const providers = new Set()
@@ -147,9 +147,10 @@ export function createRuleControls({ entries = [], save, boundary = () => -1 }) 
       // Some stores mutate their cache before rejecting a write. Execution reads
       // this detached ACK-only map, and a failed save disables this session until retry succeeds.
       try { await save(sessionId, structuredClone(next)) }
-      catch (error) { failures.set(sessionId, error); throw new ControlError(503, 'storage-unavailable', error) }
+      catch (error) { failures.set(sessionId, error); changed(sessionId); throw new ControlError(503, 'storage-unavailable', error) }
       records.set(sessionId, next)
       failures.delete(sessionId)
+      changed(sessionId)
       return snapshot(sessionId)
     })
     chains.set(sessionId, task)
@@ -160,17 +161,17 @@ export function createRuleControls({ entries = [], save, boundary = () => -1 }) 
       if (closed) throw new ControlError(503, 'controls-closed')
       const source = validate(input)
       if (sources.has(source.sourceId)) throw new Error(`context-care: duplicate source ${source.sourceId}`)
-      sources.set(source.sourceId, source)
-      return () => { if (sources.get(source.sourceId) === source) { sources.delete(source.sourceId); removed++ } }
+      sources.set(source.sourceId, source); changed(source.sessionId)
+      return () => { if (sources.get(source.sourceId) === source) { sources.delete(source.sourceId); removed++; changed(source.sessionId) } }
     },
-    registerProvider(provider) { if (closed) throw new ControlError(503, 'controls-closed'); providers.add(provider); return () => { providers.delete(provider); removed++ } },
+    registerProvider(provider) { if (closed) throw new ControlError(503, 'controls-closed'); providers.add(provider); changed(); return () => { providers.delete(provider); removed++; changed() } },
     catalog, decision, snapshot, patch,
     enabled: (sessionId, sourceId, ruleId, actionId) => decision(sessionId, sourceId, ruleId, actionId).enabled,
     sinceSeq: (sessionId, sourceId, ruleId) => preference(sessionId, sourceId, ruleId)?.sinceSeq ?? -1,
     epoch: (sessionId, sourceId, ruleId) => `${removed}:${preference(sessionId, sourceId, ruleId)?.epoch ?? 0}:${failures.has(sessionId)}`,
     revision: sessionId => stored(sessionId).revision,
     currentSample: sessionId => samples.get(sessionId),
-    sample(sessionId, value) { if (!closed) samples.set(sessionId, { ...value, at: Date.now() }) },
+    sample(sessionId, value) { if (!closed) { samples.set(sessionId, { ...value, at: Date.now() }); changed(sessionId) } },
     async close() {
       closed = true
       const settled = await Promise.allSettled(chains.values())

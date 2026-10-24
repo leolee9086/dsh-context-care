@@ -83,7 +83,7 @@ export function validateDocumentSet(documents, templates) {
 }
 
 /** Session CAS edits publish only after ACK. A rejected storage write disables automatic actions until a successful explicit retry. */
-export function createWorkbenchStore({ entries = [], save, templates, maxDocuments = 64, maxRuns = 1000, report = () => {}, externalDocuments = () => [], admissionSeq = () => -1 }) {
+export function createWorkbenchStore({ entries = [], save, templates, maxDocuments = 64, maxRuns = 1000, report = () => {}, externalDocuments = () => [], admissionSeq = () => -1, changed = () => {} }) {
   const prospective = new Map()
   const records = new Map(entries.map(([id, value]) => [id, Stored.parse(value)])); const chains = new Map(); const failures = new Map()
   let closed = false; let closing = false
@@ -101,8 +101,8 @@ export function createWorkbenchStore({ entries = [], save, templates, maxDocumen
       prospective.set(id, next.documents)
       try {
         await save(id, structuredClone(next))
-        records.set(id, next); failures.delete(id)
-      } catch (error) { failures.set(id, error); report(error); throw new ControlError(503, 'workbench-storage-unavailable', error) }
+        records.set(id, next); failures.delete(id); changed(id)
+      } catch (error) { failures.set(id, error); report(error); changed(id); throw new ControlError(503, 'workbench-storage-unavailable', error) }
       finally { prospective.delete(id) }
       return result ?? structuredClone(next)
     })

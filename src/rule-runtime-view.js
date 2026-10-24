@@ -16,7 +16,7 @@ const details = (label, value) => h(JsonDetails, { key: label, label, value })
 const fields = values => h('dl', { className: 'care-fields' }, ...values.flatMap(([label, value]) => [h('dt', { key: `${label}:label` }, label), h('dd', { key: label }, value)]))
 
 /** Session-bound inspection has no document authoring path. Mutation is limited to cancelling a run. */
-export function RuleRuntimePanel({ sessionId, mode, t, fetcher = fetch, pollMs = 5000 }) {
+export function RuleRuntimePanel({ sessionId, mode, t, fetcher = fetch, watchRuntime }) {
   const [data, setData] = useState(); const [error, setError] = useState(''); const [operationError, setOperationError] = useState('')
   const [busy, setBusy] = useState(false); const [preview, setPreview] = useState(); const [ack, setAck] = useState('')
   const [search, setSearch] = useState(''); const [status, setStatus] = useState(''); const [offset, setOffset] = useState(0)
@@ -32,9 +32,11 @@ export function RuleRuntimePanel({ sessionId, mode, t, fetcher = fetch, pollMs =
   useEffect(() => {
     const controller = new AbortController()
     setLoading(true); setData(undefined)
-    let pending; let ticket = 0
+    let pending; let ticket = 0; let dirty = false
     const read = async () => {
-      if (pending || mutation.current || controller.signal.aborted) return
+      if (controller.signal.aborted) return
+      if (pending || mutation.current) { dirty = true; return }
+      dirty = false
       const child = new AbortController(); pending = child; const current = ++ticket
       try {
         const response = await fetcher(`${endpoint}&limit=20&offset=${offset}&status=${encodeURIComponent(status)}&search=${encodeURIComponent(search)}`, { signal: child.signal })
@@ -50,15 +52,15 @@ export function RuleRuntimePanel({ sessionId, mode, t, fetcher = fetch, pollMs =
         }
       } catch (failure) {
         if (!controller.signal.aborted && !child.signal.aborted && current === ticket) { setError(String(failure)); setLoading(false) }
-      } finally { if (pending === child) pending = undefined }
+      } finally { if (pending === child) pending = undefined; if (dirty && !mutation.current && !controller.signal.aborted) void read() }
     }
     // Visibility suspends only reads. A user-requested cancellation keeps its own lifetime.
     const visible = () => { if (document.hidden) { pending?.abort(); pending = undefined; ticket++ } else void read() }
     void read()
-    const timer = setInterval(() => { if (!document.hidden) void read() }, pollMs)
+    const stop = watchRuntime?.(sessionId, () => { void read() })
     document.addEventListener('visibilitychange', visible); window.addEventListener('focus', visible)
-    return () => { controller.abort(); pending?.abort(); ticket++; clearInterval(timer); document.removeEventListener('visibilitychange', visible); window.removeEventListener('focus', visible) }
-  }, [sessionId, endpoint, offset, status, search, refresh, fetcher, pollMs])
+    return () => { controller.abort(); pending?.abort(); ticket++; stop?.(); document.removeEventListener('visibilitychange', visible); window.removeEventListener('focus', visible) }
+  }, [sessionId, endpoint, offset, status, search, refresh, fetcher, watchRuntime])
   useEffect(() => { setPreview(undefined) }, [mode])
   const act = async (body, parse) => {
     if (mutation.current || !lifetime.current || loading || error) return

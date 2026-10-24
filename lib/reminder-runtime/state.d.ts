@@ -1593,6 +1593,8 @@ export interface RuntimeOptions {
     }) => Promise<unknown>;
     capacity?: unknown;
     saveCapacity?: (value: z.infer<typeof CapacitySettings>) => Promise<unknown> | void;
+    /** Notify observers only after the owning catalog or settings actually change. */
+    changed?: (sessionId?: string) => void;
     dispatches?: boolean;
     resolvePreset?: (sessionId: string) => string | undefined;
     /** Authoritative current session facts; supplied event metadata is ignored when present. */

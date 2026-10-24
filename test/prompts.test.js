@@ -96,11 +96,10 @@ test('optional prompt evidence is a detached JSON snapshot before durable admiss
   assert.deepEqual(JSON.parse(JSON.stringify(message)), message)
 })
 
-test('prompt polling locates historical seq and releases pages independently of other sessions', async () => {
+test('prompt reads locate historical seq and release pages independently of other sessions', async () => {
   const requests = []
   const records = createActionRecords({ endpoint: '/context-care/prompts', collection: 'prompts',
-    fetcher: async (url, options) => { requests.push({ url, signal: options.signal }); return { ok: true, json: async () => ({ prompts: [], offset: 40, selectedFound: true }) } },
-    setTimer: () => 1, clearTimer() {} })
+    fetcher: async (url, options) => { requests.push({ url, signal: options.signal }); return { ok: true, json: async () => ({ prompts: [], offset: 40, selectedFound: true }) } } })
   const stop = records.watch('one', 0, 42)
   const stopOther = records.watch('two', 0)
   for (let step = 0; step < 8; step++) await Promise.resolve()

@@ -271,7 +271,6 @@ export function installContextCare(ctx, raw, compactionSource) {
         return ctx.contextCareRequests.recordAction(session, { action: 'request-rewrite', phase: 'recorded', rewrite: entry })
       },
       async list(sessionId) {
-        await ctx.contextCareRequests.flush(sessionId)
         return ctx.contextCareRequests.list(sessionId).filter(record => record.kind === 'maintenance' && record.data.action === 'request-rewrite').map(record => record.data.rewrite)
       },
     },

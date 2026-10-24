@@ -101,7 +101,7 @@ function reminderMessage(candidate: CandidateValue, messageId: string, humanId: 
  * Standalone callers may supply a legacy writer; production recovery belongs to Session.
  * No Cordis or live session objects enter the scheduler. */
 export function createReminderRuntime({ config: input, entries = [], sessionAuthoritative = false, templates, save = async () => {}, execute = async () => { throw new Error('reminder-executor-unavailable') },
-  capacity, saveCapacity = async () => {}, dispatches = false, resolvePreset, resolveIdentity, resolveEvent, recoverEvents, sinceSeq = () => -1,
+  capacity, saveCapacity = async () => {}, changed = () => {}, dispatches = false, resolvePreset, resolveIdentity, resolveEvent, recoverEvents, sinceSeq = () => -1,
   updateClaims, readDeliveries, wasHanded, readHandoffs, readQueued, handoffPending,
   wallNow = () => Date.now(), now = () => performance.now(), eligible = () => true, epoch = () => 0, report = () => {} }: RuntimeOptions = {}) {
   const config = ReminderConfig.parse(input)
@@ -900,6 +900,7 @@ export function createReminderRuntime({ config: input, entries = [], sessionAuth
         // Only durable acknowledgement publishes a new setting; a failed write is retryable.
         await saveCapacity(next)
         settings = next
+        changed()
         return capacitySnapshot()
       })
       capacityWrite = task
@@ -932,11 +933,12 @@ export function createReminderRuntime({ config: input, entries = [], sessionAuth
         invalidate(value.sourceId, compiled)
         rejectedSources.delete(next.sourceId)
         sources.set(value.sourceId, { owner, acceptSession, token: randomUUID(), value: next, compiled })
+        changed(next.sessionId)
       }
       replace(value)
       let disposed = false
       return { replace: (next: unknown) => { if (disposed) throw new Error('reminder-source-disposed'); replace(next) },
-        async dispose() { if (disposed) return; disposed = true; invalidate(value.sourceId); sources.delete(value.sourceId)
+        async dispose() { if (disposed) return; disposed = true; invalidate(value.sourceId); sources.delete(value.sourceId); changed(value.sessionId)
           await Promise.allSettled([...running.values()].filter(run => run.items.some(item => item.source.sourceId === value.sourceId)).map(run => run.task)) } }
     },
     registerDetector(input: unknown) {

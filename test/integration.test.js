@@ -35,6 +35,7 @@ import { replayNativeOutput } from '../lib/reminder-runtime/native-output-events
 import { NativeOutputObservation } from './fixtures/reminder-native-output.ts'
 import { createOutputStream } from '../lib/reminder-runtime/output-stream.js'
 import { registerCompletionReplayCases } from './completion-session-replay-cases.ts'
+import { performance } from 'node:perf_hooks'
 import { asBatch } from './batch-execute.ts'
 
 // This explicitly selected test acts as an external Host. The plugin itself never
@@ -875,14 +876,14 @@ test('exported Host rows mount together, serve the journal, and remove routes an
   assert.equal(missingSelection.selectedFound, false)
   assert.equal(missingSelection.offset, 0, 'A missing selection must not fabricate a matching historical page')
   const originalFlush = ctx.contextCareRequests.flush
-  ctx.contextCareRequests.flush = async () => { throw new Error('Persistent journal write failed') }
-  const diagnostics = []
-  t.mock.method(ctx.logger, 'warn', message => diagnostics.push(message))
-  const failedPage = await fetch(`${actionsUrl}?sessionId=s1&limit=2`)
-  assert.equal(failedPage.status, 500, 'A stale readable table must not hide a retained write failure')
-  assert.deepEqual(await failedPage.json(), { error: 'journal-unavailable', message: 'Persistent journal write failed' })
-  assert.match(diagnostics.at(-1), /Persistent journal write failed/)
-  ctx.contextCareRequests.flush = originalFlush
+  let flushes = 0
+  ctx.contextCareRequests.flush = async () => { flushes++; throw new Error('Reads must not force Session I/O') }
+  try {
+    assert.equal((await fetch(`${actionsUrl}?sessionId=s1&limit=2`)).status, 200)
+    assert.equal((await fetch(`${promptsUrl}?sessionId=prompt-history&limit=20`)).status, 200)
+    assert.equal((await fetch(url)).status, 200)
+    assert.equal(flushes, 0, 'Session-authoritative diagnostic GETs never force a durable flush')
+  } finally { ctx.contextCareRequests.flush = originalFlush }
   const row = [...ctx.loader.entries()].find(entry => entry.options.name === 'dsh-context-care/runtime')
   await row.fiber.dispose()
   assert.equal((await fetch(actionsUrl + '?sessionId=s1&limit=2')).status, 404)
@@ -2800,6 +2801,78 @@ test('Loader registrants execute declared rules, respect toggles, and unload wit
   await addFixtureRow(ctx, '@care-test/rules')
   assert.equal(ctx.contextCareControls.enabled(agent.id, 'test-memory', 'remember', 'notify'), false)
   assert.equal(ctx.contextCareControls.enabled('other-session', 'test-memory', 'remember', 'notify'), true)
+})
+
+test('long Session diagnostic queries keep unrelated HTTP responsive and push only actual changes', { timeout: 120000 }, async t => {
+  const owned = await fixture(t, false); const ctx = await owned.open()
+  const { base, cookie } = await controlCookie(ctx)
+  const headers = { cookie }
+  const session = ctx.sessions.create('long-session-diagnostics')
+  const config = { provider: 'care-test', model: 'care-test' }
+  // These are real committed headers with request-only changes, not fake services.
+  const tools = Array.from({ length: 120 }, (_, index) => ({ name: `tool_${index}`, description: 'A documented tool. '.repeat(60),
+    parameters: { type: 'object', properties: { text: { type: 'string' } } } }))
+  const messages = Array.from({ length: 200 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user',
+    content: [{ type: 'text', text: `Historical message ${index}. ` }], source: { kind: 'user' } }))
+  for (let index = 0; index < 350; index++) {
+    const callId = `long-call-${index}`
+    session.append('request/header', { header: { config, tools }, reason: 'series', contextCareWorkbench: { callId, diff: { after: { messages } } } })
+    session.append('assistant/message', { turn: index + 1, step: 1, stream: [], usage: { inputTokens: 100, outputTokens: 1 },
+      message: createMessage({ role: 'assistant', source: { kind: 'model', ...config }, content: [{ type: 'text', text: 'Recorded answer.' }] }) }, { surfaceOp: 'append' })
+  }
+  const journal = await openRequestJournal({ sessions: ctx.sessions, measureInput: () => ({ textTokens: 50, visualTokens: 0 }) })
+  t.after(() => journal.close())
+  const measured = (run, count = 1) => { const start = performance.now(); for (let index = 0; index < count; index++) run(); return performance.now() - start }
+  const cpuStart = process.cpuUsage(); const wallStart = performance.now()
+  const eventLoopStart = performance.eventLoopUtilization()
+  const turnStart = performance.now()
+  const nextTurnDelay = new Promise(resolve => setImmediate(() => resolve(performance.now() - turnStart)))
+  const coldListMs = measured(() => journal.list(session.id))
+  const repeatListMs = measured(() => journal.list(session.id), 20)
+  const previousRouteMs = measured(() => journal.previousRoute(session, 'conversation'), 20)
+  // No compatible sample: expose repeated hashing of the same large header.
+  const unmatchedCalibrationMs = measured(() => journal.calibrationRecords(session, { config: { ...config, model: 'unmatched' }, tools }), 20)
+  const synchronousCpu = process.cpuUsage(cpuStart)
+  const queryWallMs = performance.now() - wallStart
+  const queryCpuMs = (synchronousCpu.user + synchronousCpu.system) / 1000
+  const nextTurnDelayMs = await nextTurnDelay
+  const queryEventLoopUtilization = performance.eventLoopUtilization(eventLoopStart).utilization
+  const httpMs = []; const unrelatedMs = []
+  for (let index = 0; index < 5; index++) {
+    const start = performance.now()
+    const diagnostic = fetch(`${base}/context-care/prompts?sessionId=${session.id}&limit=20`, { headers }).then(async response => {
+      assert.equal(response.status, 200); await response.json(); httpMs.push(performance.now() - start)
+    })
+    const unrelated = fetch(`${base}/context-care/rules?sessionId=${session.id}`, { headers }).then(async response => {
+      assert.equal(response.status, 200); await response.json(); unrelatedMs.push(performance.now() - start)
+    })
+    await Promise.all([diagnostic, unrelated])
+  }
+  const report = { events: session.seq, settledRequests: 350, coldListMs, repeatListMs, previousRouteMs, unmatchedCalibrationMs,
+    queryWallMs, queryCpuMs, nextTurnDelayMs, queryEventLoopUtilization, httpMs, unrelatedMs }
+  // Broad regression ceilings catch the reproduced seconds-long stall while
+  // allowing normal CI scheduling variation; raw measurements remain in output.
+  assert.ok(repeatListMs < 1000, `repeated history reads blocked for ${repeatListMs}ms`)
+  assert.ok(previousRouteMs < 250, `route lookup blocked for ${previousRouteMs}ms`)
+  assert.ok(unmatchedCalibrationMs < 1000, `calibration lookup blocked for ${unmatchedCalibrationMs}ms`)
+  assert.ok(Math.max(...unrelatedMs) < 1000, `unrelated HTTP blocked for ${Math.max(...unrelatedMs)}ms`)
+  t.diagnostic(`long-session-performance ${JSON.stringify(report)}`)
+  if (process.env.DSH_PERFORMANCE_REPORT) await writeFile(process.env.DSH_PERFORMANCE_REPORT, JSON.stringify(report, null, 2) + '\n')
+  const controller = new AbortController()
+  const response = await fetch(`${base}/context-care/changes?sessionId=${session.id}`, { headers, signal: controller.signal })
+  assert.equal(response.status, 200)
+  const reader = response.body.getReader(); const decoder = new TextDecoder()
+  try {
+    const first = await reader.read()
+    assert.ok(first.value); assert.equal(JSON.parse(decoder.decode(first.value).trim()).sessionId, session.id)
+    const next = reader.read()
+    ctx.contextCareChanges.changed('unrelated-session', ['controls'])
+    ctx.contextCareChanges.changed(session.id, ['controls'])
+    ctx.contextCareChanges.changed(session.id, ['actions'])
+    const value = await next
+    const change = JSON.parse(decoder.decode(value.value).trim())
+    assert.deepEqual(change.topics.sort(), ['actions', 'controls'])
+  } finally { controller.abort(); await reader.cancel().catch(() => {}); reader.releaseLock() }
 })
 
 test('Workbench v2 edits request copies, renders strict entry templates, logs the diff and preserves committed source text', async t => {

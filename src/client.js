@@ -7,6 +7,7 @@ import { createDisplayRecords } from './display-records.js'
 import { createRewriteRecords } from './rewrite-records.js'
 import { ContextCarePrompts } from './prompt-view.js'
 import { createControlRecords } from './control-records.js'
+import { createClientChanges } from '../lib/client-changes.js'
 import { ContextCareControls, ContextCareControlsOpener } from './control-view.js'
 
 import { sourceNavigation } from './source-navigation.js'
@@ -21,10 +22,13 @@ const CONTROLS_TAB = 'dsh-context-care:rules'
 export function apply(ctx) {
   ctx.effect(() => ctx.locale.register('dsh-context-care', dictionaries))
   const revealFor = sourceNavigation(ctx)
-  const controls = createControlRecords()
-  const actions = createActionRecords()
-  const rewrites = createRewriteRecords()
-  const prompts = createActionRecords({ endpoint: '/context-care/prompts', collection: 'prompts' })
+  const changes = createClientChanges()
+  ctx.on('connection/reset', () => changes.reset())
+  const watchRuntime = (id, listener) => { changes.retry(); return changes.subscribe(id, topics => { if (topics.includes('runtime')) listener() }) }
+  const controls = createControlRecords({ changes })
+  const actions = createActionRecords({ changes })
+  const rewrites = createRewriteRecords({ changes })
+  const prompts = createActionRecords({ changes, endpoint: '/context-care/prompts', collection: 'prompts' })
   const display = createDisplayRecords()
   let displaySelection = new Map(); const displayListeners = new Set()
   const displaySource = { getSnapshot: () => displaySelection, subscribe(listener) { displayListeners.add(listener); return () => displayListeners.delete(listener) } }
@@ -43,7 +47,7 @@ export function apply(ctx) {
     ctx.sidebarRight.openTabIn(sessionId, PROMPTS_TAB)
     if (ctx.sidebarRight.isExpanded() !== true) ctx.layout.openRightbar(false, false)
   }
-  ctx.effect(() => () => { controls.dispose(); actions.dispose(); rewrites.dispose(); prompts.dispose(); display.dispose(); displayListeners.clear(); displaySelection.clear(); selectionListeners.clear(); selection.clear() })
+  ctx.effect(() => () => { controls.dispose(); actions.dispose(); rewrites.dispose(); prompts.dispose(); display.dispose(); changes.dispose(); displayListeners.clear(); displaySelection.clear(); selectionListeners.clear(); selection.clear() })
   ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
     name: 'conversation.composer.dock', id: 'context-care', order: 4, locale: 'dsh-context-care',
     inject: () => ({ hooks: { careActions: actions.source, rewriteHealth: rewrites.health }, watchActions: actions.watch, watchRewrites: rewrites.watch,
@@ -53,7 +57,7 @@ export function apply(ctx) {
   ctx.effect(() => ctx.sidebarRightTabs.register({ id: CONTROLS_TAB, kind: CONTROLS_TAB, title: () => t('controlsTitle') }))
   ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
     name: 'sidebar.right.pane.tab', key: CONTROLS_TAB, locale: 'dsh-context-care',
-    inject: () => ({ hooks: { careControls: controls.source }, watchControls: controls.watch, changeControls: controls.change, refreshControls: controls.refresh }),
+    inject: () => ({ hooks: { careControls: controls.source }, watchControls: controls.watch, changeControls: controls.change, refreshControls: controls.refresh, watchRuntime }),
   }, ContextCareControls))
   ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
     name: 'conversation.input.right', id: 'context-care-controls', order: 6, locale: 'dsh-context-care',

@@ -114,6 +114,7 @@ async function startReminderService(ctx, input, controls, facility) {
     ctx.on('session/created', session => toolEvents.created(session))
     const runtime = createReminderRuntime({ config, sessionAuthoritative: true, templates: createTemplates(),
       capacity: settings.get('global'), saveCapacity: value => settings.put('global', value),
+      changed: id => ctx.get('contextCareChanges')?.changed(id, ['controls', 'runtime']),
       resolveIdentity: createSessionIdentityResolver(ctx),
       resolveEvent: (event, signal) => toolEvents.resolve(event, signal),
       recoverEvents: (id, accept, signal, selection) => toolEvents.recover(id, accept, signal, selection),

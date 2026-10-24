@@ -22,9 +22,8 @@ export function sourceTarget(seq, entries, nodes) {
 export function createSourceNavigator({ binding, conversation, isCurrent, document: doc = globalThis.document }) {
   let generation = 0
   let disposed = false
-  const pending = new Map()
-  const cancel = () => { generation++; for (const [timer, resolve] of pending) { clearTimeout(timer); resolve() } pending.clear() }
-  const pause = () => new Promise(resolve => { const timer = setTimeout(() => { pending.delete(timer); resolve() }, 50); pending.set(timer, resolve) })
+  const pending = new Set()
+  const cancel = () => { generation++; for (const stop of [...pending]) stop(); pending.clear() }
   const root = () => {
     const roots = [...doc.querySelectorAll('[data-conversation-session][data-conversation-region="chat"]')]
       .filter(element => element.getAttribute('data-conversation-session') === binding.sessionId && element.getClientRects().length)
@@ -59,37 +58,68 @@ export function createSourceNavigator({ binding, conversation, isCurrent, docume
           check()
         }
       }
-      let found = false
-      for (let attempt = 0; attempt < 40; attempt++) {
-        check()
-        const host = root()
-        const nodes = conversation.snapshot.getSnapshot().views.get('chat')?.nodes.values() ?? []
-        const target = sourceTarget(seq, binding.eventSource.getSnapshot().entries, nodes)
-        const card = target && [...host.querySelectorAll(`[${target.attribute}]`)].find(element => element.getAttribute(target.attribute) === target.id)
-        if (card) {
-          found = true
-          const hidden = []
-          for (let element = card; element && element !== host; element = element.parentElement) if (element.hasAttribute('hidden')) hidden.push(element)
-          if (hidden.length) {
-            const outer = hidden.at(-1)
-            if (outer.getAttribute('hidden') !== 'until-found') throw failure('jumpHidden')
-            outer.dispatchEvent(new doc.defaultView.Event('beforematch', { bubbles: false }))
-          } else if (card.getClientRects().length) {
-            // beforematch also tells Chat's reading controller to stop following the tail.
+      return new Promise((resolve, reject) => {
+        let found = false; let ended = false; let queued = false
+        let frame; let deadline; let observer; let resize
+        const stops = []
+        const finish = (error, result) => {
+          if (ended) return
+          ended = true; pending.delete(stop); clearTimeout(deadline)
+          if (frame !== undefined) doc.defaultView.cancelAnimationFrame(frame)
+          observer?.disconnect(); resize?.disconnect(); for (const release of stops) release()
+          if (error) reject(error); else resolve(result)
+        }
+        const stop = () => finish(failure('jumpCancelled'))
+        const schedule = () => {
+          if (ended || queued) return
+          queued = true
+          queueMicrotask(() => { queued = false; if (!ended) attempt() })
+        }
+        const attempt = () => {
+          try {
+            check()
+            const host = root()
+            const nodes = conversation.snapshot.getSnapshot().views.get('chat')?.nodes.values() ?? []
+            const target = sourceTarget(seq, binding.eventSource.getSnapshot().entries, nodes)
+            const card = target && [...host.querySelectorAll(`[${target.attribute}]`)].find(element => element.getAttribute(target.attribute) === target.id)
+            if (!card) return
+            found = true
+            const hidden = []
+            for (let element = card; element && element !== host; element = element.parentElement) if (element.hasAttribute('hidden')) hidden.push(element)
+            if (hidden.length) {
+              const outer = hidden.at(-1)
+              if (outer.getAttribute('hidden') !== 'until-found') throw failure('jumpHidden')
+              // Disclosure mutations notify the observer; no repeated readiness timer.
+              outer.dispatchEvent(new doc.defaultView.Event('beforematch', { bubbles: false }))
+              return
+            }
+            if (!card.getClientRects().length) return
             card.dispatchEvent(new doc.defaultView.Event('beforematch', { bubbles: true }))
             card.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' })
-            await pause()
-            check()
-            if (!card.isConnected || card.closest('[hidden]')) continue
-            const box = card.getBoundingClientRect()
-            const viewport = host.getBoundingClientRect()
-            if (box.bottom > Math.max(0, viewport.top) && box.top < Math.min(doc.defaultView.innerHeight, viewport.bottom)
-              && box.right > viewport.left && box.left < viewport.right) return { seq, ...target }
-          }
+            if (frame !== undefined) doc.defaultView.cancelAnimationFrame(frame)
+            // One frame after this concrete scroll lets the browser settle its layout.
+            frame = doc.defaultView.requestAnimationFrame(() => {
+              frame = undefined
+              try {
+                check()
+                if (!card.isConnected || card.closest('[hidden]')) return
+                const box = card.getBoundingClientRect(); const viewport = host.getBoundingClientRect()
+                if (box.bottom > Math.max(0, viewport.top) && box.top < Math.min(doc.defaultView.innerHeight, viewport.bottom)
+                  && box.right > viewport.left && box.left < viewport.right) finish(undefined, { seq, ...target })
+              } catch (error) { finish(error) }
+            })
+          } catch (error) { finish(error) }
         }
-        await pause()
-      }
-      throw failure(found ? 'jumpUnsettled' : 'jumpMissing')
+        observer = new doc.defaultView.MutationObserver(schedule)
+        observer.observe(root(), { subtree: true, childList: true, attributes: true })
+        if (doc.defaultView.ResizeObserver) { resize = new doc.defaultView.ResizeObserver(schedule); resize.observe(root()) }
+        if (conversation.snapshot.subscribe) stops.push(conversation.snapshot.subscribe(schedule))
+        if (binding.eventSource.subscribe) stops.push(binding.eventSource.subscribe(schedule))
+        pending.add(stop)
+        // A single expiry bounds a navigation whose exact target never appears.
+        deadline = setTimeout(() => finish(failure(found ? 'jumpUnsettled' : 'jumpMissing')), 2000)
+        attempt()
+      })
     },
   }
 }
