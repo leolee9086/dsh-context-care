@@ -92,12 +92,12 @@ test('worker入口接受JSON并返回三值结果，超预算则明确失败', a
   // 执行期收的是**已编译**的条件树：上限在注册时就已经烘进树里，
   // 所以这里先编译，而不是像以前那样把 countLimits 一起传进去再编译一遍。
   const condition = compileReminderCondition(counting({ op: 'gte', value: 2 }), limits)
-  const result = await executeReminderMatch({ condition, maxBytes: 4096,
+  const result = await executeReminderMatch({ condition, maxBytes: 4096, countLimits: limits,
     event: { type: 'assistant.output', sessionId: 's', callId: 'c', rootCallId: 'c',
       clock: { at: 1 }, output: { attemptId: 'attempt-1', turn: 1, step: 1, index: 0, type: 'text', text, offset: 0 },
       textSamples: [sample()] } })
   assert.equal(result.status, 'matched')
-  await assert.rejects(executeReminderMatch({ condition, maxBytes: 8,
+  await assert.rejects(executeReminderMatch({ condition, maxBytes: 8, countLimits: limits,
     event: { type: 'assistant.output', sessionId: 's', callId: 'c', rootCallId: 'c',
       clock: { at: 1 }, output: { attemptId: 'attempt-1', turn: 1, step: 1, index: 0, type: 'text', text, offset: 0 },
       textSamples: [sample()] } }), /budget-exceeded/)

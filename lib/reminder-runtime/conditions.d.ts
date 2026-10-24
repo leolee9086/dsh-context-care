@@ -122,13 +122,13 @@ export type ReminderCondition = z.infer<typeof Leaf> | CountCondition | {
     kind: 'not';
     condition: ReminderCondition;
 };
-/** Parse document or worker JSON into a bounded condition tree before execution. */
-export declare function compileReminderCondition(input: unknown, ceilings?: {
-    maxTextChars: number;
-    maxCandidates: number;
-    maxUnits: number;
-    maxEvidence: number;
-}): ReminderCondition;
+/** Registration checks both the bounded data shape and rule-engine semantics. */
+export declare function compileReminderCondition(input: unknown, ceilings?: CountLimitValues): ReminderCondition;
+/**
+ * Structured clone does not retain a TypeScript proof. Recheck the bounded data
+ * shape in the worker without recompiling the rule-engine declaration each time.
+ */
+export declare function parseReminderCondition(input: unknown, ceilings: CountLimitValues): ReminderCondition;
 declare const TextSample: z.ZodObject<{
     field: z.ZodString;
     sampleId: z.ZodString;
@@ -175,5 +175,13 @@ export interface ReminderMatch {
     field?: string;
 }
 /** Run inside the cancellable matcher worker; missing evidence never becomes true under not. */
+/**
+ * 执行期把规则自带的测量上限再夹一次宿主 ceilings。
+ *
+ * 注册时 `compileRule` 已经夹过一次，这里是纵深防御：worker 里跑的代码
+ * 不该信任调用方递过来的树。只走树、不做解析，而且没有任何节点需要改时
+ * 直接返回原对象——所以它不会像重新编译那样每轮分配一整棵新树。
+ */
+export declare function clampCountLimits(condition: ReminderCondition, ceilings: CountLimitValues): ReminderCondition;
 export declare function matchReminderCondition(condition: ReminderCondition, snapshot: JsonValue, samples?: readonly TextSampleValue[]): ReminderMatch;
 export {};

@@ -5,7 +5,7 @@ import { createReminderRuntime } from '../src/reminder-runtime/index.js'
 import { createBoundedMatcher } from '../src/bounded-matcher.js'
 
 let revision = 1
-const frame = (attemptId, chunk) => ({ type: 'chunk', attemptId, revision: ++revision, chunk })
+const frame = (attemptId, chunk) => ({ type: 'chunk', time: Date.now(), attemptId, revision: ++revision, chunk })
 const agent = 'session-a'
 
 test('output stream joins deltas per readable block and isolates attempts and block types', async () => {
@@ -18,10 +18,10 @@ test('output stream joins deltas per readable block and isolates attempts and bl
   stream.observe(agent, frame('attempt-a', { type: 'block-end', index: 0, block: { type: 'reasoning', text: '' } }))
   stream.observe(agent, frame('attempt-a', { type: 'block-start', index: 1, blockType: 'text' }))
   stream.observe(agent, frame('attempt-a', { type: 'text-delta', index: 1, text: '正文' }))
-  stream.observe(agent, { type: 'end', attemptId: 'attempt-a', revision: ++revision })
+  stream.observe(agent, { type: 'end', time: Date.now(), attemptId: 'attempt-a', revision: ++revision })
   stream.observe(agent, { type: 'start', attemptId: 'attempt-b', revision: 1, turn: 2, step: 2 })
   stream.observe(agent, frame('attempt-b', { type: 'text-delta', index: 0, text: '后续' }))
-  stream.observe(agent, { type: 'end', attemptId: 'attempt-b', revision: ++revision })
+  stream.observe(agent, { type: 'end', time: Date.now(), attemptId: 'attempt-b', revision: ++revision })
   await stream.close()
   assert.deepEqual(events.map(event => [event.output.attemptId, event.output.type, event.output.text]), [
     ['attempt-a', 'reasoning', '关键词'], ['attempt-a', 'text', '正文'], ['attempt-b', 'text', '后续'],

@@ -4,6 +4,8 @@ import { selectMaintenanceRange } from '../src/selection.js'
 import { checkpointCoverage } from '../src/checkpoint-coverage.js'
 import { createProposalExecutor } from '../src/summary-proposals.js'
 import { resolveConfig } from '../src/policy.js'
+import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import { createSummaryProposalHistory, summaryProposalRecord } from '../lib/summary-proposal-history.js'
 
 const user = (seq, kind = 'user') => ({ seq, type: 'user/message', data: { role: 'user', source: { kind }, content: [{ type: 'text', text: `Material ${seq}` }] } })
 function history(events) {
@@ -46,36 +48,51 @@ test('checkpoint coverage expands prior summaries and prune references in source
   assert.deepEqual(checkpointCoverage(history(events), 9), { leafSeqs: [1, 2, 7], parentCheckpointSeqs: [6], depth: 2 })
 })
 
-test('durable no-useful decisions ignore status and log growth but reset on task material or frozen prices', async () => {
-  const session = history([user(1), user(2, 'plugin:dsh-context-care:state')])
-  const records = []
-  const requests = { list: () => records, recordAction: async (_session, data) => records.push({ kind: 'maintenance', data }) }
+test('native no-useful decisions ignore status and log growth but reset on task material or frozen prices', async () => {
+  const session = Session.create(SessionId('proposal-fingerprint'))
+  const events = [], records = []
+  const rejected = createSummaryProposalHistory({ readSession: async () => ({ events, inheritedEventCount: 0 }) })
+  const append = (type, data, options) => { const event = session.append(type, data, options); events.push(event); rejected.observe(session, event); return event }
+  const task = append('user/message', { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'Initial task' }] }, { surfaceOp: 'append' })
+  const status = append('user/message', { role: 'user', source: { kind: 'plugin:dsh-context-care:state' }, content: [{ type: 'text', text: 'Initial status' }] }, { surfaceOp: 'append' })
+  const requests = { list: () => { throw new Error('action cache must not decide proposal eligibility') },
+    wasProposalRejected: (owner, key, signal) => rejected.has(owner, key, signal),
+    recordAction: async (_session, data) => records.push({ kind: 'maintenance', data }) }
   let calls = 0
-  const execute = createProposalExecutor(requests, async () => { calls++; throw Object.assign(new Error('larger checkpoint'), { code: 'SUMMARY_NOT_SMALLER' }) })
+  const execute = createProposalExecutor(requests, async (...args) => {
+    calls++
+    const audit = args[6], compactionId = `non-shrinking-${calls}`
+    append('compaction/start', { compactionId, turn: 0, ...summaryProposalRecord(audit.proposalKey) })
+    append('compaction/end', { compactionId, turn: 0, error: 'larger checkpoint', ...summaryProposalRecord(audit.proposalKey, 'SUMMARY_NOT_SMALLER') })
+    throw Object.assign(new Error('larger checkpoint'), { code: 'SUMMARY_NOT_SMALLER' })
+  })
   let scale = 1
   const operation = { pricingBasis: { header: { config: { provider: 'p', model: 'm' } } }, priceMessages: () => 100 * scale }
-  const proposal = { sourceSeqs: [1, 2], start: 1, end: 2, rule: 'fresh-summary', comparisons: [] }
+  const proposal = { sourceSeqs: [task.seq, status.seq], start: task.seq, end: status.seq, rule: 'fresh-summary', comparisons: [] }
   const run = () => execute({ config: {} }, proposal, { session }, new AbortController().signal, operation, {})
   await assert.rejects(run(), /larger checkpoint/)
-  session.eventAt(2).data.content[0].text = 'New status, same actual task'
+  const nextStatus = append('user/message', { role: 'user', source: { kind: 'plugin:dsh-context-care:state' }, content: [{ type: 'text', text: 'New status, same actual task' }] }, { surfaceOp: 'append' })
+  proposal.sourceSeqs[1] = nextStatus.seq
   assert.equal(await run(), null)
   assert.equal(calls, 1)
   scale = 2
   await assert.rejects(run(), /larger checkpoint/)
-  session.eventAt(1).data.content[0].text = 'New actual work'
+  const nextTask = append('user/message', { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'New actual work' }] }, { surfaceOp: 'append' })
+  proposal.sourceSeqs[0] = nextTask.seq
   await assert.rejects(run(), /larger checkpoint/)
   assert.equal(calls, 3)
   const first = records[0].data
   assert.ok(first.operationId)
   assert.equal(records[1].data.operationId, first.operationId)
   assert.equal(records[1].data.phase, 'no-useful-range')
+  rejected.close()
 })
 
 test('selection and executor share trigger identity and settle failures before a summary transaction starts', async () => {
   const records = []
   let captured
   const session = history([user(1)])
-  const requests = { list: () => [], recordAction: async (_session, data) => records.push(data) }
+  const requests = { wasProposalRejected: async () => false, recordAction: async (_session, data) => records.push(data) }
   const execute = createProposalExecutor(requests, async (...args) => { captured = args[6]; throw new Error('failed before start') })
   await assert.rejects(execute({ config: {} }, { sourceSeqs: [1], rule: 'fresh-summary' }, { session }, new AbortController().signal,
     { priceMessages: () => 100, pricingBasis: { header: {} } }, {}, 'requested'), /failed before start/)

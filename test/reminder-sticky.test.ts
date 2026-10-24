@@ -39,6 +39,31 @@ async function rounds(runtime: ReturnType<typeof createReminderRuntime>, count: 
   return delivered
 }
 
+test('empty collection skips history and persistence unless a local enabled sticky can recover', async t => {
+  let enabled = false
+  const runtime = createReminderRuntime({ config, execute: port, eligible: () => enabled,
+    readDeliveries: async () => { throw new Error('unexpected-history-read') },
+    save: () => { throw new Error('unexpected-empty-write') } })
+  t.after(() => runtime.close())
+  const collect = () => runtime.collect({ sessionId: 's', visible: [] })
+  assert.deepEqual(await collect(), [])
+  runtime.registerSource({ sourceId: 'ordinary', plugin: 'test', revision: 1, rules: [{
+    format: 'reminder/v4', id: 'ordinary', on: 'tool.succeeded', text: 'NOTICE', when: { tool: 'probe' },
+    effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
+  }] })
+  assert.deepEqual(await collect(), [])
+  const source = { sourceId: 'scoped', plugin: 'test', revision: 1, scope: { sessionIds: ['other'] },
+    rules: [stickyRule({ lifetime: 2, cooldown: 0 })] }
+  const handle = runtime.registerSource(source)
+  enabled = true
+  assert.deepEqual(await collect(), [])
+  handle.replace({ ...source, scope: { sessionIds: ['s'] } })
+  enabled = false
+  assert.deepEqual(await collect(), [])
+  enabled = true
+  await assert.rejects(collect(), /unexpected-history-read/, 'an eligible sticky still restores its native history')
+})
+
 test('sticky 首次投递后按寿命继续，然后冷却，再需新事件', async t => {
   const runtime = createReminderRuntime({ config, execute: port })
   t.after(() => runtime.close())
@@ -52,6 +77,25 @@ test('sticky 首次投递后按寿命继续，然后冷却，再需新事件', a
   // A new matching event opens a new activation.
   await runtime.submit(probe('hit-again'))
   assert.deepEqual((await rounds(runtime, 1))[0], ['STICKY_NOTICE'])
+})
+
+test('none 模式的新激活通过最终交付筛选，但同批消息仍去重', async t => {
+  const runtime = createReminderRuntime({ config, execute: port })
+  t.after(() => runtime.close())
+  runtime.registerSource({ sourceId: 'sticky-source', plugin: 'test', revision: 1,
+    rules: [stickyRule({ lifetime: 1, cooldown: 0 })] })
+  await runtime.submit(probe('first'))
+  const first = await runtime.collect({ sessionId: 's', visible: [] })
+  assert.equal((await runtime.filterMessages('s', [], first)).length, 1)
+  await runtime.collect({ sessionId: 's', visible: first, committedIds: ids(first) })
+  assert.equal(runtime.snapshot('s').stickies.length, 0)
+  await runtime.submit(probe('new-activation'))
+  const next = await runtime.collect({ sessionId: 's', visible: first, committedIds: ids(first) })
+  assert.equal(next.length, 1)
+  assert.deepEqual(await runtime.filterMessages('s', first, [...next, ...next]), next)
+  // Until the new handoff commits, another matching event still cannot redeliver it.
+  await runtime.submit(probe('unconfirmed-repeat'))
+  assert.deepEqual(await runtime.collect({ sessionId: 's', visible: first, committedIds: ids(first) }), [])
 })
 
 test('激活期间的重复命中被吸收，不重投也不延长寿命', async t => {

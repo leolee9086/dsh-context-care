@@ -6,7 +6,7 @@ import type { TextCountResult } from '../lib/reminder-runtime/text-count.js'
 
 let revision = 1
 type Chunk = Extract<OutputFrame, { type: 'chunk' }>['chunk']
-const at = (attemptId: string, chunk: Chunk) => ({ type: 'chunk' as const, attemptId, revision: ++revision, chunk })
+const at = (attemptId: string, chunk: Chunk) => ({ type: 'chunk' as const, time: Date.now(), attemptId, revision: ++revision, chunk })
 const limits = { maxTextChars: 10000, maxCandidates: 1000, maxUnits: 1000, maxEvidence: 8 }
 
 /** Drive one attempt with two text blocks and collect every published event. */
@@ -21,7 +21,7 @@ async function publish(maxStreamChars: number): Promise<OutputEvent[]> {
   stream.observe('s', at('attempt-a', { type: 'block-end', index: 0, block: { type: 'text', text: '' } }))
   stream.observe('s', at('attempt-a', { type: 'block-start', index: 1, blockType: 'text' }))
   stream.observe('s', at('attempt-a', { type: 'text-delta', index: 1, text: '乙乙' }))
-  stream.observe('s', { type: 'end', attemptId: 'attempt-a', revision: ++revision })
+  stream.observe('s', { type: 'end', time: Date.now(), attemptId: 'attempt-a', revision: ++revision })
   await stream.close()
   return events
 }

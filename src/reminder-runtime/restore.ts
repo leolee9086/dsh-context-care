@@ -37,13 +37,13 @@ export function restoreReminderState(input: unknown, at: number) {
 }
 
 /**
- * Validate every record, then durably save retirements before publishing the
- * reminder service. A failed save rejects startup; reopening cannot replay old
- * pending work or silently reset consumed delivery quotas.
+ * Validate every record and retire obsolete formats in the returned working
+ * projection. Native Hosts omit save: retirement must not depend on clearing an
+ * obsolete cache file. Standalone callers can still supply their own writer.
  */
 export async function restoreReminderEntries(
   entries: Iterable<readonly [string, unknown]>,
-  save: (id: string, state: StateValue) => Promise<unknown> | void,
+  save?: (id: string, state: StateValue) => Promise<unknown> | void,
   at = Date.now(),
 ) {
   const restored = [...entries].map(([id, input]) => {
@@ -51,7 +51,7 @@ export async function restoreReminderEntries(
     catch (cause) { throw new Error(`reminder-state-restore-failed: ${id}`, { cause }) }
   })
   for (const { id, state, changed } of restored) {
-    if (changed) await save(id, state)
+    if (changed && save) await save(id, state)
   }
   return restored.map(({ id, state }) => [id, state] as const)
 }

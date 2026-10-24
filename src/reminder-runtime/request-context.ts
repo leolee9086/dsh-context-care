@@ -6,9 +6,14 @@ export interface MessageView {
   id?: string
   role: string
   content?: readonly { type: string; text?: string }[]
-  source?: { kind?: string; reminder?: { key: string } }
+  source?: { kind?: string; reminder?: { key: string; handoff?: { queued?: true } } }
 }
 export interface HistoryEvent { type: string; seq: number; time: number; data: unknown }
+/** A lazy log view: callers need not copy the whole session to inspect its recent tail. */
+export interface HistoryView {
+  readonly length: number
+  at(index: number): HistoryEvent | undefined
+}
 export interface EligibilityEvent {
   type?: Rule['on']
   name?: string
@@ -39,25 +44,30 @@ export function localWindow(spec: { start: string; end: string } | undefined, ti
   return { id: day, start: beginning.getTime(), end: ending.getTime() }
 }
 
-/** Read the earliest durable arrival for each human message, not its later surface commit.
- * Inherited fork events and producer-owned synthetic inputs do not establish local presence. */
-export function humanActivity(events: HistoryEvent[]) {
-  const seed = [...events].reverse().find(event => event.type === 'session/end-seed'
-    && record(event.data) && event.data.inherited === true)
-  const firstLiveSeq = (seed?.seq ?? -1) + 1
-  const arrivals = new Map<string, number | null>()
-  for (const event of events) {
+/**
+ * Presence is recent input, not a session-global inventory of human message IDs.
+ * Walk backwards only inside the interested rules' time window. A user/message
+ * is a surface commit and can happen much later than input; it never refreshes presence.
+ */
+export function humanActivity(events: HistoryView, now: number, withinMs: number) {
+  if (!Number.isFinite(now) || !Number.isFinite(withinMs) || withinMs <= 0) return null
+  const since = now - withinMs
+  for (let index = events.length - 1; index >= 0; index--) {
+    const event = events.at(index)
+    if (!event) break
     const data = event.data
-    const messages: unknown[] = event.type === 'agent/inbox/spliced' && record(data) && Array.isArray(data.inserted)
-      ? data.inserted : event.type === 'user/message' ? [data] : []
-    for (const message of messages) {
-      if (!record(message) || !record(message.source) || message.source.kind !== 'user'
-        || typeof message.id !== 'string' || !message.id || arrivals.has(message.id)) continue
-      arrivals.set(message.id, event.seq >= firstLiveSeq && Number.isFinite(event.time) ? event.time : null)
+    // Stop at the child's ownership boundary, but retain recent input across an ordinary resume.
+    if (event.type === 'session/end-seed' && record(data) && data.inherited === true) break
+    if (!Number.isFinite(event.time)) continue
+    if (event.time < since) break
+    if (event.time > now || event.type !== 'agent/inbox/spliced'
+      || !record(data) || !Array.isArray(data.inserted)) continue
+    if (data.inserted.some((message: unknown) => record(message) && record(message.source)
+      && message.source.kind === 'user' && typeof message.id === 'string' && message.id.length > 0)) {
+      return { at: event.time, evidence: 'human-message' }
     }
   }
-  const times = [...arrivals.values()].filter(value => value !== null)
-  return times.length ? { at: times.reduce((latest, at) => Math.max(latest, at)), evidence: 'human-message' } : null
+  return null
 }
 
 export function requestContext(visible: MessageView[], config: { maxContextChars: number; maxContextMessages: number }) {

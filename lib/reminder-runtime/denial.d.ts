@@ -52,8 +52,8 @@ export interface DenialTickets {
      * step that cut it short so the denial can say which one.
      */
     record(key: object, verdict: DenialVerdict | undefined, evaluated: boolean, generation: number, code?: UnfinishedCode): void;
-    /** Final synchronous decision for a dispatch; never calls back into asynchronous policy. */
-    decide(key: object, at: number): {
+    /** Final synchronous decision for this execution token; valid until settlement or a relevant policy change. */
+    decide(key: object): {
         kind: 'allow';
     } | {
         kind: 'deny';
@@ -74,6 +74,8 @@ export interface DenialTickets {
     dispose(): void;
 }
 export interface PreExecution {
+    /** Policy completion, independent of durable reminder delivery and diagnostics. */
+    readonly done: Promise<void>;
     /** Record this call's verdict once; a later settlement is ignored. */
     settle(verdict: DenialVerdict | undefined, evaluated: boolean, code?: UnfinishedCode): void;
     /** Fail closed for a preparation that ended without a verdict of its own. */
@@ -88,6 +90,8 @@ export declare function openPreExecution(key: object, tickets: DenialTickets): P
 /**
  * Correlates an asynchronous pre-execute evaluation with the later synchronous
  * guard. Tickets are keyed by the execution token, not the call id: a reused
- * call id therefore cannot inherit another call's verdict.
+ * call id therefore cannot inherit another call's verdict. Elapsed time after a
+ * completed evaluation does not change that result: later hooks or approval may
+ * legitimately delay the guard. Settlement and policy generation retire tickets.
  */
-export declare function createDenialTickets(ttlMs: number, now: () => number): DenialTickets;
+export declare function createDenialTickets(): DenialTickets;

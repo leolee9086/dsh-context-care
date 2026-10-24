@@ -8,6 +8,7 @@ import { inspectSession } from './deep-rest.js'
 import { rebaseSummaryRepair } from './summary-repair.js'
 import { checkpointCoverage } from './checkpoint-coverage.js'
 import { buildSummaryRequest, frameSummary, summaryCandidates, summaryConfig, summaryPricing } from './summary-request.js'
+import { summaryProposalRecord } from '../lib/summary-proposal-history.js'
 
 function failure(message, code) { return Object.assign(new Error(message), { code }) }
 
@@ -75,7 +76,7 @@ export function createSummaryExecutor({ meter, llm, requests, spec, recover = ()
     const pending = original.messages.slice(messages.length)
     const before = operation.priceRequest(original)
     const compactionId = randomUUID()
-    const start = session.append('compaction/start', { compactionId, turn: openTurn })
+    const start = session.append('compaction/start', { compactionId, turn: openTurn, ...summaryProposalRecord(audit.proposalKey) })
     let candidateIndex = 0
     let lastError
     let closed = false
@@ -196,7 +197,8 @@ export function createSummaryExecutor({ meter, llm, requests, spec, recover = ()
       }
     } catch (error) {
       if (!closed) {
-        try { session.append('compaction/end', { compactionId, turn: openTurn, error: error instanceof Error ? error.message : String(error) }) }
+        try { session.append('compaction/end', { compactionId, turn: openTurn, error: error instanceof Error ? error.message : String(error),
+          ...summaryProposalRecord(audit.proposalKey, error.code) }) }
         catch (closeError) {
           // The unmatched durable start remains visible; preserve the primary failure.
           recordSecondaryFailure(error, closeError, 'summary transaction close')

@@ -61,7 +61,8 @@ const UNFINISHED_REASON: Record<UnfinishedCode, string> = {
  * 都归进「评估超时」会把排查方向带偏，所以这里单独分出来。
  */
 export function codeForFailure(message: string): UnfinishedCode {
-  if (/matcher-startup-timeout|matcher-worker-exited|matcher-closed/.test(message)) return 'matcher-startup'
+  if (/matcher-startup-timeout|matcher-worker-startup-failed|matcher-worker-exited|matcher-closed/.test(message)) return 'matcher-startup'
+  if (/reminder-round-timeout/.test(message)) return 'round-timeout'
   if (/timeout/.test(message)) return 'rule-timeout'
   return 'rule-failed'
 }
@@ -80,7 +81,6 @@ interface Ticket {
   evaluated: boolean
   /** 未完成时是哪一步失去的；evaluated 为真时忽略。 */
   code: UnfinishedCode
-  expiresAt: number
   /** Policy generation the round was evaluated under. */
   generation: number
 }
@@ -93,8 +93,8 @@ export interface DenialTickets {
    */
   record(key: object, verdict: DenialVerdict | undefined, evaluated: boolean, generation: number,
     code?: UnfinishedCode): void
-  /** Final synchronous decision for a dispatch; never calls back into asynchronous policy. */
-  decide(key: object, at: number): { kind: 'allow' } | { kind: 'deny'; reason: string }
+  /** Final synchronous decision for this execution token; valid until settlement or a relevant policy change. */
+  decide(key: object): { kind: 'allow' } | { kind: 'deny'; reason: string }
   /** Drop a settled call so the registry does not retain finished executions. */
   settle(key: object): void
   /**
@@ -111,6 +111,8 @@ export interface DenialTickets {
 }
 
 export interface PreExecution {
+  /** Policy completion, independent of durable reminder delivery and diagnostics. */
+  readonly done: Promise<void>
   /** Record this call's verdict once; a later settlement is ignored. */
   settle(verdict: DenialVerdict | undefined, evaluated: boolean, code?: UnfinishedCode): void
   /** Fail closed for a preparation that ended without a verdict of its own. */
@@ -124,30 +126,35 @@ export interface PreExecution {
  */
 export function openPreExecution(key: object, tickets: DenialTickets): PreExecution {
   const generation = tickets.current()
+  let finish!: () => void
+  const done = new Promise<void>(resolve => { finish = resolve })
   let settled = false
   const settle = (verdict: DenialVerdict | undefined, evaluated: boolean, code?: UnfinishedCode) => {
     if (settled) return
     settled = true
     tickets.record(key, verdict, evaluated, generation, evaluated ? undefined : code ?? 'unclassified')
+    finish()
   }
-  return { settle, settleUnfinished: (code?: UnfinishedCode) => settle(undefined, false, code) }
+  return { done, settle, settleUnfinished: (code?: UnfinishedCode) => settle(undefined, false, code) }
 }
 
 /**
  * Correlates an asynchronous pre-execute evaluation with the later synchronous
  * guard. Tickets are keyed by the execution token, not the call id: a reused
- * call id therefore cannot inherit another call's verdict.
+ * call id therefore cannot inherit another call's verdict. Elapsed time after a
+ * completed evaluation does not change that result: later hooks or approval may
+ * legitimately delay the guard. Settlement and policy generation retire tickets.
  */
-export function createDenialTickets(ttlMs: number, now: () => number): DenialTickets {
+export function createDenialTickets(): DenialTickets {
   const issued = new WeakMap<object, Ticket>()
   let generation = 0
   let disposed = false
   return {
     record(key, verdict, evaluated, issuedUnder, code) {
       if (disposed) return
-      issued.set(key, { verdict, evaluated, code: code ?? 'unclassified', expiresAt: now() + ttlMs, generation: issuedUnder })
+      issued.set(key, { verdict, evaluated, code: code ?? 'unclassified', generation: issuedUnder })
     },
-    decide(key, at) {
+    decide(key) {
       // A closed service has no policy left to consult, so nothing can be authorized.
       if (disposed) return { kind: 'deny', reason: UNFINISHED_REASON.closed }
       const ticket = issued.get(key)
@@ -155,7 +162,6 @@ export function createDenialTickets(ttlMs: number, now: () => number): DenialTic
       if (!ticket) return { kind: 'deny', reason: '提醒策略未能在执行前完成评估' }
       // The rule set changed after this round read it, so the verdict is no longer that policy's.
       if (ticket.generation !== generation) return { kind: 'deny', reason: '提醒策略已变更，本次调用需重新评估' }
-      if (ticket.expiresAt <= at) return { kind: 'deny', reason: '提醒策略评估已过期' }
       // 未完成时报告具体是哪一步：规则超时和队列已满都该拒绝，但原因不该长得一样。
       if (!ticket.evaluated) return { kind: 'deny', reason: UNFINISHED_REASON[ticket.code] }
       return ticket.verdict ? { kind: 'deny', reason: ticket.verdict.reason } : { kind: 'allow' }

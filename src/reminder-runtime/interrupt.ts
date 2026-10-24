@@ -8,7 +8,8 @@ interface InterruptOptions<Agent> {
   runtime: Pick<Runtime, 'snapshot' | 'collect' | 'filterMessages' | 'rollback'>
   maxInterrupts: number
   sessionId: (agent: Agent) => string
-  humanTurn: (agent: Agent) => string
+  prepareHumanTurn?: (agent: Agent) => Promise<void>
+  humanTurn: (agent: Agent) => string | undefined
   visible: (agent: Agent) => MessageView[]
   isCurrent: (agent: Agent, output: OutputEvidence) => boolean
   cancel: (agent: Agent) => void
@@ -20,11 +21,8 @@ export function createOutputInterrupt<Agent>(options: InterruptOptions<Agent>) {
   const budgets = new Map<string, { turn: string; count: number }>()
   const running = new Set<string>()
   return async (agent: Agent, output: OutputEvidence) => {
-    const id = options.sessionId(agent), turn = options.humanTurn(agent)
+    const id = options.sessionId(agent)
     if (running.has(id) || options.maxInterrupts === 0 || !options.isCurrent(agent, output)) return
-    const previous = budgets.get(id)
-    const budget = previous?.turn === turn ? previous : { turn, count: 0 }
-    if (budget.count >= options.maxInterrupts) return
     const ids = options.runtime.snapshot(id).candidates.filter(candidate => candidate.status === 'pending'
       && candidate.output?.attemptId === output.attemptId && candidate.output.index === output.index
       && candidate.rule.effect.kind === 'remind'
@@ -33,6 +31,13 @@ export function createOutputInterrupt<Agent>(options: InterruptOptions<Agent>) {
     if (!ids.length) return
     running.add(id)
     try {
+      // Cold history reads can yield; reserve this interrupt lane before loading it.
+      await options.prepareHumanTurn?.(agent)
+      const turn = options.humanTurn(agent)
+      if (turn === undefined || !options.isCurrent(agent, output)) return
+      const previous = budgets.get(id)
+      const budget = previous?.turn === turn ? previous : { turn, count: 0 }
+      if (budget.count >= options.maxInterrupts) return
       const messages = await options.runtime.collect({ sessionId: id, visible: options.visible(agent), candidateIds: ids })
       const allowed = options.isCurrent(agent, output)
         ? await options.runtime.filterMessages(id, options.visible(agent), messages) : []

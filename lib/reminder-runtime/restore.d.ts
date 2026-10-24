@@ -464,6 +464,10 @@ export declare function restoreReminderState(input: unknown, at: number): {
                     evidence: string;
                 } | null | undefined;
             } | undefined;
+            native?: {
+                type: "tool-result" | "tool-call" | "session-event" | "assistant-output";
+                seq: number;
+            } | undefined;
             output?: {
                 attemptId: string;
                 turn: number;
@@ -474,6 +478,7 @@ export declare function restoreReminderState(input: unknown, at: number): {
                 full: string;
             } | undefined;
             messageId?: string | undefined;
+            queued?: true | undefined;
             rendered?: boolean | undefined;
             sticky?: {
                 activationId: string;
@@ -504,11 +509,11 @@ export declare function restoreReminderState(input: unknown, at: number): {
     changed: boolean;
 };
 /**
- * Validate every record, then durably save retirements before publishing the
- * reminder service. A failed save rejects startup; reopening cannot replay old
- * pending work or silently reset consumed delivery quotas.
+ * Validate every record and retire obsolete formats in the returned working
+ * projection. Native Hosts omit save: retirement must not depend on clearing an
+ * obsolete cache file. Standalone callers can still supply their own writer.
  */
-export declare function restoreReminderEntries(entries: Iterable<readonly [string, unknown]>, save: (id: string, state: StateValue) => Promise<unknown> | void, at?: number): Promise<(readonly [string, {
+export declare function restoreReminderEntries(entries: Iterable<readonly [string, unknown]>, save?: (id: string, state: StateValue) => Promise<unknown> | void, at?: number): Promise<(readonly [string, {
     seen: string[];
     candidates: {
         id: string;
@@ -966,6 +971,10 @@ export declare function restoreReminderEntries(entries: Iterable<readonly [strin
                 evidence: string;
             } | null | undefined;
         } | undefined;
+        native?: {
+            type: "tool-result" | "tool-call" | "session-event" | "assistant-output";
+            seq: number;
+        } | undefined;
         output?: {
             attemptId: string;
             turn: number;
@@ -976,6 +985,7 @@ export declare function restoreReminderEntries(entries: Iterable<readonly [strin
             full: string;
         } | undefined;
         messageId?: string | undefined;
+        queued?: true | undefined;
         rendered?: boolean | undefined;
         sticky?: {
             activationId: string;

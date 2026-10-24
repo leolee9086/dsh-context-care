@@ -80,19 +80,8 @@ test('source replacement during analysis cannot publish old results', async t =>
   assert.equal(runtime.snapshot('s').candidates.length, 0)
 })
 
-test('failed persistence is not published and a known pre-commit failure releases reservation', async t => {
-  let reject = false
-  const runtime = fixture(t, { save: async () => { if (reject) throw new Error('disk'); } })
-  runtime.registerSource(source)
-  await runtime.submit(event('1'))
-  reject = true
-  await assert.rejects(runtime.collect({ sessionId: 's', visible: [] }), /disk/)
-  reject = false
-  const messages = await runtime.collect({ sessionId: 's', visible: [] })
-  assert.equal(messages.length, 1)
-  await runtime.rollback('s', messages)
-  assert.equal((await runtime.collect({ sessionId: 's', visible: [] })).length, 1)
-})
+// Native pre-commit failure, recollection, and acknowledged rollback are covered
+// by reminder-request-real.test.ts and reminder-shared-recovery-real.test.ts.
 
 test('admission freezes sources before storage waits and bounds pending writes', async t => {
   let release, entered

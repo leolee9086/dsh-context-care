@@ -10,7 +10,7 @@ after(async () => { await matcher.close() })
 const port: NonNullable<RuntimeOptions['execute']> = (input, signal, timing) => matcher.detect(input, signal, timing)
 
 const verdict = { sourceId: 's', ruleId: 'r', reason: '不得删除文件' }
-const tickets = (now = () => 1000) => createDenialTickets(50, now)
+const tickets = () => createDenialTickets()
 type Runtime = ReturnType<typeof createReminderRuntime>
 type Handle = ReturnType<Runtime['registerSource']>
 type Outcome = { kind: 'allow' } | { kind: 'deny'; reason: string }
@@ -54,19 +54,19 @@ test('只有评估完成且未命中的票据才授权执行', () => {
   api.record(denied, verdict, true, generation)
   // A round cut short before finishing cannot authorize: an unfinished check is not permission.
   api.record(unfinished, undefined, false, generation)
-  assert.deepEqual(api.decide(clean, 1000), { kind: 'allow' })
-  assert.deepEqual(api.decide(denied, 1000), { kind: 'deny', reason: '不得删除文件' })
-  assert.equal(api.decide(unfinished, 1000).kind, 'deny')
+  assert.deepEqual(api.decide(clean), { kind: 'allow' })
+  assert.deepEqual(api.decide(denied), { kind: 'deny', reason: '不得删除文件' })
+  assert.equal(api.decide(unfinished).kind, 'deny')
 })
 
-test('缺少或过期票据都拒绝，不因为没记录就放行', () => {
+test('缺少票据仍拒绝，已完成结论只随执行结算或策略变更失效', () => {
   const api = tickets()
-  assert.equal(api.decide({}, 1000).kind, 'deny')
-  const stale = {}
-  api.record(stale, undefined, true, api.current())
-  // TTL is 50ms; a guard reached after that cannot rely on the evaluation.
-  assert.equal(api.decide(stale, 1050).kind, 'deny')
-  assert.deepEqual(api.decide(stale, 1049), { kind: 'allow' })
+  assert.equal(api.decide({}).kind, 'deny')
+  const live = {}
+  api.record(live, undefined, true, api.current())
+  assert.deepEqual(api.decide(live), { kind: 'allow' })
+  api.settle(live)
+  assert.equal(api.decide(live).kind, 'deny')
 })
 
 test('票据按执行令牌区分，调用ID重用不会继承他人结论', () => {
@@ -74,8 +74,8 @@ test('票据按执行令牌区分，调用ID重用不会继承他人结论', () 
   const first = {}
   api.record(first, undefined, true, api.current())
   // The second call has its own token and was never evaluated.
-  assert.equal(api.decide({}, 1000).kind, 'deny')
-  assert.deepEqual(api.decide(first, 1000), { kind: 'allow' })
+  assert.equal(api.decide({}).kind, 'deny')
+  assert.deepEqual(api.decide(first), { kind: 'allow' })
 })
 
 test('政策变更只作废旧票据，之后仍然签发并生效', () => {
@@ -84,12 +84,12 @@ test('政策变更只作废旧票据，之后仍然签发并生效', () => {
   api.record(before, undefined, true, api.current())
   api.invalidate()
   // The verdict was reached under the previous rule set, so it cannot authorize this call.
-  assert.deepEqual(api.decide(before, 1000), { kind: 'deny', reason: '提醒策略已变更，本次调用需重新评估' })
+  assert.deepEqual(api.decide(before), { kind: 'deny', reason: '提醒策略已变更，本次调用需重新评估' })
   // Retirement is not a shutdown: the next round is recorded and honoured.
   const after = {}
   api.record(after, undefined, true, api.current())
-  assert.deepEqual(api.decide(after, 1000), { kind: 'allow' })
-  assert.equal(api.decide({}, 1000).kind, 'deny')
+  assert.deepEqual(api.decide(after), { kind: 'allow' })
+  assert.equal(api.decide({}).kind, 'deny')
 })
 
 test('已结算的票据不再生效，停用后一律拒绝', () => {
@@ -97,15 +97,15 @@ test('已结算的票据不再生效，停用后一律拒绝', () => {
   const settled = {}
   api.record(settled, undefined, true, api.current())
   api.settle(settled)
-  assert.equal(api.decide(settled, 1000).kind, 'deny')
+  assert.equal(api.decide(settled).kind, 'deny')
   const closing = tickets()
   const live = {}
   closing.record(live, undefined, true, closing.current())
   closing.dispose()
-  assert.deepEqual(closing.decide(live, 1000), { kind: 'deny', reason: '提醒策略服务已停止，本次调用未执行' })
+  assert.deepEqual(closing.decide(live), { kind: 'deny', reason: '提醒策略服务已停止，本次调用未执行' })
   const late = {}
   closing.record(late, undefined, true, closing.current())
-  assert.equal(closing.decide(late, 1000).kind, 'deny')
+  assert.equal(closing.decide(late).kind, 'deny')
 })
 
 // ---------------------------------------------------------------------------

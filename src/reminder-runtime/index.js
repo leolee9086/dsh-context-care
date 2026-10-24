@@ -5,18 +5,23 @@
 /** @import {} from '@deepseek-ai/dsh-tools' */
 /** @import {} from '@deepseek-ai/dsh-storage-domain' */
 /** @import { createRuleControls } from '../rule-controls.js' */
-import { createReminderRuntime, ReminderConfig, REMINDER_DOMAIN, REMINDER_SERVICE, REMINDER_MESSAGE_KIND } from '../../lib/reminder-runtime/runtime.js'
+import { createReminderRuntime, ReminderConfig, REMINDER_SERVICE } from '../../lib/reminder-runtime/runtime.js'
 import { createOutputStream } from './output-stream.js'
 import { createOutputInterrupt } from '../../lib/reminder-runtime/interrupt.js'
 import { createSessionIdentityResolver } from '../../lib/reminder-runtime/session-identity.js'
-import { restoreReminderEntries } from '../../lib/reminder-runtime/restore.js'
+import { shutdownReminderRuntime } from '../../lib/reminder-runtime/shutdown.js'
 import { availableParallelism } from 'node:os'
 import { createBoundedMatcher } from '../bounded-matcher.js'
 import { CapacitySettings } from '../reminder-capacity.js'
 import { releaseResources } from '../resource-cleanup.js'
-import { CLAIM_DOMAIN } from './claims.js'
+import { createSessionClaims } from '../../lib/reminder-runtime/session-claims.js'
+import { createSessionDeliveries } from '../../lib/reminder-runtime/session-deliveries.js'
+import { createToolEvents } from '../../lib/reminder-runtime/tool-events.js'
+import { nativeOutputAttempt } from '../../lib/reminder-runtime/native-output-events.js'
 import { createTemplates } from '../templates.js'
-export { createReminderRuntime, ReminderConfig, REMINDER_DOMAIN, REMINDER_SERVICE }
+export { createReminderRuntime, ReminderConfig, REMINDER_SERVICE }
+// Legacy schema is exported for standalone callers; the production Host never opens it.
+export { REMINDER_DOMAIN } from '../../lib/reminder-runtime/runtime.js'
 export { ReminderScope } from './schema.js'
 
 /** @type {WeakMap<Context['storageDomain'], Promise<ReturnType<typeof createReminderRuntime>>>} */
@@ -39,6 +44,28 @@ export async function ensureReminderService(ctx, input, controls) {
   finally { if (serviceStarts.get(facility) === pending) serviceStarts.delete(facility) }
 }
 
+/** Queue unlogged matches as native context; this never starts a turn.
+ * @param {Context} ctx
+ * @param {ReturnType<typeof createReminderRuntime>} runtime
+ * @param {string} sessionId
+ * @param {readonly string[]} candidateIds
+ */
+async function handoffPending(ctx, runtime, sessionId, candidateIds) {
+  const agent = ctx.get('agents')?.get(/** @type {SessionId} */ (sessionId))
+  if (!agent) throw new Error('reminder-native-inbox-agent-unavailable')
+  const visible = agent.session.deriveMessages()
+  const messages = await runtime.queuePending({ sessionId, visible, candidateIds: [...candidateIds] })
+  const allowed = await runtime.filterMessages(sessionId, visible, messages, undefined, true)
+  const denied = messages.filter(message => !allowed.includes(message))
+  if (denied.length) await runtime.rollback(sessionId, denied)
+  if (!allowed.length) return
+  // Rollback and identity lookup can yield to a rule or control change. Recheck
+  // after both; no await separates this decision from native publication.
+  const latest = await runtime.filterMessages(sessionId, agent.session.deriveMessages(), allowed, undefined, true)
+  if (latest.length !== allowed.length) { await runtime.rollback(sessionId, allowed); return }
+  for (const message of latest) agent.inject(message)
+}
+
 /** @param {Context} ctx
  * @param {unknown} input
  * @param {ReturnType<typeof createRuleControls>} controls
@@ -46,26 +73,26 @@ export async function ensureReminderService(ctx, input, controls) {
  */
 async function startReminderService(ctx, input, controls, facility) {
   const config = ReminderConfig.parse(input)
-  const domain = await facility.open(REMINDER_DOMAIN)
-  // Another provider may have completed while storage was opening.
   const winner = ctx.get(REMINDER_SERVICE)
-  if (winner) { await domain.close(); return winner }
+  if (winner) return winner
   /** @type {Array<[string, () => unknown]>} */
-  const resources = [['reminder-sessions', () => domain.close()]]
+  const resources = []
   try {
     // Global settings have their own domain, independent of existing session delivery records.
     const settingsDomain = await facility.open({ name: 'context_care_reminder_settings', version: 1, layout: 'per-record',
       tables: { settings: { valueSchema: CapacitySettings } } })
     resources.unshift(['reminder-settings', () => settingsDomain.close()])
-    const settings = settingsDomain.table('settings'), table = domain.table('sessions')
-    const claimDomain = await facility.open(CLAIM_DOMAIN)
-    resources.unshift(['reminder-claims', () => claimDomain.close()])
-    const claimTable = claimDomain.table('claims')
-    // Service startup is serialized per facility; all later mutations use the domain's atomic update.
-    if (!claimTable.get('global')) await claimTable.put('global', { buckets: [] })
-    // Retire obsolete persisted candidates before v4 validation. The service is
-    // published only after these saves succeed; live registrations remain v4-only.
-    const entries = await restoreReminderEntries(table.entries(), (id, state) => table.put(id, state))
+    const settings = settingsDomain.table('settings')
+    const sharedClaims = createSessionClaims(ctx), deliveries = createSessionDeliveries(ctx)
+    resources.unshift(['reminder-delivery-cache', () => deliveries.close()])
+    resources.unshift(['reminder-claims-cache', () => sharedClaims.close()])
+    ctx.on('session/event', (session, event) => {
+      sharedClaims.observe(session, event)
+      deliveries.observe(session, event)
+    })
+    ctx.on('session/created', session => { sharedClaims.created(session); deliveries.created(session) })
+    // Candidate, seen and delivery projections are rebuilt from Session logs.
+    // The retired v1 candidate table is deliberately neither opened nor cleared.
     // 线程池大小按机器算，不按配置文件猜：参考实现用核心数的一半，
     // 我们沿用同一个尺度——匹配是后台计算，不该和用户抢满整机。
     const threads = config.maxIdle ?? Math.max(1, Math.floor(availableParallelism() / 2))
@@ -75,27 +102,42 @@ async function startReminderService(ctx, input, controls, facility) {
       maxIdle: threads, maxBytes: config.maxBytes })
     resources.unshift(['reminder-worker', () => matcher.close()])
     await matcher.warmup()
-    const runtime = createReminderRuntime({ config, entries, templates: createTemplates(), save: (id, value) => table.put(id, value),
+    const toolEvents = createToolEvents({ ...config, output: config }, { sessions: ctx.sessions,
+      readSession: async id => {
+        const query = ctx.get('sessionQuery')
+        if (!query) throw new Error('reminder-native-tool-history-unavailable')
+        const log = await query.readSession(id)
+        deliveries.observeLog(String(id), log)
+        return log
+      } })
+    resources.unshift(['reminder-tool-cache', () => toolEvents.close()])
+    ctx.on('session/created', session => toolEvents.created(session))
+    const runtime = createReminderRuntime({ config, sessionAuthoritative: true, templates: createTemplates(),
       capacity: settings.get('global'), saveCapacity: value => settings.put('global', value),
       resolveIdentity: createSessionIdentityResolver(ctx),
-      updateClaims: change => claimTable.update('global', change),
+      resolveEvent: (event, signal) => toolEvents.resolve(event, signal),
+      recoverEvents: (id, accept, signal, selection) => toolEvents.recover(id, accept, signal, selection),
+      sinceSeq: (id, source, rule) => controls.sinceSeq(id, source, rule),
+      updateClaims: change => sharedClaims.update(change),
+      readDeliveries: (id, humanId) => deliveries.read(id, humanId),
+      wasHanded: (id, eventId, outputRule) => deliveries.wasHanded(id, eventId, outputRule),
+      readHandoffs: id => deliveries.handoffs(id),
+      readQueued: id => deliveries.queued(id),
+      handoffPending: async (id, ids) => { await handoffPending(ctx, runtime, id, ids) },
       dispatches: true, execute: (input, signal, timing) => matcher.detect(input, signal, timing), report: error => ctx.logger.warn(`reminder: ${error instanceof Error ? error.message : String(error)}`),
       eligible: (id, source, rule) => controls.enabled(id, source, rule, 'model'),
       epoch: (id, source, rule) => controls.epoch(id, source, rule) })
-    resources.unshift(['reminder-runtime', () => runtime.close()])
+    resources.unshift(['reminder-runtime', () => shutdownReminderRuntime(runtime)])
     const interrupt = createOutputInterrupt({ runtime, maxInterrupts: config.maxInterruptsPerTurn,
       sessionId: (/** @type {Agent} */ agent) => String(agent.session.id), visible: agent => agent.session.deriveMessages(),
-      humanTurn: agent => {
-        const events = agent.session.snapshotEvents()
-        const arrival = events.findLast(event => event.type === 'agent/inbox/spliced'
-          && event.data.inserted.some(message => message.source.kind === 'user'))
-        return String(arrival?.seq ?? events.findLast(event => event.type === 'user/message' && event.data.source.kind === 'user')?.seq ?? 'initial')
-      },
+      prepareHumanTurn: async agent => { await deliveries.humanTurn(String(agent.session.id)) },
+      humanTurn: agent => deliveries.currentHumanTurn(String(agent.session.id)),
       isCurrent: /** @returns {boolean} */ (agent, output) => outputStream.isCurrent(agent, output),
       cancel: agent => agent.cancel({ kind: 'hook', reason: 'reminder output rule' }, { keepInbox: true }),
       steer: (agent, message) => agent.steer(message) })
     const outputStream = createOutputStream({ config,
       sessionId: (/** @type {Agent} */ agent) => String(agent.session.id),
+      attemptId: agent => nativeOutputAttempt(agent.session),
       submit: event => runtime.submit(event),
       afterSubmit: interrupt,
       report: error => ctx.logger.warn(`reminder: ${error instanceof Error ? error.message : String(error)}`),
@@ -111,7 +153,8 @@ async function startReminderService(ctx, input, controls, facility) {
       try {
         await runtime.prepareToolExecution({ key: exec.token, sessionId: String(exec.agent.session.id),
           name: exec.name, arguments: exec.arguments, callId: String(exec.callId),
-          rootCallId: String(exec.rootCallId ?? exec.callId), signal: exec.signal })
+          rootCallId: String(exec.rootCallId ?? exec.callId),
+          native: toolEvents.preparation(exec.agent.session, String(exec.callId)), signal: exec.signal })
       } catch (error) {
         // A failed policy evaluation leaves no ticket, and the guard then refuses the call.
         ctx.logger.warn(`reminder: 工具前置评估失败: ${error instanceof Error ? error.message : String(error)}`)
@@ -127,8 +170,14 @@ async function startReminderService(ctx, input, controls, facility) {
       runtime.settleToolExecution(exec.token)
       return verdict.kind === 'deny' ? verdict.reason : undefined
     }))
+    ctx.on('session/event', (session, event) => {
+      const submission = toolEvents.observe(session, event)
+      if (submission) void runtime.submit(submission.event)
+        .catch(error => ctx.logger.warn(`reminder: ${error.message}`))
+    })
     ctx.on('tools/result', (exec, result) => {
       if (!exec.agent) return
+      if (toolEvents.waitForCommit(exec.agent.session, String(exec.callId))) return
       const visible = exec.agent.session.deriveMessages()
       let chars = config.maxContextChars
       const messages = []
@@ -145,32 +194,21 @@ async function startReminderService(ctx, input, controls, facility) {
         context: { messages, truncated: messages.length < visible.length || messages.some(message => message.truncated) } }
       void runtime.submit(event, exec.signal).catch(error => ctx.logger.warn(`reminder: ${error.message}`))
     })
-    ctx.on('agent/assistant-stream', ({ agent, frame }) => outputStream.observe(agent, frame))
+    ctx.on('agent/assistant-stream', ({ agent, frame }) => {
+      if (frame.type !== 'end') return outputStream.observe(agent, frame)
+      if (frame.outcome.kind === 'abandoned') return outputStream.abandon(agent, frame)
+      const terminal = agent.session.eventAt(frame.outcome.seq)
+      if (!terminal) throw new Error('reminder-native-output-terminal-missing')
+      outputStream.observe(agent, { ...frame, time: terminal.time })
+    })
     // Committed log events are the `session.event` trigger. A rule selects the DSH
     // event name; the persisted payload rides `arguments`, because `facts` belongs to
     // analyzers (matching clears it before they run, and their output must not be
     // overwritten by event data).
     ctx.on('session/event', (session, event) => {
       if (!runtime.handlesSessionEvent(event.type)) return
-      const data = event.data
-      // Classify the source. Loop prevention must tell our own delivery from a human turn,
-      // and it needs the identity of the rule that produced the causing message.
-      let origin = 'background'
-      let causationId
-      if (typeof data === 'object' && data !== null && 'source' in data && typeof data.source === 'object' && data.source !== null
-        && 'kind' in data.source && data.source.kind === REMINDER_MESSAGE_KIND) {
-        origin = 'reminder'
-        const trace = 'contextCareTrace' in data.source ? data.source.contextCareTrace : undefined
-        if (typeof trace === 'object' && trace !== null && 'sourceId' in trace && 'ruleId' in trace
-          && typeof trace.sourceId === 'string' && typeof trace.ruleId === 'string') {
-          causationId = `${trace.sourceId}:${trace.ruleId}`
-        }
-      } else if (event.type === 'user/message') origin = 'human'
-      else if (event.type.startsWith('tool/')) origin = 'tool'
-      const callId = `${event.type}#${event.seq}`
-      void runtime.submit({ type: 'session.event', sessionId: String(session.id), name: event.type, arguments: data,
-        callId, rootCallId: callId, origin, ...(causationId === undefined ? {} : { causationId }),
-        clock: { at: typeof event.time === 'number' ? event.time : Date.now() } })
+      // Reuse the same canonical payload and source classification during replay.
+      void runtime.submit(toolEvents.observeSession(session, event))
         .catch(error => ctx.logger.warn(`reminder: ${error instanceof Error ? error.message : String(error)}`))
     })
     return runtime

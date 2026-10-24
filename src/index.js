@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { snoozeOutput, snoozeResult } from '../lib/reminder-runtime/snooze.js'
 import { createUserMessage } from './message.js'
 import { producedBy, producerKind } from './producer-source.js'
 import { calculateState, GUIDANCE, renderState, resolveConfig } from './policy.js'
@@ -257,7 +258,7 @@ export function installContextCare(ctx, raw, compactionSource) {
   // 判断什么时候该提醒、提醒什么,都在这里发生。规则本身不属于本插件。
   // ---------------------------------------------------------- 变换记录
   //
-  // Rule evaluations use the Host journal; no new Session event type is introduced.
+  // Evaluations attached to delivered notices already live in the Session log; runtime diagnostics use the logger.
   const transformLog = createTransformLog({ ctx })
   // 改写由本插件的 Host 持久域保管，不依赖可选索引服务。
   // 索引属性表仍可写副本用于 JOIN；在调用边界现取，允许它晚于本插件注册。
@@ -276,7 +277,7 @@ export function installContextCare(ctx, raw, compactionSource) {
     },
     warn: message => ctx.logger.warn(message),
   })
-  /** 两个来源的命中都记到一处,面板和排查都只看这一张表。 */
+  /** 运行诊断写 logger；已投递提示的依据由消息中的 contextCareTrace 保留。 */
   const recordHit = (layer, record, where) => transformLog.record({ ...record, ...where, layer })
 
   const noticeRules = installNoticeRules(ctx, {
@@ -621,14 +622,16 @@ export function installContextCare(ctx, raw, compactionSource) {
     parameters: { type: 'object', additionalProperties: false, properties: {
       sourceId: { type: 'string', minLength: 1 }, ruleId: { type: 'string', minLength: 1 },
     } },
-    output: { schema: { type: 'string' }, render: (_args, text) => [{ type: 'text', text }] },
+    output: snoozeOutput,
     async execute(args, exec) {
       if (!exec.agent) throw new Error('reminder_snooze 需要一个所属会话')
       exec.signal.throwIfAborted()
       const reminders = ctx.get('reminderRules')
-      if (!reminders?.snooze) throw new Error('当前提醒服务不支持时间窗口暂缓')
-      const result = await reminders.snooze({ sessionId: String(exec.agent.session.id), sourceId: args.sourceId, ruleId: args.ruleId })
-      return result.length ? `已暂停 ${result.length} 条当前窗口提醒，窗口结束后自动恢复。` : '当前没有可暂停的时间窗口提醒。'
+      if (!reminders?.prepareSnooze) throw new Error('当前提醒服务不支持时间窗口暂缓')
+      const sessionId = String(exec.agent.session.id)
+      const windows = await reminders.prepareSnooze({ sessionId, sourceId: args.sourceId, ruleId: args.ruleId })
+      exec.signal.throwIfAborted()
+      return snoozeResult(sessionId, windows)
     },
     presentCall: () => ({ card: 'generic', title: '暂停当前窗口提醒', kind: 'other' }),
   }))
@@ -721,14 +724,25 @@ export function installContextCare(ctx, raw, compactionSource) {
   }, { prepend: true })
 
   async function collectInputs(agent, signal, accepted, current) {
-    const messages = [...accepted]
+    // Frozen queued input owns the match, not a delivery slot. collect replaces
+    // approved entries with model-ready messages; quota-blocked entries stay pending.
+    const messages = accepted.filter(message => message.source?.kind !== 'plugin:dsh-context-care:reminder'
+      || !message.source.reminder.handoff?.queued)
     const reminders = ctx.get('reminderRules')
     if (reminders) {
       try {
-        const sessionId = String(agent.session.id), events = agent.session.snapshotEvents(), visible = agent.session.deriveMessages()
-        await reminders.prepareRequest?.({ sessionId, events, visible, accepted, signal })
-        messages.push(...await reminders.collect({ sessionId, visible, accepted,
-          committedIds: events.filter(event => event.type === 'user/message').map(event => event.data.id), signal }))
+        const sessionId = String(agent.session.id), visible = agent.session.deriveMessages()
+        // Presence reads only the recent log tail; it does not materialize a full-session snapshot.
+        const recent = { length: agent.session.seq, at: index => agent.session.eventAt(index) }
+        await reminders.prepareRequest?.({ sessionId, events: recent, visible, accepted, signal })
+        const collected = await reminders.collect({ sessionId, visible, accepted, signal })
+        const replacements = new Map(collected.map(message => [message.id, message]))
+        const ordered = accepted.flatMap(message => {
+          const replacement = replacements.get(message.id)
+          if (replacement) { replacements.delete(message.id); return [replacement] }
+          return message.source?.kind === 'plugin:dsh-context-care:reminder' && message.source.reminder.handoff?.queued ? [] : [message]
+        })
+        messages.splice(0, messages.length, ...ordered, ...replacements.values())
       }
       catch (error) { if (signal.aborted) throw error; ctx.logger.warn(`context-care: 规则提醒收集失败: ${error.message}`) }
     }
@@ -890,7 +904,8 @@ export function installContextCare(ctx, raw, compactionSource) {
     const previous = previousState(agent.session)
     if (!text || (!requested && !shouldNotify(previous, text, current.state))) {
       // 即便状态没变，只要循环提醒挂上了就得把消息带回去。
-      return messages.length === decision.messages.length ? decision : { ...decision, messages }
+      return messages.length === decision.messages.length && messages.every((message, index) => message === decision.messages[index])
+        ? decision : { ...decision, messages }
     }
     messages.push(notice(statePlugin, text, 'Context state', current.state,
       { contextCareTrace: { trigger: requested ? 'rest-result' : 'budget-state', budget: current.budget, outcome } }))

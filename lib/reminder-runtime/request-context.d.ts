@@ -12,6 +12,9 @@ export interface MessageView {
         kind?: string;
         reminder?: {
             key: string;
+            handoff?: {
+                queued?: true;
+            };
         };
     };
 }
@@ -20,6 +23,11 @@ export interface HistoryEvent {
     seq: number;
     time: number;
     data: unknown;
+}
+/** A lazy log view: callers need not copy the whole session to inspect its recent tail. */
+export interface HistoryView {
+    readonly length: number;
+    at(index: number): HistoryEvent | undefined;
 }
 export interface EligibilityEvent {
     type?: Rule['on'];
@@ -47,9 +55,12 @@ export declare function localWindow(spec: {
     start: number;
     end: number;
 } | undefined;
-/** Read the earliest durable arrival for each human message, not its later surface commit.
- * Inherited fork events and producer-owned synthetic inputs do not establish local presence. */
-export declare function humanActivity(events: HistoryEvent[]): {
+/**
+ * Presence is recent input, not a session-global inventory of human message IDs.
+ * Walk backwards only inside the interested rules' time window. A user/message
+ * is a surface commit and can happen much later than input; it never refreshes presence.
+ */
+export declare function humanActivity(events: HistoryView, now: number, withinMs: number): {
     at: number;
     evidence: string;
 } | null;

@@ -114,6 +114,29 @@ test('声明过的自定义事件能按名匹配，重复发布被幂等键挡�
     eventId: 'e-2' }), /未被声明/)
 })
 
+test('native custom declarations validate atomically and keep independent owners', t => {
+  const runtime = createReminderRuntime({ recoverEvents: async () => {} })
+  t.after(() => runtime.close())
+  assert.throws(() => runtime.registerCustomEvents([{ name: 'care/unlogged' }]), /需要 nativeEvent/)
+  assert.throws(() => runtime.registerCustomEvents([{ name: 'care/bad-shape', nativeEvent: 'tool/result', shape: 'any' }]), /载荷结构必须与原生事件/)
+  assert.throws(() => runtime.registerCustomEvents([
+    { name: 'care/atomic', nativeEvent: 'tool/result' }, { name: 'user/message', nativeEvent: 'user/message' },
+  ]), /不能占用内置事件名/)
+  assert.throws(() => runtime.registerSource({ sourceId: 'atomic', plugin: 'test', revision: 1,
+    rules: [rule('care/atomic')] }), /未声明的事件类型/)
+  const descriptor = { name: 'care/owned', nativeEvent: 'tool/result' as const }
+  const first = runtime.registerCustomEvents([descriptor]), second = runtime.registerCustomEvents([descriptor])
+  runtime.registerSource({ sourceId: 'owned', plugin: 'test', revision: 1, rules: [rule(descriptor.name)] })
+  assert.equal(runtime.handlesSessionEvent('tool/result'), true)
+  assert.throws(() => runtime.validateRule(rule(descriptor.name, {
+    kind: 'compare', field: 'event.arguments.nonexistent_payload', op: 'exists',
+  })), /不存在于事件/)
+  first()
+  assert.equal(runtime.handlesSessionEvent('tool/result'), true, 'the second producer still owns the same declaration')
+  second()
+  assert.equal(runtime.handlesSessionEvent('tool/result'), false)
+})
+
 test('未声明的事件名在加载时被拒，不能悄悄永不命中', t => {
   const runtime = fixture(t)
   assert.throws(() => runtime.registerSource({ sourceId: 'ghost', plugin: 'test', revision: 1,

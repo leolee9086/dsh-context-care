@@ -55,7 +55,7 @@ export function installNoticeRules(ctx, { plugin, onHit = () => {}, rulesFor }) 
       // 每次命中都留一条记录。规则命中和提醒注入都是对上下文的介入,
       // 不记下来就没人知道模型为什么突然收到那句话。
       onRecord(record) {
-        // The same stable identity is persisted and attached to the resulting prompt; never join by time.
+        // The resulting message carries this evaluation in its Session log; never join by time or mirror it into a side ledger.
         const captured = { ...record, evaluationId: randomUUID(), ...runEvidence,
           rule: (rulesFor?.(agent.session?.id, runEvidence) ?? ctx.get(RULES_SERVICE))?.find(rule => rule.id === record.ruleId) }
         onHit(captured, { sessionId: agent.session?.id })

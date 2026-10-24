@@ -2,8 +2,9 @@ import { z } from 'zod';
 import { ReminderRule, Source, compileRule } from './schema.js';
 import { CapacitySettings, CapacityWire } from './capacity.js';
 import type { ClaimBookValue } from './claims.js';
-import type { HistoryEvent, MessageView } from './request-context.js';
-import type { RecipientFacts } from './scope.js';
+import type { HistoryView, MessageView } from './request-context.js';
+import type { RecipientFacts, RecipientIdentity } from './scope.js';
+import { type CountLimitValues } from './conditions.js';
 import type { DenialVerdict, PreExecution, UnfinishedCode } from './denial.js';
 export declare const Detector: z.ZodObject<{
     ref: z.ZodString;
@@ -33,6 +34,15 @@ export declare const Event: z.ZodObject<{
         at: z.ZodNumber;
         timeZone: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>>;
+    native: z.ZodOptional<z.ZodObject<{
+        type: z.ZodEnum<{
+            "tool-result": "tool-result";
+            "tool-call": "tool-call";
+            "session-event": "session-event";
+            "assistant-output": "assistant-output";
+        }>;
+        seq: z.ZodNumber;
+    }, z.core.$strict>>;
     humanActivity: z.ZodOptional<z.ZodNullable<z.ZodObject<{
         at: z.ZodNumber;
         evidence: z.ZodString;
@@ -73,8 +83,8 @@ export declare const Event: z.ZodObject<{
     }, z.core.$strict>>>;
     origin: z.ZodDefault<z.ZodEnum<{
         tool: "tool";
-        human: "human";
         reminder: "reminder";
+        human: "human";
         recovery: "recovery";
         background: "background";
     }>>;
@@ -144,6 +154,15 @@ declare const Candidate: z.ZodObject<{
     title: z.ZodString;
     eventId: z.ZodString;
     rootCallId: z.ZodString;
+    native: z.ZodOptional<z.ZodObject<{
+        type: z.ZodEnum<{
+            "tool-result": "tool-result";
+            "tool-call": "tool-call";
+            "session-event": "session-event";
+            "assistant-output": "assistant-output";
+        }>;
+        seq: z.ZodNumber;
+    }, z.core.$strict>>;
     output: z.ZodOptional<z.ZodObject<{
         attemptId: z.ZodString;
         turn: z.ZodNumber;
@@ -163,6 +182,7 @@ declare const Candidate: z.ZodObject<{
         discarded: "discarded";
     }>;
     messageId: z.ZodOptional<z.ZodString>;
+    queued: z.ZodOptional<z.ZodLiteral<true>>;
     rendered: z.ZodOptional<z.ZodBoolean>;
     sticky: z.ZodOptional<z.ZodObject<{
         activationId: z.ZodString;
@@ -786,6 +806,15 @@ export declare const SessionState: z.ZodObject<{
         title: z.ZodString;
         eventId: z.ZodString;
         rootCallId: z.ZodString;
+        native: z.ZodOptional<z.ZodObject<{
+            type: z.ZodEnum<{
+                "tool-result": "tool-result";
+                "tool-call": "tool-call";
+                "session-event": "session-event";
+                "assistant-output": "assistant-output";
+            }>;
+            seq: z.ZodNumber;
+        }, z.core.$strict>>;
         output: z.ZodOptional<z.ZodObject<{
             attemptId: z.ZodString;
             turn: z.ZodNumber;
@@ -805,6 +834,7 @@ export declare const SessionState: z.ZodObject<{
             discarded: "discarded";
         }>;
         messageId: z.ZodOptional<z.ZodString>;
+        queued: z.ZodOptional<z.ZodLiteral<true>>;
         rendered: z.ZodOptional<z.ZodBoolean>;
         sticky: z.ZodOptional<z.ZodObject<{
             activationId: z.ZodString;
@@ -1444,23 +1474,25 @@ export interface WorkItem {
     policy: CandidateValue['policy'];
     judge?: DetectorValue;
     window?: CandidateValue['window'];
+    /** Re-evaluate a choice as an exclusivity barrier without delivering this handed rule again. */
+    handed?: boolean;
+    /** An alias withdrawn or rebound during Worker evaluation cannot publish its old match. */
+    nativeEvent?: string;
 }
 export interface Run {
     event: EventValue;
     items: WorkItem[];
     analyzers: DetectorValue[];
+    /** Authoritative current recipient read once for this ordered historical scan. */
+    recipient?: RecipientIdentity;
     controller: AbortController;
-    deadline: number;
+    /** Remaining time measured inside workers; queue and storage time never debit it. */
+    remainingMs: number;
     resolve: () => void;
     done: Promise<void>;
     task?: Promise<unknown>;
-    timer?: ReturnType<typeof setTimeout>;
-    /**
-     * 开始计算本轮预算。
-     * 准入阶段做的是身份查询与状态写入，属于 I/O；把它们算进评估预算，
-     * 会让磁盘抖动直接决定工具能否执行。
-     */
-    startBudget?: () => void;
+    /** A completed match must not report successful acceptance when its native inbox publication failed. */
+    handoffFailure?: Error;
     /** The call this round decides, for pre-execution rounds only. */
     preExecution?: PreExecution;
     /** Denial chosen by this round; absent means the call stays allowed. */
@@ -1473,17 +1505,21 @@ export interface Run {
      * 不能因为“整体耗时在预算内”就当作评估过了。有值即代表这一轮不完整。
      */
     incomplete?: UnfinishedCode;
-} /** 交给 worker 的一条待匹配规则。`key` 只是把结果对回原位的标签，不参与匹配。 */
+}
+/** A compiled rule plus its independent execution allowance and ordered group policy. */
 export interface BatchRuleInput {
     key: string;
     condition: CompiledRule['condition'];
     judge?: DetectorValue;
     params?: z.infer<ReturnType<typeof z.json>>;
+    timeoutMs?: number;
+    exclusiveGroup?: string;
+    error?: {
+        name: string;
+        message: string;
+    };
 }
-/**
- * 条件树在注册时编译好之后，执行期就只剩"拿树去匹配"这一件事，
- * 所以这几个工作形状里都不再带 countLimits —— 上限已经烘进树里了。
- */
+/** Compiled conditions retain count limits at the worker validation boundary. */
 export type Work = {
     analysis: {
         analyzer: DetectorValue;
@@ -1495,6 +1531,7 @@ export type Work = {
         condition: CompiledRule['condition'];
         event: EventValue;
         maxBytes: number;
+        countLimits: CountLimitValues;
         judge?: DetectorValue;
         params?: z.infer<ReturnType<typeof z.json>>;
     };
@@ -1507,13 +1544,38 @@ export type Work = {
     reminderBatch: {
         event: EventValue;
         maxBytes: number;
+        countLimits: CountLimitValues;
         budgetMs?: number;
+        blockedGroups?: string[];
         rules: BatchRuleInput[];
     };
 };
+export interface NativeRecoverySelection {
+    tools: boolean;
+    beforeTools: boolean;
+    outputs: boolean;
+    sessionEvents: readonly string[];
+    /** Alias policy changes must invalidate a scan even when the native names stay the same. */
+    sessionAliases?: readonly {
+        name: string;
+        nativeEvent: string;
+    }[];
+}
+export interface HandoffRule {
+    sourceId: string;
+    ruleId: string;
+    exclusiveGroup?: string;
+    output?: Pick<NonNullable<EventValue['output']>, 'attemptId' | 'turn' | 'step'>;
+}
+export interface OutputHandoffRule extends HandoffRule {
+    output: NonNullable<HandoffRule['output']>;
+}
+export type HandoffLookup = (triggerId: string, rule?: HandoffRule) => boolean;
 export interface RuntimeOptions {
     config?: unknown;
     entries?: Iterable<readonly [string, unknown]>;
+    /** Keep candidate/evaluation state process-local; Session inbox and event logs own recovery. */
+    sessionAuthoritative?: boolean;
     /** Strict, single-pass prompt templates reused from context-care's engine. */
     templates?: TemplateRenderer;
     save?: (id: string, state: StateValue) => Promise<unknown> | void;
@@ -1525,6 +1587,9 @@ export interface RuntimeOptions {
         onDispatch: () => void;
         workTimeoutMs: number;
         onItem?: (answer: unknown) => void;
+        onTiming?: (timing: {
+            processingMs: number;
+        }) => void;
     }) => Promise<unknown>;
     capacity?: unknown;
     saveCapacity?: (value: z.infer<typeof CapacitySettings>) => Promise<unknown> | void;
@@ -1532,7 +1597,23 @@ export interface RuntimeOptions {
     resolvePreset?: (sessionId: string) => string | undefined;
     /** Authoritative current session facts; supplied event metadata is ignored when present. */
     resolveIdentity?: (sessionId: string, signal?: AbortSignal) => RecipientFacts | Promise<RecipientFacts>;
+    /** Reconstruct an anchored trigger from native facts before admission or evaluation. */
+    resolveEvent?: (event: EventValue, signal?: AbortSignal) => Promise<EventValue>;
+    /** Discover canonical native facts once per collection; admission still checks parsing, bytes, scope and Worker capacity. */
+    recoverEvents?: (sessionId: string, accept: (event: EventValue) => Promise<void>, signal: AbortSignal, selection: NativeRecoverySelection) => Promise<void>;
+    /** Native triggers preceding an explicit policy reset cannot activate that rule again. */
+    sinceSeq?: (sessionId: string, sourceId: string, ruleId: string) => number;
     updateClaims?: (change: (book: ClaimBookValue) => ClaimBookValue) => Promise<ClaimBookValue>;
+    /** Committed windows and sticky clocks reconstructed from the owning Session. */
+    readDeliveries?: (sessionId: string, humanId: string) => Promise<import('./session-deliveries.js').DeliveryState>;
+    /** Whether native inbox/message evidence accepted this rule's trigger or exclusive choice. */
+    wasHanded?: (sessionId: string, triggerId: string, rule?: HandoffRule) => Promise<boolean>;
+    /** Read once for an ordered native scan; live commits may advance this same projection. */
+    readHandoffs?: (sessionId: string) => Promise<HandoffLookup>;
+    /** Frozen queued matches from the completed native discovery scan; never performs another history read. */
+    readQueued?: (sessionId: string) => readonly MessageView[];
+    /** Store an otherwise unlogged match as ordinary pending context without waking the Agent. */
+    handoffPending?: (sessionId: string, candidateIds: readonly string[]) => Promise<void>;
     wallNow?: () => number;
     now?: () => number;
     eligible?: (sessionId: string, sourceId: string, ruleId: string) => boolean;
@@ -1560,12 +1641,16 @@ export interface ToolPreparation {
     arguments: unknown;
     callId: string;
     rootCallId: string;
+    native?: {
+        type: 'tool-call';
+        seq: number;
+    };
     signal?: AbortSignal;
 }
 export interface RequestInput {
     sessionId: string;
     agentPreset?: string;
-    events: HistoryEvent[];
+    events: HistoryView;
     visible?: MessageView[];
     accepted?: MessageView[];
     signal?: AbortSignal;
@@ -1579,6 +1664,8 @@ export interface CollectInput {
     candidateIds?: string[];
     signal?: AbortSignal;
 }
+/** Distinct trigger phases share real call ids; deduplication must keep those facts separate. */
+export declare function triggerKey(type: string | undefined, callId: string): string;
 /** JSON transport copying is intentional: optional undefined fields do not enter durable records. */
 export declare function jsonCopy(value: unknown): unknown;
 export declare function errorMessage(error: unknown): string;

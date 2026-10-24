@@ -7,7 +7,7 @@ export type SingleExecutor = (input: Work, signal?: AbortSignal, timing?: unknow
 type ReminderWork = Extract<Work, { reminder: unknown }>['reminder']
 export interface BatchRule { key: string; condition: ReminderWork['condition']
   judge?: ReminderWork['judge']; params?: ReminderWork['params'] }
-interface BatchWork { event: ReminderWork['event']; maxBytes: number; rules: BatchRule[] }
+interface BatchWork { event: ReminderWork['event']; maxBytes: number; countLimits: ReminderWork['countLimits']; rules: BatchRule[] }
 
 /**
  * 测试替身：把「按单条规则判定」的函数包装成执行端口。
@@ -28,7 +28,7 @@ export function asBatch(execute: SingleExecutor) {
       const began = performance.now()
       try {
         const match = await execute({ reminder: { condition: rule.condition, event: batch.event,
-          maxBytes: batch.maxBytes,
+          maxBytes: batch.maxBytes, countLimits: batch.countLimits,
           ...(rule.judge === undefined ? {} : { judge: rule.judge, params: rule.params }) } }, signal, timing)
         items.push({ key: rule.key, ms: performance.now() - began, match })
       } catch (error) {

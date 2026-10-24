@@ -8,7 +8,7 @@ import type { contextBudget } from './context-budget.js'
 import type { openWorkbenchHost } from './workbench-host.js'
 import type { selectScopedPrompts } from './scoped-prompts.js'
 import type { openOutputFeedback } from './output-feedback.js'
-import type { openCompletionNotices } from './completion-notices.js'
+import type { createSessionCompletions } from './session-completions.js'
 
 // These are the plugin's operation state, derived from the actual owners. Host
 // identities, requests, model metadata and streams retain their public types.
@@ -17,7 +17,7 @@ export type Workbench = Awaited<ReturnType<typeof openWorkbenchHost>>
 export type WorkbenchPlan = Awaited<ReturnType<Workbench['assemble']>>
 export type PromptSegments = (ReturnType<typeof selectScopedPrompts>[number]
   | ReturnType<Awaited<ReturnType<typeof openOutputFeedback>>['collect']>[number]
-  | ReturnType<Awaited<ReturnType<typeof openCompletionNotices>>['collect']>[number])[]
+  | ReturnType<ReturnType<typeof createSessionCompletions>['collect']>[number])[]
 export type RequestOwner = NonNullable<ReturnType<typeof installContextCare>>['requestOwner'] & {
   dispatched?: (call: RequestCall) => void
 }

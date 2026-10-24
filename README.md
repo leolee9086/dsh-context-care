@@ -6,11 +6,11 @@
 
 参考 S-forge MAGI 的指标曲线和 Codex 的上下文生命周期设计，以独立 Cordis 插件接入，不修改 Harness、S-forge 或 Codex 源码。本文档以中文为主。
 
-> 版本：`v0.12.0`，面向官方 DSH `0.2.0-rc.2`。配合 DSH 思源对接插件 `dsh-plugin-siyuan v0.7.0`，支持独立规则来源、当前预设名称与模型条件，以及跨会话共享次数。通过固定 GitHub 标签安装，标签携带客户端及提醒运行时构建产物。
+> 版本：`v0.13.5`，面向官方 DSH `0.2.0-rc.2`。配合 DSH 思源对接插件 `dsh-plugin-siyuan v0.7.0`，支持独立规则来源、当前预设名称与模型条件，以及跨会话共享次数。通过固定 GitHub 标签安装，标签携带客户端及提醒运行时构建产物。
 
 ## 指标与行为
 
-疲劳度采用 `min(100, 100 × (上下文估算量 / 策略预算)^1.5)`；唤醒值采用 `min(100, 100 × sqrt(保留历史估算量 / (模型容量 / 3)))`。默认按 30、60、85 分段；界面显示 0–100% 数值（最多一位小数）和等级，模型正文仍只报告等级，不显示剩余 token 倒计时。疲劳度四段依次为绿、蓝、橙、红；唤醒值依次为橙、蓝、青绿、绿。未校准使用灰色。容量取最近记录请求的真实路由模型；尚无容量时显示“未校准”。疲劳度以完整请求压力为基础，唤醒值以保留消息量为基础，因此工具定义和系统提示不会被当成丰富的历史经验。状态与自动维护使用插件自己的输入计价：公开 `tokenMeter.estimateMessage` 提供固定文本估算，保留 surface、工具定义和本轮待进入的输入共用冻结的计价依据，输出计费量不参与下一次输入预算。插件请求日志从符合条件且 header 匹配的成功 prompt 样本校准文本、schema 和 framing；没有样本时文本倍率为 1。图片视觉价格不重复乘倍率，有效大倍率不截断。旧 `providerUsageRatio` 配置只保留迁移提示。此版本使用官方 0.2.0-rc.2 已有接口，不要求新增 `measureInput` / `priceMessages` 方法或修改宿主。
+疲劳度采用 `min(100, 100 × (上下文估算量 / 策略预算)^1.5)`；唤醒值采用 `min(100, 100 × sqrt(保留历史估算量 / (模型容量 / 3)))`。默认按 30、60、85 分段；界面显示 0–100% 数值（最多一位小数）和等级，模型正文仍只报告等级，不显示剩余 token 倒计时。疲劳度四段依次为绿、蓝、橙、红；唤醒值依次为橙、蓝、青绿、绿。未校准使用灰色。容量取最近记录请求的真实路由模型；尚无容量时显示“未校准”。疲劳度以完整请求压力为基础，唤醒值以保留消息量为基础，因此工具定义和系统提示不会被当成丰富的历史经验。状态与自动维护使用插件自己的输入计价：公开 `tokenMeter.estimateMessage` 提供固定文本估算，保留 surface、工具定义和本轮待进入的输入共用冻结的计价依据，输出计费量不参与下一次输入预算。插件从 Session 中符合条件且 header 匹配的成功请求校准文本、schema 和 framing；热路径复用本次输入的标量计量，空缓存时从历史表层及已记录的请求专属提示和改写结果还原输入；没有样本时文本倍率为 1。图片视觉价格不重复乘倍率，有效大倍率不截断。旧 `providerUsageRatio` 配置只保留迁移提示。此版本使用官方 0.2.0-rc.2 已有接口，不要求新增 `measureInput` / `priceMessages` 方法或修改宿主。
 
 `context_status` 查询状态。`context_rest` 提示建议续接笔记为 1000–8000 个 UTF-16 字符，内部默认保留 10000 字符的宽限；笔记排入持久化收件箱；当前工具批次完成后，在下一次请求准备边界执行一次压缩。笔记、近期历史、工具调用与结果配对均保留。它读取预设 compaction provider 的公开摘要配置，在插件内执行摘要事务；自定义提供方未声明 LLM 摘要配置时仍调用其执行接口。摘要保留原记录并让任务继续。容量未知时，主动请求仍选择历史前缀，按显式 `retainTokens` 保留尾部；未设置时保留最近完整单元，再交给摘要路由或自定义 provider 处理实际输入。自动维护在可算出压力阈值时启动。摘要指令分别记录原始明确要求、执行者的实现选择、推测和完成状态，并依据最新纠正更新来源归属。
 
@@ -34,13 +34,13 @@
 
 输入框工具栏的第二个图标打开当前会话的“提示详情与溯源”右栏页签。会话内的本插件通知卡片也提供详情入口，按持久事件序号定位到历史所在页并展开；翻页后再次点击同一条通知会重新定位。右栏读取完整持久会话与 Host 记录，不依赖聊天窗口当前加载的消息范围，每页 20 条，支持刷新和切换会话。
 
-目录覆盖状态、规则提醒、watch/resume、通知通道、循环与主动维护通知、请求专属的模型切换/静态/输出反馈/完成观察段落、可精确识别的系统照料说明、辅助摘要指令，以及有本插件所有权证据的摘要/深度交接检查点。详情保留实际包装正文，展示发布者、时间、事件或请求编号、当时的触发依据与规则快照、持久规则评估、关联请求的阶段与派发标记，以及来源事件的节选。来源正文超过 2000 字符会明确标为节选，提示正文不截断。规则评估只按稳定 evaluationId 关联；辅助摘要请求只引用实际选区与系统头，完整 surface 采样另存，避免把未发送历史列作摘要来源。
+目录覆盖状态、规则提醒、watch/resume、通知通道、循环与主动维护通知、请求专属的模型切换/静态/输出反馈/完成观察段落、可精确识别的系统照料说明、辅助摘要指令，以及有本插件所有权证据的摘要/深度交接检查点。详情保留实际包装正文，展示发布者、时间、事件或请求编号、当时的触发依据与规则快照、持久规则评估、关联请求的阶段与派发标记，以及来源事件的节选。来源正文超过 2000 字符会明确标为节选，提示正文不截断。规则评估只按稳定 evaluationId 关联；辅助摘要请求只引用实际选区与系统头，未发送的其它表层消息不列作摘要来源。
 
 提示目录用可读摘要列表进入单条详情。已知规则、触发与判定值显示本地化说明，未知自定义字段有界阅读并保留原始记录。完整包装正文可展开阅读与精确复制。来源按 20 条分页，支持序号或节选搜索；来源、检查点及持久提示/请求记录提供“定位消息”。导航使用正式会话分页和 Chat 投影的精确身份，原生展开后滚动到目标，只有目标进入可见视口才报告成功。历史工具结果补载调用与根调用；切换会话、新点击或卸载取消旧定位。被检查点替换或仅存在于日志的来源可能没有聊天节点，此时明确报告，不跳到附近消息。系统说明的日志 revision 不是消息序号，不提供伪定位。
 
-提示存于既有 user/message、request/header 元数据及插件 Host 存储；不会新增会导致官方读侧拒载的会话事件类型。规则评估和请求改写也使用插件自己的持久域，缺少可选索引插件时仍可重载。写入失败保留到 flush 并在查询中报告。旧提示没有结构化依据时明确注明；旧请求记录仅保存段落时不称其为原始完整包装正文。系统说明只提取可精确识别的本插件贡献，不展开相邻的其它系统指令；无法识别的历史版本暂不能可靠拆分。检查点只有插件审计关联或明确 producer 标记才能进入本插件提示目录。
+已投递提示与规则评估从既有 user/message、request/header 元数据读取，已结束请求从 assistant/message、assistant/attempt 和 compaction/summary 增量推导。请求服务不再打开或读写 context_care_requests，也不删除现有旧文件；在途阶段与当前维护操作的诊断只留在内存，不能声称是独立持久审计。清空请求缓存后，校准可用原生 Session 表层投影及日志里已有的请求提示、Workbench 改写结果恢复，不重新运行规则或模型。历史维护仍以已提交摘要和替换事实为准，不补造日志未记录的旧价格与失败阶段；维护细节、改写索引和 reminder/claims 的完整迁移尚未验收。旧提示没有结构化依据时明确注明；旧请求记录仅保存段落时不称其为原始完整包装正文。系统说明只提取可精确识别的本插件贡献，不展开相邻的其它系统指令；无法识别的历史版本暂不能可靠拆分。检查点只有插件审计关联或明确 producer 标记才能进入本插件提示目录。
 
-Host 查询 `/context-care/prompts?sessionId=...&limit=20&offset=0` 继承连接鉴权并返回 `no-store`；可选 `seq` 定位对应页，并返回 `offset` 与 `selectedFound`。缺少可读取会话返回 404，来源不存在、存储失败与 HTTP 错误会明确显示。请求的 `dispatched` 表示交给 prepared stream，不证明 adapter 内 HTTP 已发包；无请求审计时保留未知。
+Host 查询 `/context-care/prompts?sessionId=...&limit=20&offset=0` 继承连接鉴权并返回 `no-store`；可选 `seq` 定位对应页，并返回 `offset` 与 `selectedFound`。缺少可读取会话返回 404，来源不存在、存储失败与 HTTP 错误会明确显示。在途请求的 `dispatched` 表示交给 prepared stream，不证明 adapter 内 HTTP 已发包；历史请求使用已记录的输出或结算证据，只有错误而无输出的尝试不据此证明已交给 provider。
 
 ## 请求预算与溢出恢复
 
@@ -50,27 +50,29 @@ Host 行 `dsh-context-care/requests` 通过官方 `llm/stream` waterfall 拦截�
 
 完整输入超过硬预算时，本地返回 `REQUEST_BUDGET_EXCEEDED`，不会派发到 adapter。provider 的 `CONTEXT_WINDOW_EXCEEDED` 即使低于估算软阈值也进入强制恢复。恢复先裁剪再尝试保留最近完整单元的前缀摘要；只有失败 revision 之后、覆盖失败请求已用来源且同一冻结 basis 下价格下降的持久 replacement 才允许有限重试。本地预算拒绝还要求重构输入已在 H 内；恢复失败且没有合格进展时保留原始请求失败，摘要错误不会替代它。idle 或正常输出清除重试计数，贡献卸载清除对应快照及检查。
 
-摘要构造与执行共用请求 builder，包含系统头、工具定义、完整选区与末尾指令。摘要路由按自己的容量和 compaction 政策选择能容纳的完整前缀；provider 或最终检查拒绝过大输入后，在配置次数内缩小完整选区重试。提交前核对输入仍相同，并以同一冻结 basis 比较完整主请求，包含检查点包裹文字；文本校准倍率不会被固定 shadow 价格代替。同一会话的摘要执行串行，失败闭合事务并保留历史。`summary` 可覆盖 `provider`、`model`、`maxTokens` 与 `maxRetries`；未覆盖的值取提供方对应会话路由的公开配置。Host 请求观察行还独占 `context_care_requests` 存储域。ready 先持久记录实际路由、完整输入指纹、计价依据与预算，再决定派发；dispatch 和真实输出结算按会话串行更新，保留是否确实派发、输出事件与 usage。摘要的 started、prepared、committed 或 failed 动作关联同一 compactionId。`contextCareRequests.list(sessionId?)` 按时间和 key 稳定排序，`flush(sessionId?)` 等待存储确认；卸载先移除监听再等待写入并关闭 handle。ready 另存完整实际输入的未校准文本价和视觉价；校准只选同输入配置的成功真实对话请求，以 usage 的输入与 cache tokens 减视觉价后除文本价，合法大倍率保留。一次性提示与工具已在分母中，图片视觉价仍独立。没有匹配的合格请求样本时使用倍率 1；旧会话的请求与输出合计压力不会代替输入校准；裁剪和深度替换也记录 started 与 completed/failed、来源 seq 和同依据前后输入价；失败后已提交的缩减仍在记录中标为部分进展。本地错误的 origin/budgetKind 目前属于运行时检查详情，终止 stream 保存稳定错误码与原始消息。普通维护的状态消息计价属于预测，最终 ready 检查完整实际请求。高负载与非常高负载文案保留落盘和维护步骤，只描述请求负载、正文替换及可核对的原记录，不从统计推导失忆、能力下降或身份改变。
+摘要构造与执行共用请求 builder，包含系统头、工具定义、完整选区与末尾指令。摘要路由按自己的容量和 compaction 政策选择能容纳的完整前缀；provider 或最终检查拒绝过大输入后，在配置次数内缩小完整选区重试。提交前核对输入仍相同，并以同一冻结 basis 比较完整主请求，包含检查点包裹文字；文本校准倍率不会被固定 shadow 价格代替。同一会话的摘要执行串行，失败闭合事务并保留历史。`summary` 可覆盖 `provider`、`model`、`maxTokens` 与 `maxRetries`；未覆盖的值取提供方对应会话路由的公开配置。Host 请求观察以原生 `request/header`、`assistant/message`、`assistant/attempt` 和摘要事件重建已结算事实，不再打开或读取 `context_care_requests`。`contextCareRequests.list(sessionId?)` 按时间和 key 稳定排序，合并 Session 结算与有界的当前进程诊断；未结算诊断标记为 transient，不能代替请求派发事实。`flush(sessionId?)` 等待相应 Session 的实际持久化。摘要维护诊断通过同一 compactionId 关联；已结算事实优先于内存诊断。校准热路径复用完整实际输入的未校准文本价和视觉价，冷缓存由原生输入重放计算；校准只选同输入配置的成功真实对话请求，以 usage 的输入与 cache tokens 减视觉价后除文本价，合法大倍率保留。一次性提示与工具已在分母中，图片视觉价仍独立。没有匹配的合格请求样本时使用倍率 1；旧会话的请求与输出合计压力不会代替输入校准；裁剪和深度替换也记录 started 与 completed/failed、来源 seq 和同依据前后输入价；失败后已提交的缩减仍在记录中标为部分进展。本地错误的 origin/budgetKind 目前属于运行时检查详情，终止 stream 保存稳定错误码与原始消息。普通维护的状态消息计价属于预测，最终 ready 检查完整实际请求。高负载与非常高负载文案保留落盘和维护步骤，只描述请求负载、正文替换及可核对的原记录，不从统计推导失忆、能力下降或身份改变。
 
 ## 规则提醒与晚间休息
 
 规则入口只接受 `reminder/v4`。`on` 区分工具成功、指定错误码的工具失败、自然请求、输出、工具执行前和会话事件；`effect` 区分提醒与工具阻断，两者通过 `effect.deliver` 声明投递方式。自然请求 `request.before` 的 `when` 支持 `timeWindow: { start: "23:00", end: "06:00", timeZone: local }`、`humanActivity: { withinSeconds: 300 }` 和可选条件树 `condition`。时间采用 Host 本机时区，开始包含、结束不包含；两个时间必须不同。近期真人输入根据持久入队事件的 `source.kind: user` 与首次入队时间确定；插件消息、自动续跑和继承的 fork 历史不刷新在场时间。人工审批暂未作为在场证据。
 
-`effect.deliver.model.once: window` 要求声明时间窗口，在当前会话、来源和规则身份内每个窗口最多投递一次。跨午夜按开始日期归属；正文编辑、压缩、候选清理和重启保留去重，次晚可重新提醒，即使上晚正文仍可见。窗口占额与候选一起持久确认；已知提交前失败可回滚，无法确定是否提交的交付保留占额。`surface` 沿用可见上下文去重。
+`effect.deliver.model.once: window` 要求声明时间窗口，在当前会话、来源和规则身份内每个窗口最多投递一次。跨午夜按开始日期归属；正文编辑、压缩、候选清理和重启保留去重，次晚可重新提醒，即使上晚正文仍可见。窗口依据原生提醒提交和待投递 inbox 消息重建；仅在内存中准备的预约可回滚，已提交的窗口事实不受候选缓存清理影响。`surface` 沿用可见上下文去重。
 
-升级时，Host 会在发布提醒服务前退役持久化记录中的 v1–v3 候选，保存一次 `retired-pre-v4` 诊断，记录候选身份、原状态与消息 ID。旧候选不会转换成 v4 或再次投递；已处理事件、窗口回执、既有诊断与独立共享配额账本保留。现有 v4 候选和 sticky 状态照常恢复。保存失败、损坏的 v4 状态或未知格式会明确拒绝启动；不会清空状态来掩盖错误。
+生产 Host 不再打开、读取或续写 `context_care_reminders`，旧候选文件保持原样，包含旧格式或损坏数据也不参与启动。规则定义与原生 Session 决定恢复；候选、seen、窗口和 sticky 数组只是可丢弃的内存投影。通过独立 `createReminderRuntime` 显式接入旧 writer 的调用方仍保留原存储兼容接口，该接口不参与生产 Host 的投递。
 
 ### 工具阻断的边界
 
 `effect.kind: deny-tool` 只在 `on: tool.before-execute` 上成立，规则用 `when.tool` 指定工具名，命中时该次调用在工具体执行前被拒，拒绝理由作为错误结果回到模型，工具本身不会运行。**没有命中的工具调用照常执行**：本会话规则里没有适用项时，评估结论就是放行，而不是“缺票据所以拒绝”。
 
-票据只用于把异步评估和同步守卫对齐，并且每次调用在开始时就开立一张、由它自己记录结论：准备过程无论从哪条路径结束，都会留下“放行”或“拒绝”，守卫不会把“没有结论”当成任一种。策略变化（来源替换、规则更新、来源卸载）会让**已在途**的票据失效，那次调用会被拒并提示重新评估；之后的调用重新评估、照常放行。
+票据用于把异步评估和同步守卫对齐，按注册表生成的执行令牌关联，在守卫读取后结算。已完成结论没有额外的时间有效期；后续 hook 或审批等待不会把它变成“评估已过期”。规则超时只约束实际评估，缺票据、未完成评估和服务关闭仍明确拒绝。
 
-来源**新增**不算策略变化：它不会作废已存的待投递提醒，也不会取消正在准备的请求。只有**移除**会——被移除的动作或提供方确实可能让旧计划不再成立。只有在服务关闭、评估被取消或超时这类“确实没有结论”的情况下才会持续拒绝，理由会写明是哪一种，不会把四种情况混成一句话。
+存在 `deny-tool` 时，执行前规则的新增、替换或卸载会让**已在途**的票据失效，要求该次调用重新评估；之后的调用照常评估。执行前的纯提醒也可能通过优先级、互斥组影响拒绝结果，因此保留这种检查。其它事件阶段的提醒来源刷新不会作废工具票据；没有拒绝规则时，纯提醒刷新也不会阻断工具。
+
+待投递提醒和正在准备的请求使用各自的生命周期：来源**新增**不会作废它们，来源**移除**会撤销依赖该来源的计划。工具票据则按上面的执行前授权边界判断变化。
 
 当伙伴说“今晚不再提醒”，模型调用 `reminder_snooze`。空参数暂停当前会话所有正在生效的窗口提醒；同时传 `sourceId` 与 `ruleId` 可只暂停一条。暂缓持久到窗口结束，重启后仍有效。该工具也可在首次提醒前调用；窗口之外返回当前无可暂停提醒。领域服务提供 `snooze({ sessionId, sourceId?, ruleId? })`，返回被暂停的规则与结束时间。
 
-自然请求入口调用 `prepareRequest({ sessionId, events, visible, accepted, signal })`，读取会话事件后运行分析器与判定器，再按既有 `collect` / `filterMessages` / `rollback` 交付。分析器和判定器可以读取 `event.clock: { at, timeZone }` 与 `event.humanActivity: { at, evidence } | null`。时间和在场条件先由运行时判定，worker 事实不能覆盖它们；投递前再次检查时间和在场有效期。
+自然请求入口调用 `prepareRequest({ sessionId, events, visible, accepted, signal })`，每次根据当前边界重算；真人在场只倒序读取适用规则所需的最近时间窗口，不复制完整 Session 或建立会话终生的真人消息目录。之后运行分析器与判定器，再按 `collect` / `filterMessages` / `rollback` 交付。分析器和判定器可以读取 `event.clock: { at, timeZone }` 与 `event.humanActivity: { at, evidence } | null`。时间和在场条件先由运行时判定，worker 事实不能覆盖它们；投递前再次检查时间和在场有效期。
 
 晚间规则的示例正文应明确：人类伙伴可能因晚睡影响健康；结合当前任务判断紧急程度，没有紧急任务时温和建议早点睡，尊重伙伴选择。示例窗口 23:00–06:00、在场有效期 300 秒均由规则显式声明，可以调整。规则只在自然请求前提醒，不创建后台对话、不停止任务。完整思源 callout 见[思源规则教程](https://github.com/leolee9086/dsh-plugin-siyuan/blob/main/docs/规则编写教程.md#11-自然请求与晚间休息提醒)。
 
@@ -121,7 +123,11 @@ Host 从当前预设投影读取选择，再从注册表读取真实名称；模
 
 在 `effect.deliver.model` 中添加 `shared: { reset: 'lifetime', lifetime: 'campaign-1', limit: 2 }`，可让符合范围的多个会话合计消费两次提醒。`limit: 1` 表示合计一次；自然请求和输出规则也可用 `shared: { reset: 'window', limit: 1 }`，要求声明 `when.timeWindow`。`once` 控制会话内去重，`shared` 控制跨会话总次数。共享身份包含来源、规则和生命周期名或窗口；编辑正文/revision、压缩和重启保留已消费次数。更换生命周期名或进入下一窗口才获得新额度。
 
-共享账本使用同一 Host/runtime 的存储领域原子 `update`。交付先预留再保存会话，失败补偿未提交预留；已经消费的记录不被迟到回滚释放。它不提供跨独立 Host 进程的原子协调。账本默认最多 8 MiB，可用 `reminders.maxClaimBytes` 调整。
+共享额度以 Session 中已提交的提醒消息为消费依据，以原生 inbox 中已经获得名额的待投递消息为预约。`queued: true` 记录已接纳但尚未预留的冻结匹配，不占共享名额；请求边界获准后使用原消息 ID 提交。名额不足时，实际 claim 仍保留可恢复的未交付匹配，下一自然请求重试，不自动注入额外轮次。尚未交给 inbox 的预约只在当前 Host 的串行调度中存在。服务不再打开、读写 `context_care_reminder_claims`，也不删除旧文件。空缓存通过原生 `sessionQuery` 读取完整逻辑会话目录（包括磁盘上的冷会话），不为恢复额度激活旧 Agent、不重新执行规则。`user/message` 提交才消费额度，接纳本身不消费；明确取消 inbox 消息释放未消费预约，已提交的消费不被迟到回滚释放。缺少原生会话查询或 inbox 投影时明确报告无法恢复，不把未知历史当作零消费。它不提供跨独立 Host 进程的原子协调。额度更新默认最多 8 MiB，可用 `reminders.maxClaimBytes` 调整。额度和候选更新均不等待旧侧表 ACK；可编辑的容量和开关设置仍由各自配置存储持有。
+
+已提交的会话内窗口投递与 sticky 状态也从原生 Session 派生：首次投递记录冻结正文和激活规则，后续提交扣减寿命，真实请求和真人轮次推进冷却；同一请求接纳多条真人消息只算一个真人轮次。冷恢复不重跑规则、judge 或模板。已投递窗口及 sticky 计数不再从旧侧表恢复或续写，消息离开可见表层后窗口仍有效；继承的父会话日志不启动子会话的本地 sticky 激活。`once: none` 不被旧表层正文挡住，但未确认交付和同批消息仍去重。请求 Host 显式依赖 `sessionQuery`，不靠临时上下文访问维持提供者的生命周期。显式 snooze 的精确窗口由 `context-care/snooze/v1` 原生工具结果恢复，不从旧纯文本猜测。已经交给原生 inbox、尚未成为 user/message 的提醒携带 `context-care/reminder-handoff/v1` 有效性信息；冷恢复可仅凭实际接纳的消息重建预约候选，保留原消息 ID、冻结正文、触发/根调用、规则签名和控制代次，不重跑 judge 或模板。旧候选缓存与 inbox 证据冲突时以实际消息为准，重建本身不等待侧表写入；当前定义、scope、过期条件和控制代次仍在最终投递前核对。原生 inbox 接纳或消息提交中实际记录的触发 ID 也构成已处理证据：冷恢复重复提交同一触发不会再次运行 judge、不会先写一条 seen 侧记录；日志未变化时复用增量投影，消息离开表层后仍保持此幂等性。`once: none` 不取消相同触发 ID 的幂等约束。所有候选只在当前 Host 的内存中更新；未交接的原生触发可重新求值。已完成的真实前置匹配及无原生锚点的程序化命中通过 `agent.inject` 交给正常 inbox，冻结正文和判定证据随原生 splice 记录，空闲 Agent 不会因此唤醒；没有实时 Agent 时明确报告交接不可用。自然请求规则在当前边界重算，不从候选文件恢复。插件卸载保留 Agent 已接纳的 input；整个 Agent 关闭按 Harness 原生 disposal 取消 inbox，重放遵守该取消，不复活已取消的提醒。
+
+收集时没有 pending/reserved 候选或存活的本地 sticky，且没有当前会话范围内启用的 sticky 规则时，不查询历史、不写空提醒状态。输出中断的真人轮次复用 Session 增量投影：冷读并发合并，真人 inbox 到达推进轮次，旧日志仅用真人提交作为回退，自动续接不重置中断额度，父会话继承前缀不启动子会话轮次。最终 cancel/steer 前只检查同步缓存；缓存未追上 Session.seq 时保留候选，不以未知时钟中断输出。
 
 ### 输出模式与显式中止续接
 
@@ -144,11 +150,11 @@ effect:
       once: surface
 ```
 
-`pattern` 还支持 `{ kind: keywords, values: [已完成, 全部通过], mode: any }`（`all` 要求同块包含所有词）或 `{ kind: regex, regex: '已经?全部完成', flags: u }`。普通文字与供应商提供的可读 reasoning 可匹配，隐藏内容不可读取；不同 attempt、块索引和类型不会拼接。默认命中仅持久保存候选，下一次自然请求交付，空闲会话不会被唤醒。
+`pattern` 还支持 `{ kind: keywords, values: [已完成, 全部通过], mode: any }`（`all` 要求同块包含所有词）或 `{ kind: regex, regex: '已经?全部完成', flags: u }`。普通文字与供应商提供的可读 reasoning 可匹配，隐藏内容不可读取；不同 attempt、块索引和类型不会拼接。默认命中保留内存候选，冷启动可从已提交的原生输出重建，下一次自然请求交付，空闲会话不会被唤醒。
 
-显式设置 `effect.deliver.model.interrupt: abort-resume` 时，服务完成范围/额度/持久化检查后取消当前 attempt，并用同一个提醒消息续接。`reminders.maxInterruptsPerTurn` 默认 1；设为 0 或额度耗尽时保留候选到下一自然请求。命中处理完成前 attempt 已结束，也使用普通边界交付。
+显式设置 `effect.deliver.model.interrupt: abort-resume` 时，服务完成范围、额度预留及最终有效性检查后取消当前 attempt，并用同一个提醒消息续接。`reminders.maxInterruptsPerTurn` 默认 1；设为 0 或额度耗尽时保留候选到下一自然请求。命中处理完成前 attempt 已结束，也使用普通边界交付。
 
-输出检测使用每块最近 `maxStreamChars`（默认32768）字符的滑动窗口，每 `streamEveryChars`（256）字符或 `streamFlushMs`（50ms）派发；`maxStreamBlocks` 默认64。待处理队列受 `maxStreamPending`（32帧）和 `maxStreamPendingBytes`（4MiB）约束，块数或队列超限会记录诊断并停止该 attempt 检测，普通模型输出继续。模式所需跨度应小于保留窗口。完整范围、共享与超时 callout 见[思源规则教程](https://github.com/leolee9086/dsh-plugin-siyuan/blob/main/docs/规则编写教程.md#12-指定接收会话与共享次数)。
+输出检测使用每块最近 `maxStreamChars`（默认32768）字符的滑动窗口，每 `streamEveryChars`（256）字符或 `streamFlushMs`（50ms）派发；`maxStreamBlocks` 默认64。采样身份来自原生 step 或前次 assistant 结算位置，时间来自原生 chunk；定时器使用确定的截止时间，下一 chunk 先处理已到期的前缀。终止时间来自已提交的 `assistant/message` 或 `assistant/attempt`，没有结算的 abandoned 流不会产生完整采样。实时观察与原生流重放共用这一折叠逻辑。待处理队列受 `maxStreamPending`（32帧）和 `maxStreamPendingBytes`（4MiB）约束，块数或队列超限会记录诊断并停止该 attempt 检测，普通模型输出继续。模式所需跨度应小于保留窗口。完整范围、共享与超时 callout 见[思源规则教程](https://github.com/leolee9086/dsh-plugin-siyuan/blob/main/docs/规则编写教程.md#12-指定接收会话与共享次数)。
 
 `registerAnalyzer({ ref, revision, module, exportName? })` 注册本地 ESM 模块，默认导出 `analyze({ event, context })`，可以返回 Promise，结果为 JSON 对象。每个分析器每轮执行一次，读取相同基础输入；结果只在匹配阶段汇总到 `facts.<ref>`。例如返回 `{ language: 'ts' }` 的 `typescript` 分析器可以配合：
 
@@ -162,23 +168,49 @@ when:
     value: ts
 ```
 
+已观察到原生 `tool/call` 的模型工具，从对应 `tool/result` 提交后触发成功/失败规则；PTC 子调用从 `tool/ptc-dispatch` 读取实际子调用、根调用、参数和错误码。触发时间取原生结果时间，顶层工具的匹配上下文不包含刚提交的结果，保留原有评估边界；结果一旦提交，即使执行期的取消信号稍后触发也不会抹掉其提醒。工具自己的 presentation meta 不被改写。未经过原生调用日志的程序化执行仍通过实时 `tools/result` 处理。
+
+原生工具触发带有 `native: { type: 'tool-result', seq }`。接纳时以该位置重建调用标识、参数、结果和时间，提交者复制的字段不能覆盖日志。热路径复用有界缓存；缓存为空时用原生 Session 前缀重建触发当时的表层，后来的消息、表层替换和内容投影不会混入历史上下文。原生读取和身份解析不消耗 Worker 执行预算；完整重建后的输入仍受字节限制。持久 Session 的身份与已交接记录可在不激活 Agent 的情况下读取。冷会话在有适用规则的 collect 时扫描本地原生事实，按普通 admission 流程恢复未交接触发。
+
+内建 `session.event` 也带有 `native: { type: 'session-event', seq }`：名称、payload、调用标识、时间和 origin/causation 均由该位置确定，复制字段不能覆盖日志；只发现适用规则选择的事件名，并保留实时事件先工具结果、后原始 Session 事件的顺序。
+
+自定义事件名通过 `registerCustomEvents([{ name: 'care/tool-result', nativeEvent: 'tool/result' }])` 绑定一个发行目录中的原生事件。它是规则选择名的别名，完整 payload 和选择器结构沿用原生事件；条件仍可筛选其中的字段。生产 Host 要求这个绑定，任意未入日志的 payload 不再作为新的可恢复事实接纳。实时提交和冷扫描都会按原生事件顺序评估别名，身份为 `别名#原生seq`；恢复候选不写提醒侧表，真实交接继续逐规则防重。重复相同声明有各自的 owner，最后一个 disposer 撤销名字；绑定计入规则签名，撤销或改绑后旧正文不能沿用。
+
+通常无需手动发布；生产观察器会从 Session 提交触发。已有生产者可用 `publishCustomEvent({ sessionId, name, native: { type: 'session-event', seq } })` 指定已提交位置；日志中的事件类型必须符合绑定，越界、继承边界外或缺少锚点的输入明确失败。旧参数 `eventId`、`at`、`facts` 不能覆盖原生身份、时间与 payload。无原生恢复端口的独立 runtime 仍提供旧无绑定接口供兼容使用。
+
+执行前规则也可绑定实际 `tool/call` 或 `tool/ptc-dispatch-start`，锚点类型为 `tool-call`，由调用记录恢复参数、时间和根调用。PTC 模式对直接名称的拒绝发生在前置管线之前：完整原生路由错误会排除该 before 触发，但真实 `tool.failed` 和原始事件仍保留；普通未知名称的 `UNKNOWN_TOOL` 不会被误排除。当前取消恢复保守跳过 `ABORTED_BEFORE_DISPATCH`；该码可能产生于钩子前或钩子后，不能据此断言钩子未发生。已完成的真实钩子匹配在结束时交给原生 inbox，钩子后取消可以凭该交接恢复；没有交接的 `ABORTED_BEFORE_DISPATCH` 不被猜成已完成钩子。重放只恢复模型提醒，deny-tool 的拒绝结论仍必须属于当前真实工具执行令牌。
+
+输出流可从 `assistant/message`／`assistant/attempt` 的原生定时 chunks 恢复为 `assistant-output` 锚点采样；交接按输出 attempt 和规则抑制独立规则的重复 judge；同一次采样已有交接证据的互斥选择也不重复判定。不同前缀仍可有不同赢家：没有交接证据的互斥选择按原优先级重算，已交接规则只参与阻挡，不再生成候选。冷重放不会发起中断。旧版本的进程内输出 attemptId 由交接事件所在的原生游标、输出 turn／step 与规则身份关联到此前已开始的输出，后续重试仍有自己的身份。
+
+生产恢复仅读取规则定义与原生事实，旧候选文件中的正文、reserved、seen、诊断均不参与决策，也无需先清理旧文件。工具结果、原生 Session 事件及输出的未交接命中从其原生输入重算；已经交给 inbox 的冻结提醒从实际接纳的消息恢复，已提交的窗口、sticky 与共享消费从原生消息和工具结果恢复。生产路径没有候选 JSON writer 或对应的 ACK／补偿事务。
+
+恢复扫描保留原生时间与历史上下文，跳过 fork 继承结果和派发前取消；控制重置前的结果不重新激活规则。已有原生交接继续防重；实时工具观察完整的新会话不额外读取工具历史，原始 Session 事件和别名按具体选择建立扫描记录，迟注册不能继承无关选择的完成标记。同一事件选择的并发收集共享扫描；扫描期间规则选择变化时，等待当前扫描后按新选择补扫。扫描完成标记只属于当前已完整观察的 Session 实例，重新载入或仍处于休眠的原生日志会再次查询；恢复时未结束的调用继续与后来的实时结果配对。内部 seen 按 `[触发类型, callId]` 防重，执行前检查与其结果不会互相吞掉；原生交接逐规则记录该 phase key 及互斥选择，输出还按 attempt 合并同规则前缀；同一事件里其他未交接规则不会被吞掉。一次有序恢复扫描共用当前收件身份与交接投影，避免每条输出前缀重新读取冷日志；对外 trace 与 judge 的 callId 仍是真实调用标识。生产 `seen` 只作为当前进程的去重缓存；生产入口不读取或保存候选状态。原生交接决定跨进程防重，未交接事实可重新求值。
+
+摘要执行的提案指纹及实际失败码随真实 `compaction/start` / `compaction/end` 配对记录，因此非缩小提案能在空缓存及新 Host 中恢复；状态消息和普通日志增长不解除抑制，任务材料、价格或摘要策略变化会生成新指纹。
+
+模型输出模式反馈也以规则定义、正常完成的 `assistant/message` 和实际请求 header 为依据，重建证据窗口、冷却、pending 与投递次数。没有输出检测规则时不读历史；有规则时按游标直接读取新增原生事件，不复制整个日志数组。规则或控制修订变化会重建对应投影。只有准备而未交接的预约不消耗次数；已记录输入但未得到响应证明的交付保留为 unknown，次数上限在重启后仍生效。正常响应确认 dispatched，其他实际路由请求可使旧 pending superseded。旧 `context_care_output_feedback` episodes 数据保留在原处，生产入口不再打开或读取它们。
+
 `registerDetector({ ref, revision, module, exportName? })` 默认调用 `judge({ event, params })`，等待 JSON `{ ok: boolean, facts? }`。规则用 `judge: { ref, revision, params?, timeoutMs? }` 绑定特定版本。两种注册均返回可等待的卸载函数。模块 URL 为本地 `file:`，代码属于已安装插件；Worker 是可终止执行单元，不是运行任意笔记代码的权限沙箱。外部服务事实 RPC 另行扩展，当前输入包括工具参数和有界上下文文本。
 
-在 `/requests` 原有 config 下的 `reminders` 中可设置：单条 `ruleTimeoutMs`（默认250ms）、整轮 `roundTimeoutMs`（1000ms）、`maxConcurrent`（4）、`maxQueued`（128）、初始总规则数 `maxRules`（0，不限）、单次执行及会话留存 `maxBytes`（1MiB）、每会话 `maxCandidates`（128）、`maxIdle`（4）、上下文采样 `maxContextMessages`（8）和 `maxContextChars`（32768）。整轮计时从事件接纳起，包含持久写入等待、排队和 Worker 启动。容量包含等待写入的任务；会话内串行、会话间轮转。
+在 `/requests` 原有 config 下的 `reminders` 中可设置：单条 `ruleTimeoutMs`（默认250ms）、整轮 `roundTimeoutMs`（1000ms）、`maxConcurrent`（4）、`maxQueued`（128）、初始总规则数 `maxRules`（0，不限）、单次执行及会话留存 `maxBytes`（1MiB）、每会话 `maxCandidates`（128）、`maxIdle`（4）、上下文采样 `maxContextMessages`（8）和 `maxContextChars`（32768）。整轮预算累计 Worker 的规则/分析器 checkpoint 记录的执行阶段耗时，包括判定器内部异步等待；不把 Host 排队、Worker 启动、存储等待和回执延迟计入规则评估预算。它不是调用方端到端等待期限；启动与存储另有各自的等待限制。容量包含等待写入的任务；会话内串行、会话间轮转。
 
 规则目录默认不限条数，全部来源正文也不计入单次执行的 `maxBytes`。打开“会话规则 → 提醒容量”，可查看已注册数量、设置全局条数上限（0表示不限），以及查看最近因容量拒绝的来源与数量。界面设置在持久保存成功后生效，并优先于初始配置；降低上限保留已有规则，只拒绝后续超限增长。提高上限后，思源在下一次刷新时重试。保存失败保持原设置，多窗口修改冲突时刷新后重试。
 
 服务的 `capacitySnapshot()` 返回当前设置、注册数量和拒绝记录；`setCapacity({ revision, maxRules })` 使用全局版本号并等待持久写入。
 
-正则、分析器和异步判定均在真实 Worker 中执行。服务启动时预热并保留最多 `min(maxIdle, maxConcurrent)` 条线程，默认4条；单条预算从就绪线程接收派发时开始，`judge.timeoutMs` 可进一步收紧。冷启动仍受整轮期限和独立启动期限约束。单条超时终止该线程，池会自动补充；启动失败延迟重试，独立规则继续。准备线程不占真实任务接纳名额，实际任务可接手启动中的线程；卸载等待准备与执行线程清理。失败诊断持久保存启动、往返或执行阶段及各阶段耗时。整轮超时或显式取消使本轮候选失效，迟到结果不投递。来源更新、卸载及规则控制变更在投递前再次检查。`snapshot(sessionId)` 提供有界候选、诊断和存储错误状态。
+正则、分析器和异步判定均在真实 Worker 中执行。服务启动时预热并保留最多 `min(maxIdle, maxConcurrent)` 条线程，默认4条。Host FIFO 每条线程只派发一个任务；单条预算从 Worker 写入该规则的开始 checkpoint 计算，`judge.timeoutMs` 可进一步收紧，冷启动另受独立启动期限约束。已完成的 checkpoint 不因 Host 忙碌、回执迟到而被计为仍在执行。单条超时或运行中取消会终止线程并等待真实 exit；保留已收到的逐条结果，只重投最终稳定 checkpoint 能证明尚未开始的后缀。整轮执行预算耗尽不继续后缀，显式取消后的迟到结果不投递。优先级顺序和互斥组在调用 judge 前处理。准备线程不占真实任务接纳名额，实际任务可接手启动中的线程；卸载等待准备与执行线程清理。失败诊断区分接纳、启动和执行阶段，记录启动、排队、往返及执行耗时。来源更新、卸载及规则控制变更在投递前再次检查。`snapshot(sessionId)` 提供有界候选、诊断和存储错误状态。
 
-模型投递按来源和规则身份去重，revision 不重置额度。当前 surface 或本次待注入消息已有提醒时抑制重复；fork 继承提醒同样抑制。持久预留携带稳定 messageId，后续收集用会话日志确认提交；明确提交前失败可 rollback，提交情况未知则保留预留。本版持久 pending 在重启后可重新绑定相同的来源与规则定义；缺少定义签名的历史候选仍需新事件重新判定。运行中来源替换会使旧候选失效，即使随后恢复相同正文也不会复活旧候选。已提交提醒继续按可见性去重，压缩移除后新事件可重新触发。保存失败会进入插件日志，正常模型请求继续。
+Worker 错误回执只传经过检查的名称和消息；judge 异常字段不合法或不可读取时，明确记录 `matcher-error-serialization-failed`，batch 其余规则仍按原预算和互斥顺序处理。连错误回执都无法发送时，线程实际报错退出，Host 等待退出后释放占用，不能静默留下永远等不到结果的任务。入口模块加载失败和启动期限超限均按启动故障报告。事件快照与规则结果复用 JSON 校验器，但每次仍执行原校验，不缓存判定结果或省掉字节限制。
+
+0.13.5 原生日志迁移已通过同树验收：`release:check` 461/461、完整 Source 178/178，默认 Worker 基准 18/18 语义一致且源码稳定。真实整 Host 卸载、原生取消和空缓存重放均通过；单规则 batch 仍慢于逐条，不宣称全面提速。完整结果与历史限制见 [reminder/v4 验收记录](docs/reminder-v4-acceptance.md)。
+
+模型投递按来源和规则身份去重，revision 不重置额度。当前 surface 或本次待注入消息已有提醒时抑制重复；fork 继承提醒同样抑制。原生 inbox 接纳的冻结匹配保留稳定 messageId，后续请求获得共享名额后交付，消费由实际 user/message 提交确认。空缓存重启从原生接纳、claim、取消和提交恢复，不读取旧候选文件。没有实时 Agent 时程序化交接明确拒绝，打开 Agent 后同一触发可重试。运行中来源替换会使旧候选失效，即使随后恢复相同正文也不会复活旧候选。已提交提醒继续按可见性去重，压缩移除后新事件可重新触发。
 
 ## 模型作用域提醒
 
 `modelScopedPrompts` 按明确的 `provider`、`model` 和 `purposes` 匹配，规则含 `ruleId`、`version`、`text`、`trigger: static | model-switch | output-pattern`；purposes 默认仅 conversation。切换规则以同用途上次真实派发的路由为依据，`initialBind` 默认 false，可显式要求首次提醒。`{boundModelLabel}` 替换为本次路由名。未派发的请求不会更新上次路由；规则卸载后立即停止贡献。
 
-Host 在 `llm/stream` 委托后，为新增提示使用公开 prepared call 构造独立的不可变请求，并将实际派发关联回原调用。完整段落记录在已有 `request/header` 事件的 `contextCarePrompt` 元数据，完整输入继续经过 ready 预算检查。提示消息只在本次请求中追加，历史 surface、系统头和摘要选区不包含它。另一模型或另一用途的请求重新匹配，返回原路由时收到一份切换提醒。主请求预测和辅助摘要预选使用相同的 preview，再由实际 ready 输入执行最终检查。`output-pattern` 规则显式提供 detector：Markdown 结构解析与 Intl.Segmenter 句/词统计排除代码、引用及配置的局部元讨论前缀；literal 按最长优先合并重叠，记录 N/K/H/F/J/D、源 offset 和有界证据。词表、单篇/滑窗阈值、完整文本/语句/词条/证据上限均须配置；超限记为 unavailable。仅真实派发后完整提交的对话输出纳入独立路由窗口，失败、中断和辅助摘要不作健康证据。反馈按新 seq 去重、完成输出冷却和健康输出重新启用，存入 Host 的 `context_care_output_feedback`，下一次自然请求投递；未主动制造额外 turn。目标路由的 `carryFromOtherRoute` 明确允许携带旧源反馈，否则切换派发将其 superseded。投递前先记录 delivery-unknown，按 detector.maxDeliveries 限制崩溃后的重投。
+Host 在 `llm/stream` 委托后，为新增提示使用公开 prepared call 构造独立的不可变请求，并将实际派发关联回原调用。完整段落记录在已有 `request/header` 事件的 `contextCarePrompt` 元数据，完整输入继续经过 ready 预算检查。提示消息只在本次请求中追加，历史 surface、系统头和摘要选区不包含它。另一模型或另一用途的请求重新匹配，返回原路由时收到一份切换提醒。主请求预测和辅助摘要预选使用相同的 preview，再由实际 ready 输入执行最终检查。`output-pattern` 规则显式提供 detector：Markdown 结构解析与 Intl.Segmenter 句/词统计排除代码、引用及配置的局部元讨论前缀；literal 按最长优先合并重叠，记录 N/K/H/F/J/D、源 offset 和有界证据。词表、单篇/滑窗阈值、完整文本/语句/词条/证据上限均须配置；超限记为 unavailable。仅真实派发后完整提交的对话输出纳入独立路由窗口，失败、中断和辅助摘要不作健康证据。反馈按原生 seq 去重，以正常完成输出推进冷却和健康重置，下一次自然请求投递；投影丢弃后由同一日志重建，未主动制造额外 turn。目标路由的 `carryFromOtherRoute` 明确允许携带旧源反馈，否则切换派发将其 superseded。投递前先记录 delivery-unknown，按 detector.maxDeliveries 限制崩溃后的重投。
 
 下面是测试参数构成的完整配置示例，词表和数值用于演示可复验条件，未作为所有模型的默认政策。部署时替换明确的 provider/model、词表、阈值和提醒文字；将 `modelScopedPrompts` 放在负责该会话的 `/runtime` 或 `/agent` 的 config 中。literal 区分大小写，不接收任意正则。
 
@@ -361,13 +393,13 @@ Tavern 正则转换对照 [SillyTavern release 正则引擎](https://github.com/
 
 独立 GitHub 安装记录确认包来源与依赖解析。完整真实 Client 的 Slot/Sidebar/Conversation 验收尚未完成；真实供应商网络和模型效果也未验证。当前 GUI 没有自动安装或加载新标签。
 
-## 完成表述的持久观察
+## 完成表述的 Session 观察
 
-宿主补丁还挂载 `dsh-context-care/completion`，独占 `context_care_completion` 存储域；会话预设不打开这个共享域。它只读取 `agent/assistant-stream` 的可见正文，排除思考、工具调用、代码围栏、引用和否定表述。块末尾与已到达的正文增量不会重复计入。同一会话的写入串行，按会话与生产者来源隔离 cooldown；attempt 是一次观察的 occurrence，不是新的来源。
+宿主补丁挂载 `dsh-context-care/completion`。完成措辞、来源路由和冷却由正常提交的 `assistant/message` 及其原生请求 header 推导；只解析可见正文，排除思考、工具调用、代码围栏、引用和否定表述。流式前缀、中断消息与 `assistant/attempt` 不构成成功完成观察。冷却按 Session 中的提交时间计算，同一日志的热缓存、清空缓存和冷恢复得到相同结果；fork 继承前缀不启动子会话的本地观察或冷却。观察仅说明输出使用了完成措辞，不证明实际任务完成。
 
-发现完成表述后，先等待 pending 的持久写入确认，再根据真实日志结算。正常 `assistant/message` 可进入 cooldown；`assistant/attempt`、中断消息和 abandoned 流恢复 pending，不算成功完成。结算说明的是输出观察的生命周期，不证明实际任务完成。默认 cooldown 为 300000 毫秒，可在该 Host 行的 `config.cooldownMs` 中修改。成功观察另写 `context_care_completion_notices` 出箱，提醒核对实际交付与验证范围，等待下一次自然对话请求。`notifications: false` 将完成提醒动作设为默认关闭，关闭期间不建立观察、不消耗新冷却；右栏可以覆盖这个默认值，`maxObservedChars` 默认 65536，超限正文不测量；`maxDeliveries` 默认 2，限制 delivery-unknown 重投。只扫描权威 block-end 与最终提交正文，不积累无限增量或每片重扫全文。正常正文的实时发布不等待存储 ACK。
+默认 cooldown 为 300000 毫秒，可在该 Host 行的 `config.cooldownMs` 中修改。下一次自然对话只选择符合当前路由的最新观察，提醒核对实际交付和验证范围。实际提示贡献与 callId、来源输出 seq 记录在原生 `request/header`；预检失败不提前记录提示交付。已提交的模型输出或有效流记录确认该次请求已派发，缺少确认的原生提示记录按 delivery-unknown 计数，`maxDeliveries` 默认 2；清缓存或重启不会重置这些次数。实际交付最新通知后，同路由的更旧通知被 superseded；没有提示记录不能猜测通知已交付。
 
-真实 storage-domain 服务是该 Host 行的必需依赖。打开或写入失败保留原始错误，不降级成内存写入；`contextCareCompletion.flush(sessionId?)` 等待观察写入并报告原始失败，单凭 Agent idle 不代表观察器已持久化。卸载观察器先移除监听、等待排队写入，再关闭 handle。状态由真实 JSON backend 保存并在重新打开后读取；恢复后首次自然请求用请求日志的实际派发与成功输出 seq 核对漏处理的完成通知，并记录已处理水位；结算后的 occurrence 标识补齐未写出的通知，其它 occurrence 继续遵守冷却。一次自然派发只使用最新符合路由的通知，其余旧通知被 superseded。过长会话/来源编码使用 SHA-256 存储键，保留原先可落盘的短键；已有 pending 保留，已消费 seq 不重复投递，失败记录不能被后续成功 attempt 改写。
+该 Host 不再打开、读取或续写 `context_care_completion`、`context_care_completion_notices`，旧文件保持原样且不能覆盖日志。当前请求准备预约仅用于串行协调，不构成持久完成或交付事实；`contextCareCompletion.flush(sessionId?)` 等待原生 Session writer。`notifications: false` 将动作设为默认关闭，右栏可以覆盖此默认值；关闭期间不新增观察，重新启用从规则控制边界开始。`maxObservedChars` 默认 65536，超限正文不测量。投影只折叠新提交事件，不积累流式增量，不重跑模型或将内存诊断当独立持久审计。
 
 ## 缓存与模型体验
 
@@ -383,7 +415,7 @@ UI 优先显示当前进程最近一次请求边界的独立数值采样，关�
 
 刚发布的依赖受 pnpm 的 `minimumReleaseAge` 政策约束。本机 pnpm 11.7.0 与 12.6.0 的冻结锁文件安装都因两个版本未满24小时而失败；pnpm 11.7.0 的普通 `add` 成功，但自动在消费目录记录了两个精确版本的 `minimumReleaseAgeExclude`。这与无豁免安装不同。保持该政策且没有精确版本批准的环境应等待其发布时间窗口满足后再安装；本仓库不分发豁免，不修改消费者的全局设置。
 
-GitHub 标签已包含客户端构建产物；包没有 `prepare`、`prepack` 或安装生命周期脚本。官方插件管理器的包来源可直接填写 `github:leolee9086/dsh-context-care#v0.12.0`。普通 pnpm 安装不需要 `allowBuilds`、`--ignore-scripts` 或 `blockExoticSubdeps` 例外。v0.8.0 的安装契约问题和历史验证限制保留在更新记录中。
+GitHub 标签已包含客户端构建产物；包没有 `prepare`、`prepack` 或安装生命周期脚本。官方插件管理器的包来源可直接填写 `github:leolee9086/dsh-context-care#v0.13.5`。普通 pnpm 安装不需要 `allowBuilds`、`--ignore-scripts` 或 `blockExoticSubdeps` 例外。v0.8.0 的安装契约问题和历史验证限制保留在更新记录中。
 
 ### 安装发行包
 
@@ -397,10 +429,10 @@ Host 代码更新后需要重启 DSH，再刷新页面；重新启用条目不�
 
 ### 从 GitHub 安装
 
-使用固定的 `v0.12.0` 标签：
+使用固定的 `v0.13.5` 标签：
 
 ```sh
-dsh plugin --profile web add "github:leolee9086/dsh-context-care#v0.12.0"
+dsh plugin --profile web add "github:leolee9086/dsh-context-care#v0.13.5"
 ```
 
 构建产物 `lib/` 已入库，装完即可用 —— 不需要额外构建，也不需要手工打包上传 tgz。带上标签安装，版本不会跟着分支漂。
@@ -451,7 +483,7 @@ dsh plugin --profile web add "github:leolee9086/dsh-context-care#v0.12.0"
 
 ### 从源码开发
 
-本地进度、交接与调查笔记统一放在 `.local/notes/`，临时命令日志放在 `.local/logs/`；构建预览、验证输出与打包结果放在 `artifacts/`。这些目录由 Git 忽略。可维护的说明放在 `docs/`，已有历史文档集中在 `docs/history/`，发行所需的 `lib/` 继续跟踪。
+本项目维护中的内部进度、交接与调查记录优先保存在思源；归属不明确时写入当天 dailynote，不再默认新增零散本地笔记。需随项目公开的 README、教程、接口与验收说明留在仓库，专题文档放在 `docs/`，历史文档集中在 `docs/history/`。临时命令日志与本地测量原件放在 `.local/logs/`，构建预览、验证输出与打包结果放在 `artifacts/`；这些临时目录由 Git 忽略，发行所需的 `lib/` 继续跟踪。
 
 插件可以在任意目录独立安装、测试和构建，无需同级 DSH checkout，也没有 `link:../deepseek-harness` 依赖。运行时 registry 依赖为 React、Zod、Ajv、Handlebars、mdast-util-from-markdown，以及标准 rule-engine 和 session-blocks 包。正式 Cordis 与 DSH 包仅作为开发依赖提供 Host 类型；插件通过纯类型导入和 JSDoc 检查真实服务，运行时使用宿主注入的实例。`pnpm check` 包含提醒领域、两个主 Host 入口、提醒接线、TS 行为测试的严格类型检查和全部 JS 源码语法检查。
 

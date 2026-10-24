@@ -30,13 +30,16 @@ export interface OutputEvent {
     output: OutputEvidence;
     textSamples: TextSampleValue[];
 }
+/** Native chunk times and the committed terminal event time drive the fold. */
 export type OutputFrame = (Pick<Extract<AssistantStreamFrame, {
     type: 'start';
 }>, 'type' | 'revision' | 'turn' | 'step'> | Pick<Extract<AssistantStreamFrame, {
     type: 'chunk';
-}>, 'type' | 'revision' | 'chunk'> | Pick<Extract<AssistantStreamFrame, {
+}>, 'type' | 'revision' | 'chunk' | 'time'> | (Pick<Extract<AssistantStreamFrame, {
     type: 'end';
-}>, 'type' | 'revision'>) & {
+}>, 'type' | 'revision'> & {
+    time: number;
+})) & {
     attemptId: string;
 };
 interface StreamOptions<Agent> {
@@ -46,10 +49,17 @@ interface StreamOptions<Agent> {
     report: (error: unknown) => void;
     enabled: (sessionId: string) => boolean;
     sessionId: (agent: Agent) => string;
+    /** The Host derives this key from the native step/preceding-attempt boundary. */
+    attemptId?: (agent: Agent) => string;
 }
-/** Bounded per-attempt, per-block windows. Only readable text/reasoning enter matching. */
-export declare function createOutputStream<Agent>({ config, submit, afterSubmit, report, enabled, sessionId: identify }: StreamOptions<Agent>): {
+/** Bounded live scheduling around the same timestamp fold used by native replay. */
+export declare function createOutputStream<Agent>({ config, submit, afterSubmit, report, enabled, sessionId: identify, attemptId: identifyAttempt }: StreamOptions<Agent>): {
     observe: (agent: Agent, frame: OutputFrame) => void;
+    /** No committed stream exists for abandonment; it cannot supply complete evidence. */
+    abandon(agent: Agent, frame: {
+        attemptId: string;
+        revision: number;
+    }): void;
     isCurrent(agent: Agent, output: OutputEvidence): boolean;
     close(): Promise<void>;
 };

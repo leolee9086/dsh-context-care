@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 import { resolve } from 'node:path'
-import { mkdtemp, mkdir, readFile, writeFile, rm, copyFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, writeFile, rm, copyFile, readdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 const pluginModule = path => import(process.env.DSH_TEST_PLUGIN_ROOT
   ? pathToFileURL(resolve(process.env.DSH_TEST_PLUGIN_ROOT, 'src', path)).href : new URL(`../src/${path}`, import.meta.url).href)
@@ -14,14 +14,27 @@ import { producedBy } from '../src/producer-source.js'
 import { captureInputPricing } from '../src/input-pricing.js'
 import { journalCalibration, calibrationHeaderKey } from '../src/input-calibration.js'
 import { createSummaryExecutor } from '../src/summary-executor.js'
+import { createProposalExecutor } from '../src/summary-proposals.js'
 import { buildSummaryRequest, frameSummary } from '../src/summary-request.js'
 import { resolveConfig } from '../src/policy.js'
+import { contextCarePrompts } from '../src/prompt-view-data.js'
+import { contextCareActions } from '../src/action-view-data.js'
+import { openRequestJournal } from '../src/request-journal.js'
 import { detectorFixture } from './fixtures/detector.js'
 import { registerReminderHostCases } from './reminder-host-cases.ts'
 import { registerTimeoutHostCases } from './reminder-timeout-cases.ts'
 import { registerRecoveryHostCases } from './reminder-recovery-cases.ts'
+import { registerShutdownHostCases } from './reminder-shutdown-host-cases.ts'
+import { registerDenialLifetimeHostCases } from './reminder-denial-lifetime-host-cases.ts'
 import { preV4State } from './fixtures/reminder-upgrade.ts'
 import { registerScopeHostCases } from './reminder-scope-host-cases.ts'
+import { registerDeliveryReplayCases } from './reminder-delivery-replay-cases.ts'
+import { registerNativeTriggerCases } from './reminder-native-trigger-cases.ts'
+import { createSessionDeliveries } from '../lib/reminder-runtime/session-deliveries.js'
+import { replayNativeOutput } from '../lib/reminder-runtime/native-output-events.js'
+import { NativeOutputObservation } from './fixtures/reminder-native-output.ts'
+import { createOutputStream } from '../lib/reminder-runtime/output-stream.js'
+import { registerCompletionReplayCases } from './completion-session-replay-cases.ts'
 import { asBatch } from './batch-execute.ts'
 
 // This explicitly selected test acts as an external Host. The plugin itself never
@@ -46,7 +59,8 @@ const { default: Include } = await load('vendor/include/lib/index.js', '@deepsee
 const paths = {
   llm: 'llm/llm', session: 'core/session', 'session-projection': 'session/session-projection',
   'system-prompt': 'core/system-prompt', tools: 'core/tools', agent: 'core/agent',
-  'client-connection': 'client/connection',
+  'client-connection': 'client/connection', 'session-query-sqlite': 'session-query/session-query-sqlite',
+  'session-persistence-jsonl': 'session/session-persistence-jsonl',
   'agent-loop': 'core/agent-loop', 'token-meter': 'llm/token-meter', 'compaction-basic': 'compaction/compaction-basic',
   storage: 'storage/storage', 'storage-json': 'storage/storage-json', 'storage-domain': 'storage/storage-domain', 'host-webserver': 'host/webserver', 'compaction-image-offload': 'compaction/compaction-image-offload',
 }
@@ -173,6 +187,42 @@ test('reminder capacity API saves global settings and restores them through real
   await owned.close(reopened)
 })
 
+test('native handoff rejects a missing live Agent and accepts the same trigger after it opens', async t => {
+  const owned = await fixture(t, false, {}, {}, { reminders: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
+  const ctx = await owned.open(), service = ctx.get('reminderRules')
+  await ctx.loader.create({ name: '@deepseek-ai/dsh-session-persistence-jsonl',
+    config: { root: resolve(owned.root, 'session-logs'), compression: 'none' } })
+  await ctx.loader.await()
+  for (const entry of ctx.loader.entries()) if (entry.options.name === '@deepseek-ai/dsh-session-persistence-jsonl') await entry.fiber.await()
+  const adapter = new CompletionAdapter([
+    { blocks: [{ type: 'text', text: 'Materialized.' }] },
+    { blocks: [{ type: 'text', text: 'Delivered.' }] },
+  ])
+  ctx.llm.registerAdapter(['care-test'], adapter)
+  const initial = await ctx.agents.create({ sessionId: 'handoff-needs-agent',
+    agentOptions: { provider: 'care-test', model: 'care-test' } })
+  await completionTurn(ctx, initial.agent)
+  await initial.dispose()
+  ctx.effect(() => service.registerSource({ sourceId: 'needs-agent', plugin: 'test', revision: 1, rules: [{
+    format: 'reminder/v4', id: 'notice', on: 'tool.succeeded', when: { tool: 'programmatic_probe' }, text: 'ACCEPTED_ON_RETRY',
+    effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
+  }] }).dispose)
+  const event = { sessionId: 'handoff-needs-agent', callId: 'retry-publication', rootCallId: 'retry-publication',
+    name: 'programmatic_probe', arguments: {} }
+  await assert.rejects(service.submit(event), /reminder-native-inbox-agent-unavailable/)
+  const agent = (await ctx.agents.resume({ resumeSessionId: event.sessionId,
+    agentOptions: { provider: 'care-test', model: 'care-test' } })).agent
+  await service.submit(event)
+  assert.equal(agent.inbox.nextStep.length, 1, 'retry is not suppressed by the failed acceptance')
+  assert.equal(agent.inbox.nextStep[0].source.reminder.handoff.queued, true)
+  await completionTurn(ctx, agent)
+  const notices = agent.session.snapshotEvents().filter(item => item.type === 'user/message'
+    && item.data.source.kind === 'plugin:dsh-context-care:reminder')
+  assert.equal(notices.length, 1)
+  assert.equal(notices[0].data.content[0].text, 'ACCEPTED_ON_RETRY')
+  assert.equal(ctx.storageDomain.get('context_care_reminders'), undefined)
+})
+
 test('reminder service connects tool results to logged pre-step messages through real Loader', async t => {
   const owned = await fixture(t, false, {}, {}, { reminders: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
   const ctx = await owned.open()
@@ -199,8 +249,27 @@ test('reminder service connects tool results to logged pre-step messages through
   ])
   ctx.llm.registerAdapter(['care-test'], adapter)
   const agent = await ctx.agentLoop.create('reminder-integration', { provider: 'care-test', model: 'care-test' })
+  /** @type {Array<{ callId: string; cursor: number }>} */
+  const submitted = []
+  const submit = service.submit.bind(service)
+  /** @type {typeof service.submit} */
+  const observeSubmission = (input, signal) => {
+    if (input !== null && typeof input === 'object' && 'type' in input && input.type === 'tool.succeeded'
+      && 'callId' in input && typeof input.callId === 'string') {
+      submitted.push({ callId: input.callId, cursor: agent.session.seq })
+    }
+    return submit(input, signal)
+  }
+  t.mock.method(service, 'submit', observeSubmission)
   await completionTurn(ctx, agent)
-  const notices = agent.session.snapshotEvents().filter(event => event.type === 'user/message' && event.data.source?.kind === 'plugin:dsh-context-care:reminder')
+  const log = await ctx.get('sessionQuery').readSession(agent.session.id)
+  assert.deepEqual(submitted.map(item => item.callId), ['reminder-1', 'reminder-2'], 'one submission per committed result')
+  for (const item of submitted) {
+    const result = log.events.find(event => event.type === 'tool/result' && event.data.message.toolCallId === item.callId)
+    assert.ok(result, 'the trigger has a canonical tool result')
+    assert.ok(result.seq < item.cursor, 'native result commits before its reminder is submitted')
+  }
+  const notices = log.events.filter(event => event.type === 'user/message' && event.data.source?.kind === 'plugin:dsh-context-care:reminder')
   assert.equal(notices.length, 1, JSON.stringify(service.snapshot(agent.id)))
   assert.equal(notices[0].data.content[0].text, '禁止使用 any')
   assert.match(JSON.stringify(adapter.requests.at(-1).messages), /禁止使用 any/)
@@ -208,7 +277,228 @@ test('reminder service connects tool results to logged pre-step messages through
   assert.equal(ctx.get('reminderRules'), undefined)
 })
 
-test('pre-v4 persisted candidates retire before Host startup and HTTP routes survive restart', async t => {
+registerNativeTriggerCases({
+  async capture(t, handBefore = false, cancelAfterBefore = false, collapseBefore = false, abortAt, after) {
+    const owned = await fixture(t, false), ctx = await owned.open()
+    let bodies = 0, beforeHooks = 0, releasePresentation, nativeAgent, cancellation = Promise.resolve()
+    const candidateWrites = []
+    if (after) {
+      ctx.on('domain/changed', change => { if (change.domain === 'context_care_reminders') candidateWrites.push(change) })
+      ctx.effect(() => ctx.get('reminderRules').registerDetector(after.detector))
+      ctx.effect(() => ctx.get('reminderRules').registerSource(after.source).dispose)
+      ctx.on('tools/result', exec => {
+        if (exec.name === 'native_prefix_probe') cancellation = exec.agent.cancel({ kind: 'hook', reason: 'native pending outcome capture' })
+      })
+    }
+    if (abortAt) {
+      ctx.on('tools/pre-execute', (exec, next) => {
+        if (exec.name === 'native_prefix_probe') beforeHooks++
+        return next()
+      })
+      if (abortAt === 'before') ctx.on('session/event', (_session, event) => {
+        if (event.type === 'tool/call' && event.data.name === 'native_prefix_probe') {
+          assert.ok(nativeAgent)
+          cancellation = nativeAgent.cancel({ kind: 'hook', reason: 'native before cancellation' })
+        }
+      })
+    }
+    if (collapseBefore) {
+      // Change the actual registry presentation after the native call commits;
+      // request assembly remains native and needs no PTC execution backend.
+      ctx.on('session/event', (_session, event) => {
+        if (event.type === 'tool/call' && event.data.name === 'native_prefix_probe') {
+          assert.ok(nativeAgent)
+          releasePresentation = nativeAgent.ctx.tools.presentAs('ptc')
+        }
+      })
+      ctx.on('tools/result', (exec) => {
+        if (exec.name === 'native_prefix_probe') { releasePresentation?.(); releasePresentation = undefined }
+      })
+      ctx.on('tools/pre-execute', (exec, next) => {
+        if (exec.name === 'native_prefix_probe') beforeHooks++
+        return next()
+      })
+      ctx.effect(() => () => releasePresentation?.())
+    }
+    ctx.effect(() => ctx.tools.register({ name: 'native_prefix_probe', description: 'Native prefix replay fixture',
+      parameters: { type: 'object', properties: { file_path: { type: 'string' } }, required: ['file_path'] },
+      output: { schema: { type: 'string' }, render: (_args, text) => [{ type: 'text', text }] },
+      async execute() { bodies++; return 'CURRENT_RESULT' } }))
+    if (handBefore) ctx.effect(() => ctx.get('reminderRules').registerSource({ sourceId: 'native-phases', plugin: 'test', revision: 1, rules: [{
+      format: 'reminder/v4', id: 'before', on: 'tool.before-execute', when: { tool: 'native_prefix_probe' },
+      text: 'BEFORE {{event.arguments.file_path}}', effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
+    }] }).dispose)
+    if (cancelAfterBefore || abortAt === 'after') ctx.on('tools/pre-execute', async (exec, next) => {
+      const decision = await next()
+      if (exec.name !== 'native_prefix_probe') return decision
+      // Cancellation of the registry body does not erase an earlier reminder match.
+      // Concluding the turn still lets the real inbox commit the queued message.
+      await ctx.get('reminderRules').settle(String(exec.agent.session.id))
+      assert.equal(ctx.get('reminderRules').snapshot(String(exec.agent.session.id)).candidates.filter(item => item.ruleId === 'before' && item.status === 'pending' && item.queued === true).length, 1,
+        'the actual before-execution match entered the native inbox before the cancellation decision')
+      if (abortAt === 'after') cancellation = exec.agent.cancel({ kind: 'hook', reason: 'native before cancellation' })
+      else exec.concludeTurn()
+      return { kind: 'cancel' }
+    })
+    ctx.llm.registerAdapter(['care-test'], new CompletionAdapter([
+      { blocks: [{ type: 'tool-call', id: 'native-prefix-call', name: 'native_prefix_probe', arguments: '{"file_path":"original.ts"}' }] },
+      { blocks: [{ type: 'text', text: 'LATE_CONTEXT assistant after the tool.' }] },
+    ]))
+    const agent = await ctx.agentLoop.create('native-prefix', { provider: 'care-test', model: 'care-test' })
+    nativeAgent = agent
+    await completionTurn(ctx, agent, 'EARLY_CONTEXT')
+    await cancellation
+    await ctx.get('reminderRules').settle(String(agent.id))
+    if (after) {
+      const runtime = ctx.get('reminderRules')
+      assert.equal((await ctx.sessionQuery.readSession(agent.id)).events.some(event => event.type === 'user/message'
+        && event.data.source.kind === 'plugin:dsh-context-care:reminder'), false, 'the native outcome is pending before handoff')
+      const messages = await runtime.collect({ sessionId: String(agent.session.id), visible: agent.session.deriveMessages() })
+      assert.deepEqual(messages.map(message => message.source.contextCareTrace.ruleId), ['first', 'second', 'choice'])
+      for (const message of messages) if (after.handoffRules.includes(message.source.contextCareTrace.ruleId)) {
+        agent.session.append('user/message', message, { surfaceOp: 'append' })
+      }
+    }
+    const initial = await ctx.sessionQuery.readSession(agent.id)
+    if (after) assert.equal(candidateWrites.length, 0, 'live native tool detection, reservation and message commits never write a duplicate candidate ledger')
+    if (abortAt) {
+      assert.equal(bodies, 0)
+      assert.equal(beforeHooks, abortAt === 'after' ? 1 : 0)
+      assert.equal(ctx.get('reminderRules').snapshot(String(agent.id)).candidates.filter(item => item.ruleId === 'before' && item.status === 'pending' && item.queued === true).length,
+        abortAt === 'after' ? 1 : 0, 'only the real completed hook produces a native reminder handoff')
+      assert.equal(initial.events.some(event => event.type === 'user/message' && event.data.source.kind === 'plugin:dsh-context-care:reminder'), false)
+      assert.equal(initial.events.some(event => event.type === 'agent/inbox/spliced'
+        && event.data.inserted.some(message => message.source.kind === 'plugin:dsh-context-care:reminder')), abortAt === 'after')
+    }
+    if (collapseBefore) {
+      assert.equal(bodies, 0)
+      assert.equal(beforeHooks, 0, 'the real PTC presentation rejects this direct name before any pre-execution hook')
+      assert.equal(ctx.get('reminderRules').snapshot(String(agent.id)).candidates.length, 0)
+    }
+    if (cancelAfterBefore) {
+      assert.equal(bodies, 0)
+      assert.equal(initial.events.some(event => event.type === 'user/message' && event.data.source.kind === 'plugin:dsh-context-care:reminder'), true,
+        'native inbox handoff survives a cancellation decision after the before-execution match')
+    }
+    const original = initial.events.find(event => event.type === 'user/message' && event.data.source.kind === 'user')
+    assert.ok(original)
+    // A later real surface replacement must not change an earlier judge input.
+    agent.session.append('user/message', createUserMessage({ source: { kind: 'user' },
+      content: [{ type: 'text', text: 'LATE_CONTEXT replacement of the old input.' }] }),
+    { surfaceOp: { op: 'replace', startSeq: original.seq, endSeq: original.seq }, sourceEventSeqs: [original.seq] })
+    assert.doesNotMatch(JSON.stringify(agent.session.deriveMessages()), /EARLY_CONTEXT/)
+    const log = await ctx.sessionQuery.readSession(agent.id)
+    const path = resolve(owned.root, 'native-prefix-seed.json')
+    await writeFile(path, JSON.stringify({ header: agent.session.header, events: log.events, inheritedEventCount: log.inheritedEventCount }))
+    const seed = JSON.parse(await readFile(path, 'utf8'))
+    await owned.close(ctx)
+    return seed
+  },
+  async captureAlias(t, descriptor, source, detector, late = false) {
+    const owned = await fixture(t, false, {}, {}, { reminders: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
+    const ctx = await owned.open(), runtime = ctx.get('reminderRules')
+    const install = () => {
+      ctx.effect(() => runtime.registerCustomEvents([descriptor]))
+      ctx.effect(() => runtime.registerDetector(detector))
+      ctx.effect(() => runtime.registerSource(source).dispose)
+    }
+    if (!late) install()
+    const sideWrites = []
+    ctx.on('domain/changed', change => { if (change.domain === 'context_care_reminders') sideWrites.push(change) })
+    ctx.llm.registerAdapter(['care-test'], new CompletionAdapter(Array.from({ length: 3 }, () => ({
+      blocks: [{ type: 'text', text: 'Actual alias turn.' }],
+    }))))
+    const agent = await ctx.agentLoop.create('native-alias', { provider: 'care-test', model: 'care-test' })
+    await completionTurn(ctx, agent, 'Actual alias input.')
+    await runtime.settle(String(agent.id))
+    if (late) {
+      install()
+      const messages = await runtime.collect({ sessionId: String(agent.id), visible: agent.session.deriveMessages() })
+      assert.equal(messages.length, 1, 'late alias registration cannot inherit an unrelated live-observation scan')
+      for (const message of messages) agent.inject(message)
+    } else assert.equal(runtime.snapshot(String(agent.id)).candidates.filter(candidate => candidate.status === 'pending').length, 1,
+      'the actual live observer matched the committed human input without cold discovery')
+    agent.followup(createUserMessage({ source: { kind: 'plugin:dsh-context-care:test-continuation' },
+      content: [{ type: 'text', text: 'Use the next natural request boundary.' }] }))
+    await agent.whenIdle(); await runtime.settle(String(agent.id))
+    const history = await ctx.sessionQuery.readSession(agent.id)
+    assert.equal(history.events.filter(event => event.type === 'user/message'
+      && event.data.source.kind === 'plugin:dsh-context-care:reminder').length, 1,
+      'the live Session observer must publish and hand off the alias exactly once')
+    const path = resolve(owned.root, 'native-alias-seed.json')
+    await writeFile(path, JSON.stringify({ header: agent.session.header, events: history.events, inheritedEventCount: history.inheritedEventCount }))
+    assert.equal(sideWrites.length, 0)
+    const seed = JSON.parse(await readFile(path, 'utf8'))
+    await owned.close(ctx)
+    return seed
+  },
+  async open(t, seed, cachedSeen, cachedCandidates) {
+    const owned = await fixture(t, false, {}, {}, { reminders: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
+    let ctx = await owned.open()
+    if (cachedSeen || cachedCandidates) {
+      // Seed an actual obsolete file without asking production to open its domain.
+      const directory = resolve(owned.root, 'context_care_reminders', 'sessions')
+      await mkdir(directory, { recursive: true })
+      await writeFile(resolve(directory, String(seed.header.id) + '.json'), JSON.stringify({ version: 1,
+        record: { seen: cachedSeen ?? [], candidates: cachedCandidates ?? [], diagnostics: [] } }))
+      await owned.close(ctx)
+      ctx = await owned.open()
+    }
+    await ctx.loader.create({ name: '@deepseek-ai/dsh-session-persistence-jsonl',
+      config: { root: resolve(owned.root, 'session-logs'), compression: 'none' } })
+    await ctx.loader.await()
+    for (const entry of ctx.loader.entries()) if (entry.options.name === '@deepseek-ai/dsh-session-persistence-jsonl') await entry.fiber.await()
+    const handle = await ctx.sessionPersistence.create(seed.header, { inheritedEventCount: seed.inheritedEventCount })
+    try { await handle.append(seed.events); await handle.flush() }
+    finally { await handle.close() }
+    let writes = 0
+    ctx.on('domain/changed', change => { if (change.domain === 'context_care_reminders') writes++ })
+    return { runtime: ctx.get('reminderRules'), liveCount: () => ctx.sessions.list().length,
+      sideWriteCount: () => writes,
+      storedCandidates: async () => cachedCandidates ? JSON.parse(await readFile(resolve(owned.root,
+        'context_care_reminders', 'sessions', String(seed.header.id) + '.json'), 'utf8')).record.candidates : [],
+      storedSeen: async () => cachedSeen ? JSON.parse(await readFile(resolve(owned.root,
+        'context_care_reminders', 'sessions', String(seed.header.id) + '.json'), 'utf8')).record.seen : [] }
+  },
+})
+
+test('committed native tool result remains a reminder trigger after execution cancellation', async t => {
+  const owned = await fixture(t, false, {}, {}, { reminders: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
+  const ctx = await owned.open(), runtime = ctx.get('reminderRules')
+  ctx.effect(() => runtime.registerSource({ sourceId: 'late-tool-cancel', plugin: 'test', revision: 1, rules: [{
+    format: 'reminder/v4', id: 'notice', on: 'tool.succeeded', text: 'COMMITTED_TOOL_NOTICE',
+    when: { tool: 'late_abort_probe' }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
+  }] }).dispose)
+  ctx.effect(() => ctx.tools.register({ name: 'late_abort_probe', description: 'Commit before late cancellation',
+    parameters: { type: 'object' }, output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
+    async execute() { return 'completed tool body' } }))
+  let cancellation = Promise.resolve()
+  ctx.on('tools/result', (exec, result) => {
+    if (exec.name === 'late_abort_probe' && !result.isError && exec.agent) {
+      cancellation = exec.agent.cancel({ kind: 'hook', reason: 'cancel after the frozen tool outcome' })
+    }
+  })
+  ctx.llm.registerAdapter(['care-test'], new CompletionAdapter([
+    { blocks: [{ type: 'tool-call', id: 'late-abort-call', name: 'late_abort_probe', arguments: '{}' }] },
+    { blocks: [{ type: 'text', text: 'Continue after the aborted turn.' }] },
+  ]))
+  const agent = await ctx.agentLoop.create('late-tool-cancel', { provider: 'care-test', model: 'care-test' })
+  await completionTurn(ctx, agent)
+  await cancellation
+  await runtime.settle(String(agent.id))
+  const before = await ctx.get('sessionQuery').readSession(agent.session.id)
+  const result = before.events.find(event => event.type === 'tool/result' && event.data.message.toolCallId === 'late-abort-call')
+  assert.ok(result && result.type === 'tool/result' && result.data.message.isError !== true, 'the actual successful outcome committed')
+  assert.equal(before.events.filter(event => event.type === 'user/message'
+    && event.data.source.kind === 'plugin:dsh-context-care:reminder').length, 0, 'an aborted turn does not wake another request')
+  await completionTurn(ctx, agent)
+  const after = await ctx.get('sessionQuery').readSession(agent.session.id)
+  const notices = after.events.filter(event => event.type === 'user/message' && event.data.source.kind === 'plugin:dsh-context-care:reminder')
+  assert.equal(notices.length, 1)
+  assert.equal(notices[0].data.content[0].text, 'COMMITTED_TOOL_NOTICE')
+})
+
+test('obsolete candidate files have no production reader or writer and HTTP routes survive restart', async t => {
   const owned = await fixture(t, true, {}, {}, { reminders: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
   const old = preV4State()
   const directory = resolve(owned.root, 'context_care_reminders', 'sessions')
@@ -223,9 +513,11 @@ test('pre-v4 persisted candidates retire before Host startup and HTTP routes sur
     const runtime = ctx.get('reminderRules')
     const state = runtime.snapshot('upgrade-session')
     assert.deepEqual(state.candidates, [])
-    assert.deepEqual(state.seen, old.seen)
-    assert.deepEqual(state.windows, old.windows)
-    assert.equal(state.diagnostics.filter(item => item.status === 'retired-pre-v4').length, 1)
+    // Legacy seen and windows are caches, not committed Session handoffs.
+    assert.deepEqual(state.seen, [])
+    assert.deepEqual(state.windows, [])
+    assert.deepEqual(state.stickies, [])
+    assert.equal(state.diagnostics.length, 0, 'retired JSON is not interpreted by the production runtime')
     assert.deepEqual(await runtime.collect({ sessionId: 'upgrade-session', visible: [] }), [])
     assert.throws(() => runtime.registerSource({ sourceId: 'old', plugin: 'test', revision: 1,
       rules: [old.candidates[0].rule] }), /reminder\/v4/)
@@ -236,6 +528,8 @@ test('pre-v4 persisted candidates retire before Host startup and HTTP routes sur
       assert.ok(Array.isArray((await response.json())[collection]))
     }
     await owned.close(ctx)
+    assert.deepEqual(JSON.parse(await readFile(resolve(directory, 'upgrade-session.json'), 'utf8')).record, old,
+      'restarting and using native rules never depends on rewriting the obsolete candidate cache')
   }
 })
 
@@ -270,6 +564,51 @@ test('a deny rule stops its own tool through the real registry and leaves other 
   assert.match(textOf('allowed-call'), /allow_probe body ran/)
 })
 
+registerDenialLifetimeHostCases({ async open(t, ruleTimeoutMs) {
+  const owned = await fixture(t, false, {}, {}, { reminders: { maxIdle: 1, ruleTimeoutMs, roundTimeoutMs: 5000 } })
+  const ctx = await owned.open()
+  return { ctx, runtime: ctx.get('reminderRules'), async turn(calls) {
+    ctx.llm.registerAdapter(['care-test'], new CompletionAdapter([
+      ...calls.map(call => ({ blocks: [{ type: 'tool-call', ...call, arguments: '{}' }] })),
+      { blocks: [{ type: 'text', text: 'Handled lifetime probe.' }] },
+    ]))
+    const agent = await ctx.agentLoop.create('denial-lifetime', { provider: 'care-test', model: 'care-test' })
+    await completionTurn(ctx, agent)
+    return agent.session.snapshotEvents()
+  } }
+} })
+
+registerShutdownHostCases({ async open(t) {
+  const owned = await fixture(t, false, {}, {}, { reminders: { maxIdle: 1, storageTimeoutMs: 20, ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
+  const ctx = await owned.open(), options = { provider: 'care-test', model: 'care-test' }
+  const agent = (await ctx.agents.create({ sessionId: 'host-drain', agentOptions: options })).agent
+  const runtime = ctx.get('reminderRules')
+  assert.ok(runtime, 'the real reminder Host must be active')
+  const owner = [...ctx.loader.entries()].find(entry => entry.options.name === 'dsh-context-care/requests')
+  assert.ok(owner?.fiber, 'the real request plugin must own the reminder runtime')
+  let sideWrites = 0
+  ctx.on('domain/changed', change => { if (change.domain === 'context_care_reminders') sideWrites++ })
+  return { root: owned.root, runtime, sessionId: String(agent.id),
+    pending: () => agent.inbox.nextStep.filter(message => message.source.kind === 'plugin:dsh-context-care:reminder').length,
+    events: () => agent.session.snapshotEvents(), sideWrites: () => sideWrites,
+    candidateStoreOpened: () => ctx.storageDomain.get('context_care_reminders') !== undefined,
+    unload: scope => scope === 'host' ? owned.close(ctx) : owner.fiber.dispose(),
+    async replay(source) {
+      // Read after teardown: Host cancellation is a native fact and must survive replay.
+      const seed = { events: agent.session.snapshotEvents(), inheritedEventCount: agent.session.inheritedEventCount,
+        meta: { isSeeded: agent.session.header.isSeeded } }
+      const reopened = await fixture(t, false), cold = await reopened.open()
+      cold.effect(() => cold.get('reminderRules').registerSource(source).dispose)
+      const resumed = (await cold.agents.create({ sessionId: String(agent.id), seed: seed.events, meta: seed.meta,
+        inheritedEventCount: seed.inheritedEventCount, agentOptions: options })).agent
+      cold.llm.registerAdapter(['care-test'], new CompletionAdapter([{ blocks: [{ type: 'text', text: 'Resume native handoff.' }] }]))
+      await completionTurn(cold, resumed); await cold.get('reminderRules').settle(String(resumed.id))
+      assert.equal(cold.storageDomain.get('context_care_reminders'), undefined)
+      return resumed.session.snapshotEvents().filter(event => event.type === 'user/message'
+        && event.data.source.kind === 'plugin:dsh-context-care:reminder').map(event => event.data.content[0].text)
+    } }
+} })
+
 registerRecoveryHostCases({ async exercise(t, scenario) {
   const owned = await fixture(t, false, {}, {}, { reminders: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
   let ctx = await owned.open()
@@ -277,22 +616,33 @@ registerRecoveryHostCases({ async exercise(t, scenario) {
     format: 'reminder/v4', id: 'notice', on: 'tool.succeeded', text: 'RECOVERED_NOTICE',
     when: { tool: 'probe' }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
   }] }
-  ctx.sessions.create('recovery-session')
+  const options = { provider: 'care-test', model: 'care-test' }
+  let agent = (await ctx.agents.create({ sessionId: 'recovery-session', agentOptions: options })).agent
   let service = ctx.get('reminderRules'), handle = service.registerSource(source)
-  await service.submit({ sessionId: 'recovery-session', callId: 'probe', rootCallId: 'probe', name: 'probe', arguments: {} })
-  assert.equal(service.snapshot('recovery-session').candidates.length, 1)
+  await service.submit({ sessionId: String(agent.id), callId: 'probe', rootCallId: 'probe', name: 'probe', arguments: {} })
+  assert.equal(agent.inbox.nextStep.length, 1, 'the unanchored match has a real native inbox receipt')
+  const seed = { events: agent.session.snapshotEvents(), inheritedEventCount: agent.session.inheritedEventCount,
+    meta: { isSeeded: agent.session.header.isSeeded } }
+  assert.ok(seed.events.some(event => event.type === 'agent/inbox/spliced' && event.data.inserted.length === 1))
+  assert.equal(ctx.storageDomain.get('context_care_reminders'), undefined)
   if (scenario.restart) {
     await owned.close(ctx)
     ctx = await owned.open(); service = ctx.get('reminderRules')
-    ctx.sessions.create('recovery-session')
     handle = service.registerSource({ ...source, revision: 2,
       rules: scenario.changed ? [{ ...source.rules[0], text: 'CHANGED_NOTICE' }] : source.rules })
+    agent = (await ctx.agents.create({ sessionId: 'recovery-session', seed: seed.events, meta: seed.meta,
+      inheritedEventCount: seed.inheritedEventCount, agentOptions: options })).agent
+    // Observe the accepted frozen message before replacing its registration.
+    await service.queuePending({ sessionId: String(agent.id), visible: agent.session.deriveMessages(), accepted: [...agent.inbox.nextStep] })
   }
   if (scenario.replace) {
     handle.replace({ ...source, revision: 3, rules: [{ ...source.rules[0], text: 'TEMPORARY_NOTICE' }] })
     handle.replace({ ...source, revision: 4 })
   }
-  const messages = await service.collect({ sessionId: 'recovery-session', visible: [] })
+  ctx.llm.registerAdapter(['care-test'], new CompletionAdapter([{ blocks: [{ type: 'text', text: 'Continue after recovery.' }] }]))
+  await completionTurn(ctx, agent); await service.settle(String(agent.id))
+  const messages = agent.session.snapshotEvents().filter(event => event.type === 'user/message'
+    && event.data.source.kind === 'plugin:dsh-context-care:reminder').map(event => event.data)
   return { notices: messages.length, text: messages[0]?.content[0]?.text }
 } })
 
@@ -351,81 +701,119 @@ test('shared reminder quota limits real concurrent sessions and survives Host re
     event.type === 'user/message' && event.data.source?.kind === 'plugin:dsh-context-care:reminder'))
   assert.equal(notices.length, 2)
   assert.equal(adapter.requests.filter(request => JSON.stringify(request.messages).includes('SHARED_LIFETIME_NOTICE')).length, 2)
-  const book = ctx.storageDomain.get('context_care_reminder_claims').table('claims').get('global')
-  assert.equal(book.buckets[0].claims.length, 2)
+  assert.equal(new Set(notices.map(event => event.data.source.reminder.shared.key)).size, 1)
+  assert.equal(ctx.storageDomain.get('context_care_reminder_claims'), undefined)
+  const logPath = resolve(owned.root, 'shared-session-replay.json')
+  await writeFile(logPath, JSON.stringify(agents.map(agent => ({ header: agent.session.header,
+    inheritedEventCount: agent.session.inheritedEventCount, events: agent.session.snapshotEvents() }))))
+  const saved = JSON.parse(await readFile(logPath, 'utf8'))
   await owned.close(ctx)
 
-  const resumed = await owned.open()
+  // A different storage root has neither the former quota file nor reminder state.
+  const restoredRoot = await fixture(t, false)
+  const resumed = await restoredRoot.open()
   resumed.effect(() => resumed.get('reminderRules').registerSource({ ...source, revision: 2,
     rules: [{ ...source.rules[0], text: 'EDITED_SHARED_NOTICE' }] }).dispose)
   const resumedAdapter = new RecordingAdapter([{ blocks: [{ type: 'text', text: 'Still done.' }] }])
   resumed.llm.registerAdapter(['care-test'], resumedAdapter)
+  await resumed.loader.create({ name: '@deepseek-ai/dsh-session-persistence-jsonl',
+    config: { root: resolve(restoredRoot.root, 'session-logs'), compression: 'none' } })
+  await resumed.loader.await()
+  for (const entry of resumed.loader.entries()) if (entry.options.name === '@deepseek-ai/dsh-session-persistence-jsonl') await entry.fiber.await()
+  for (const session of saved) {
+    const handle = await resumed.sessionPersistence.create(session.header, { inheritedEventCount: session.inheritedEventCount })
+    try { await handle.append(session.events); await handle.flush() }
+    finally { await handle.close() }
+  }
+  assert.equal(resumed.sessions.list().length, 0, 'quota contributors remain dormant, not live Agents')
+  assert.equal((await resumed.sessionQuery.listSessions()).filter(session => session.persisted && !session.live).length, 4)
   const newcomer = await resumed.agentLoop.create('quota-newcomer', { provider: 'care-test', model: 'care-test' })
   await completionTurn(resumed, newcomer)
   assert.doesNotMatch(JSON.stringify(resumedAdapter.requests[0].messages), /EDITED_SHARED_NOTICE/)
-  assert.equal(resumed.storageDomain.get('context_care_reminder_claims').table('claims').get('global').buckets[0].claims.length, 2)
+  assert.ok(saved.every(({ header }) => !resumed.sessions.get(header.id)), 'quota replay does not activate dormant Sessions')
+  assert.equal(resumed.storageDomain.get('context_care_reminder_claims'), undefined)
+  assert.equal((await readdir(restoredRoot.root)).includes('context_care_reminder_claims'), false)
 })
 
-test('shared reminder reservations compensate failed session saves and retry failed rollback release using real storage', async t => {
-  const owned = await fixture(t, false)
+test('shared reminder cache restores accepted inbox reservations without calling them consumed', async t => {
+  const owned = await fixture(t, false, {}, {}, { reminders: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
   const ctx = await owned.open()
-  const { createReminderRuntime } = await pluginModule('reminder-runtime/index.js')
-  const table = ctx.storageDomain.get('context_care_reminder_claims').table('claims')
-  const sessions = ctx.storageDomain.get('context_care_reminders').table('sessions')
-  let failSession = false, failClaim = false
-  const runtime = createReminderRuntime({ execute: asBatch(async () => ({ ok: true })),
-    save: (id, state) => { if (failSession) throw new Error('session-disk'); return sessions.put(id, state) },
-    updateClaims: change => { if (failClaim) throw new Error('claim-disk'); return table.update('global', change) } })
-  t.after(() => runtime.close())
-  runtime.registerSource({ sourceId: 'fault-quota', plugin: 'test', revision: 1, rules: [{
-    format: 'reminder/v4', id: 'one', on: 'tool.succeeded', text: 'One shared notice', when: { tool: 'read' },
-    effect: { kind: 'remind', deliver: { model: { once: 'surface', shared: { reset: 'lifetime', lifetime: 'one', limit: 1 } } } },
-  }] })
-  for (const sessionId of ['a', 'b']) await runtime.submit({ sessionId, callId: sessionId, rootCallId: sessionId, name: 'read', arguments: {} })
-  failSession = true
-  await assert.rejects(runtime.collect({ sessionId: 'a', visible: [] }), /session-disk/)
-  assert.equal(table.get('global').buckets.length, 0)
-  failSession = false
-  const messages = await runtime.collect({ sessionId: 'a', visible: [] })
+  const { createSessionClaims } = await import('../lib/reminder-runtime/session-claims.js')
+  const { changeClaims } = await import('../lib/reminder-runtime/claims.js')
+  const runtime = ctx.get('reminderRules')
+  ctx.effect(() => runtime.registerSource({ sourceId: 'accepted-quota', plugin: 'test', revision: 1, rules: [{
+    format: 'reminder/v4', id: 'notice', on: 'request.before', text: 'ACCEPTED_SHARED_NOTICE', when: {},
+    effect: { kind: 'remind', deliver: { model: { once: 'surface',
+      shared: { reset: 'lifetime', lifetime: 'pending', limit: 1 } } } },
+  }] }).dispose)
+  ctx.llm.registerAdapter(['care-test'], new CompletionAdapter([]))
+  const agent = await ctx.agentLoop.create('accepted-quota-session', { provider: 'care-test', model: 'care-test' })
+  await runtime.prepareRequest({ sessionId: agent.id, events: [], visible: [] })
+  const messages = await runtime.collect({ sessionId: agent.id, visible: [] })
   assert.equal(messages.length, 1)
-  assert.deepEqual(await runtime.collect({ sessionId: 'b', visible: [] }), [])
-  failClaim = true
-  await assert.rejects(runtime.rollback('a', messages), /claim-disk/)
-  assert.equal(sessions.get('a').candidates[0].status, 'pending')
-  assert.equal(sessions.get('a').candidates[0].messageId, messages[0].id)
-  assert.deepEqual(await runtime.filterMessages('a', [], messages), [])
-  failClaim = false
-  await runtime.rollback('a', messages)
-  const second = await runtime.collect({ sessionId: 'b', visible: [] })
-  assert.equal(second.length, 1)
-  await runtime.collect({ sessionId: 'b', visible: second })
-  await runtime.rollback('b', second)
-  assert.equal(table.get('global').buckets[0].claims[0].status, 'consumed')
-  assert.deepEqual(await runtime.collect({ sessionId: 'a', visible: [] }), [])
+  agent.inject(messages[0])
+  assert.equal(agent.session.snapshotEvents().filter(event => event.type === 'user/message').length, 0)
+  const cold = createSessionClaims(ctx)
+  ctx.on('session/event', (session, event) => cold.observe(session, event))
+  ctx.effect(() => () => cold.close())
+  const restored = await cold.update(book => book)
+  assert.equal(restored.buckets[0].claims[0].messageId, messages[0].id)
+  assert.equal(restored.buckets[0].claims[0].status, 'reserved')
+  const transition = operation => cold.update(book => changeClaims(book, { at: Date.now(), maxBytes: 1024 * 1024, ...operation }))
+  await assert.rejects(transition({ consume: [messages[0].id] }), /reminder-shared-delivery-not-committed/)
+  const competing = { key: messages[0].source.reminder.shared.key, limit: 1,
+    sessionId: 'competitor', messageId: 'competitor-message', candidateId: 'competitor-candidate' }
+  assert.equal((await transition({ reserve: [competing] })).buckets[0].claims.length, 1)
+  assert.equal((await cold.update(book => book)).buckets[0].claims[0].messageId, messages[0].id)
+  await agent.cancel({ kind: 'hook', reason: 'discard the pending fixture reminder' })
+  assert.ok(agent.session.snapshotEvents().some(event => event.type === 'agent/inbox/spliced' && event.data.outcome === 'canceled'))
+  assert.deepEqual(await cold.update(book => book), { buckets: [] })
+  assert.equal((await transition({ reserve: [competing] })).buckets[0].claims[0].messageId, competing.messageId)
+  const replayed = createSessionClaims(ctx)
+  assert.deepEqual(await replayed.update(book => book), { buckets: [] },
+    'a discarded inbox item and a never-accepted local reservation leave no durable consumption')
+  await replayed.close()
+  assert.equal(ctx.storageDomain.get('context_care_reminder_claims'), undefined)
 })
 
 test('shared reminder window grants a new quota on the next night', async t => {
   const owned = await fixture(t, false)
   const ctx = await owned.open()
   const { createReminderRuntime } = await pluginModule('reminder-runtime/index.js')
-  const table = ctx.storageDomain.get('context_care_reminder_claims').table('claims')
+  const { createBoundedMatcher } = await pluginModule('bounded-matcher.js')
+  const { createSessionClaims } = await import('../lib/reminder-runtime/session-claims.js')
   let at = new Date(2026, 9, 14, 23).getTime()
-  const runtime = createReminderRuntime({ wallNow: () => at, execute: asBatch(async () => ({ ok: true })),
-    updateClaims: change => table.update('global', change) })
-  t.after(() => runtime.close())
+  const claims = createSessionClaims(ctx, () => at)
+  const matcher = createBoundedMatcher({ timeoutMs: 2000, maxIdle: 1 })
+  const runtime = createReminderRuntime({ wallNow: () => at, dispatches: true,
+    config: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 },
+    execute: (input, signal, timing) => matcher.detect(input, signal, timing),
+    updateClaims: change => claims.update(change) })
+  ctx.on('session/event', (session, event) => claims.observe(session, event))
+  ctx.on('session/created', session => claims.created(session))
+  ctx.effect(() => async () => { await runtime.close(); await claims.close(); await matcher.close() })
   runtime.registerSource({ sourceId: 'shared-night', plugin: 'test', revision: 1, rules: [{
     format: 'reminder/v4', id: 'night', on: 'request.before', text: 'Night reminder',
     when: { timeWindow: { start: '23:00', end: '06:00' } },
     effect: { kind: 'remind', deliver: { model: { once: 'window', shared: { reset: 'window', limit: 1 } } } },
   }] })
+  for (const id of ['a', 'b', 'c']) ctx.sessions.create(id)
+  await matcher.warmup()
   const prepare = sessionId => runtime.prepareRequest({ sessionId, events: [] })
   await Promise.all(['a', 'b'].map(prepare))
   const first = await Promise.all(['a', 'b'].map(sessionId => runtime.collect({ sessionId, visible: [] })))
   assert.equal(first.flat().length, 1)
+  const firstMessage = first.flat()[0], winner = first[0].length ? 'a' : 'b'
+  ctx.sessions.get(winner).append('user/message', firstMessage, { surfaceOp: 'append' })
+  await runtime.collect({ sessionId: winner, visible: [firstMessage] })
+  assert.equal((await claims.update(book => book)).buckets[0].claims[0].status, 'consumed')
   at = new Date(2026, 9, 15, 23).getTime()
   await prepare('c')
-  assert.equal((await runtime.collect({ sessionId: 'c', visible: [] })).length, 1)
-  assert.equal(table.get('global').buckets.length, 1)
+  const next = await runtime.collect({ sessionId: 'c', visible: [] })
+  assert.equal(next.length, 1)
+  assert.notEqual(next[0].source.reminder.shared.key, firstMessage.source.reminder.shared.key)
+  assert.equal((await claims.update(book => book)).buckets.length, 1)
+  assert.equal(ctx.storageDomain.get('context_care_reminder_claims'), undefined)
 })
 
 test('exported Host rows mount together, serve the journal, and remove routes and tools on unload', async t => {
@@ -453,11 +841,16 @@ test('exported Host rows mount together, serve the journal, and remove routes an
   const actionsUrl = `http://127.0.0.1:${ctx.webServer.port}/context-care/actions`
   assert.equal((await fetch(actionsUrl)).status, 400)
   assert.equal((await fetch(`${actionsUrl}?sessionId=s1&limit=999`)).status, 400)
-  for (let index = 0; index < 3; index++) await ctx.contextCareRequests.recordAction({ id: 's1', seq: index }, { action: 'prune', phase: 'completed', operationId: `s1-${index}` })
-  await ctx.contextCareRequests.recordAction({ id: 's2', seq: 0 }, { action: 'summary', phase: 'committed', compactionId: 'private-s2' })
+  const firstActionSession = ctx.sessions.create('s1'), secondActionSession = ctx.sessions.create('s2')
+  // Live diagnostics retain the latest operation per family, not an unlimited action ledger.
+  for (const [index, action] of ['prune', 'summary', 'deep-rest'].entries()) {
+    await ctx.contextCareRequests.recordAction(firstActionSession, { action, phase: 'completed', operationId: `s1-${index}` })
+  }
+  await ctx.contextCareRequests.recordAction(secondActionSession, { action: 'summary', phase: 'committed', compactionId: 'private-s2' })
   const page = await (await fetch(`${actionsUrl}?sessionId=s1&limit=2&offset=0`)).json()
   assert.equal(page.total, 3)
   assert.equal(page.actions.length, 2)
+  assert.ok(page.actions.every(action => action.journalPersisted === false))
   assert.equal(page.nextOffset, 2)
   assert.doesNotMatch(JSON.stringify(page), /private-s2/)
   const lastPage = await (await fetch(`${actionsUrl}?sessionId=s1&limit=2&offset=2`)).json()
@@ -1084,6 +1477,67 @@ test('summary uses calibrated replacement cost and retains history when the fram
   assert.equal(agent.session.snapshotEvents().at(-1).type, 'compaction/end')
 })
 
+test('native rejected summary survives empty caches and native JSONL in a fresh Host', async t => {
+  const first = await fixture(t, false)
+  const ctx = await first.open()
+  let summaryCalls = 0
+  class NonShrinking extends ScriptedAdapter {
+    async *stream() {
+      summaryCalls++
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'A larger checkpoint. '.repeat(120) } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+  }
+  ctx.llm.registerAdapter(['care-test'], new ScriptedAdapter())
+  ctx.llm.registerAdapter(['care-summary'], new NonShrinking())
+  const agent = await ctx.agentLoop.create('summary-native-reject', { provider: 'care-test', model: 'care-test' })
+  const material = agent.session.append('user/message', createUserMessage({ source: { kind: 'user' },
+    content: [{ type: 'text', text: 'Keep this verified task.' }] }), { surfaceOp: 'append' })
+  const spec = resolveConfig({ summary: { provider: 'care-summary', model: 'summary', maxTokens: 1000 }, minFreshTokens: 1 })
+  const operation = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session })
+  const proposal = { start: material.seq, end: material.seq, sourceSeqs: [material.seq], rule: 'fresh-summary', comparisons: [] }
+  const service = { config: {} }, signal = new AbortController().signal
+  const compact = createSummaryExecutor({ meter: ctx.tokenMeter, llm: ctx.llm, requests: ctx.contextCareRequests, spec })
+  const execute = createProposalExecutor(ctx.contextCareRequests, compact)
+  await assert.rejects(execute(service, proposal, agent, signal, operation, spec, 'requested'), { code: 'SUMMARY_NOT_SMALLER' })
+  assert.equal(await execute(service, proposal, agent, signal, operation, spec, 'requested'), null)
+  assert.equal(summaryCalls, 1)
+  let rerun = false
+  const reconfigured = createProposalExecutor(ctx.contextCareRequests, async () => { rerun = true; return 'summary policy changed' })
+  const changed = resolveConfig({ summary: { provider: 'care-summary', model: 'summary', maxTokens: 2000 }, minFreshTokens: 1 })
+  assert.equal(await reconfigured(service, proposal, agent, signal, operation, changed, 'requested'), 'summary policy changed')
+  assert.equal(rerun, true)
+  const log = await ctx.sessionQuery.readSession(agent.id)
+  const start = log.events.find(event => event.type === 'compaction/start')
+  const end = log.events.find(event => event.type === 'compaction/end')
+  assert.equal(start.data.contextCareSummary.format, 'context-care/summary-proposal/v1')
+  assert.equal(end.data.contextCareSummary.proposalKey, start.data.contextCareSummary.proposalKey)
+  assert.equal(end.data.contextCareSummary.failureCode, 'SUMMARY_NOT_SMALLER')
+  const seed = { header: agent.session.header, events: log.events, inheritedEventCount: log.inheritedEventCount }
+  await first.close(ctx)
+
+  const second = await fixture(t, false)
+  const cold = await second.open()
+  await cold.loader.create({ name: '@deepseek-ai/dsh-session-persistence-jsonl',
+    config: { root: resolve(second.root, 'session-logs'), compression: 'none' } })
+  await cold.loader.await()
+  for (const entry of cold.loader.entries()) if (entry.options.name === '@deepseek-ai/dsh-session-persistence-jsonl') await entry.fiber.await()
+  const handle = await cold.sessionPersistence.create(seed.header, { inheritedEventCount: seed.inheritedEventCount })
+  try { await handle.append(seed.events); await handle.flush() } finally { await handle.close() }
+  cold.llm.registerAdapter(['care-test'], new ScriptedAdapter())
+  const doc = await cold.sessionQuery.readSession(agent.id)
+  const detached = cold.sessions.prepare(agent.id, { seed: doc.events, meta: doc.session,
+    inheritedEventCount: doc.inheritedEventCount, eventState: 'detached' })
+  const after = captureInputPricing({ meter: cold.tokenMeter, llm: cold.llm, session: detached })
+  assert.equal(cold.contextCareRequests.list(agent.id).length, 0, 'no action side records are available to decide rejection')
+  const coldExecute = createProposalExecutor(cold.contextCareRequests, async () => {
+    throw new Error('a rejected proposal must not call the summary executor again')
+  })
+  assert.equal(await coldExecute(service, proposal, { session: detached }, signal, after, spec, 'requested'), null)
+  assert.equal(cold.sessions.list().length, 0)
+  assert.equal(cold.agents.list().length, 0)
+})
+
 class CompletionAdapter extends LlmAdapter {
   constructor(outputs) { super(); this.outputs = outputs }
   async resolveModel(provider, model) { return { provider, id: model, name: model, context: { contextWindow: 100000 } } }
@@ -1099,6 +1553,136 @@ class CompletionAdapter extends LlmAdapter {
     yield { type: 'finish', reason: output.reason ?? { kind: 'stop' } }
   }
 }
+
+registerCompletionReplayCases({ async open(t, outputs, seed, fork = false) {
+  const owned = await fixture(t, true, {}, { maxDeliveries: 2 })
+  const ctx = await owned.open()
+  class RecordingCompletionAdapter extends CompletionAdapter {
+    requests = []
+    async *stream(request) { this.requests.push(request); yield* super.stream() }
+  }
+  const adapter = new RecordingCompletionAdapter(outputs.map(output => ({ blocks: output.blocks,
+    ...(output.failure ? { reason: { kind: 'error', failure: output.failure } } : {}) })))
+  ctx.llm.registerAdapter(['care-test'], adapter)
+  const options = { provider: 'care-test', model: 'care-test' }
+  const agent = seed ? (await ctx.agents.create(fork
+    ? { sessionId: seed.id + '-fork', seed: buildForkSeed(seed.events, seed.events.at(-1).seq),
+      inheritedEventCount: seed.events.length, meta: { isSeeded: true, parentSession: seed.id }, agentOptions: options }
+    : { sessionId: seed.id, seed: seed.events, inheritedEventCount: seed.inheritedEventCount,
+      meta: seed.meta, agentOptions: options })).agent
+    : await ctx.agentLoop.create('native-completion-replay', options)
+  return {
+    turn: () => completionTurn(ctx, agent),
+    notices: () => ctx.contextCareCompletion.list(agent.id),
+    clear: () => ctx.contextCareCompletion.clear(),
+    requests: () => adapter.requests,
+    async seed() {
+      await ctx.sessions.flush(agent.session)
+      const log = await ctx.sessionQuery.readSession(agent.id), path = resolve(owned.root, 'completion-replay-seed.json')
+      await writeFile(path, JSON.stringify({ id: agent.id, events: log.events, inheritedEventCount: log.inheritedEventCount,
+        meta: { isSeeded: agent.session.header.isSeeded,
+          ...(agent.session.header.parentSession ? { parentSession: agent.session.header.parentSession } : {}) } }))
+      return JSON.parse(await readFile(path, 'utf8'))
+    },
+  }
+} })
+
+registerDeliveryReplayCases({ async open(t, source, seed, fork = false, detector) {
+  const owned = await fixture(t, false, {}, {}, { reminders: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
+  const ctx = await owned.open(), runtime = ctx.get('reminderRules')
+  if (detector) ctx.effect(() => runtime.registerDetector(detector))
+  ctx.effect(() => runtime.registerSource(source).dispose)
+  const adapter = new CompletionAdapter(Array.from({ length: 20 }, () => ({
+    blocks: [{ type: 'text', text: 'Continue after the recorded delivery.' }],
+  })))
+  ctx.llm.registerAdapter(['care-test'], adapter)
+  const options = { provider: 'care-test', model: 'care-test' }
+  const agent = seed ? (await ctx.agents.create(fork
+    ? { sessionId: seed.id + '-fork', seed: buildForkSeed(seed.events, seed.events.at(-1).seq),
+      inheritedEventCount: seed.events.length, meta: { isSeeded: true, parentSession: seed.id }, agentOptions: options }
+    : { sessionId: seed.id, seed: seed.events, inheritedEventCount: seed.inheritedEventCount,
+      meta: seed.meta, agentOptions: options })).agent
+    : await ctx.agentLoop.create('delivery-replay', options)
+  const log = () => ctx.sessionQuery.readSession(agent.id)
+  // Observe the real methods without replacing their behavior.
+  const reads = t.mock.method(ctx.sessionQuery, 'readSession')
+  let stateWrites = 0
+  ctx.on('domain/changed', change => { if (change.domain === 'context_care_reminders') stateWrites++ })
+  const clock = createSessionDeliveries(ctx)
+  ctx.on('session/event', (session, event) => clock.observe(session, event))
+  ctx.effect(() => () => clock.close())
+  return {
+    async collectOnly() { return (await runtime.collect({ sessionId: String(agent.id), visible: agent.session.deriveMessages() })).length },
+    async reserveElsewhere() {
+      const competitor = (await ctx.agents.create({ sessionId: String(agent.id) + '-competitor', agentOptions: options })).agent
+      await runtime.submit({ sessionId: String(competitor.id), callId: 'competing', rootCallId: 'competing',
+        name: 'replay_probe', arguments: { marker: 'competitor' } })
+      const accepted = competitor.inbox.claim('next-step', 0)
+      const messages = await runtime.collect({ sessionId: String(competitor.id), visible: competitor.session.deriveMessages(), accepted })
+      assert.equal(messages.length, 1)
+      competitor.inject(messages[0])
+      return async () => { assert.equal(competitor.inbox.remove(messages[0].id), true) }
+    },
+    cancelQueued() { agent.cancel({ kind: 'hook', reason: 'Cancel the queued test input.' }) },
+    humanTurn: () => clock.humanTurn(String(agent.id)),
+    historyReadCount: () => reads.mock.callCount(),
+    stateWriteCount: () => stateWrites,
+    async turn(human = true, count = 1) {
+      for (let index = 0; index < count; index++) {
+        const message = createUserMessage({ content: [{ type: 'text', text: 'Continue the replay case.' }],
+          source: human ? { kind: 'user' } : { kind: 'plugin:dsh-context-care:test-continuation' } })
+        if (index < count - 1) agent.inject(message)
+        else agent.followup(message)
+      }
+      await agent.whenIdle(); await runtime.settle(String(agent.id))
+    },
+    async trigger(id, marker) {
+      await runtime.submit({ sessionId: String(agent.id), callId: id, rootCallId: id,
+        name: 'replay_probe', arguments: { marker } })
+    },
+    async queueReminder() {
+      await runtime.settle(String(agent.id))
+      assert.equal(agent.inbox.nextStep.filter(message => message.source.kind === 'plugin:dsh-context-care:reminder').length, 1,
+        'the completed unlogged match already belongs to the real inbox')
+    },
+    async seed() {
+      const path = resolve(owned.root, 'delivery-seed.json')
+      const history = await log()
+      await writeFile(path, JSON.stringify({ id: agent.id, events: history.events,
+        inheritedEventCount: history.inheritedEventCount, meta: { isSeeded: agent.session.header.isSeeded,
+          ...(agent.session.header.parentSession ? { parentSession: agent.session.header.parentSession } : {}) } }))
+      return JSON.parse(await readFile(path, 'utf8'))
+    },
+    async notices() {
+      return (await log()).events.filter(event => event.type === 'user/message'
+        && event.data.source.kind === 'plugin:dsh-context-care:reminder').map(event =>
+        event.data.content.filter(block => block.type === 'text').map(block => block.text).join(''))
+    },
+    async hideNotice() {
+      const original = (await log()).events.find(event => event.type === 'user/message'
+        && event.data.source.kind === 'plugin:dsh-context-care:reminder')
+      assert.ok(original)
+      agent.session.append('user/message', createUserMessage({ source: { kind: 'plugin:dsh-context-care:test-replacement' },
+        content: [{ type: 'text', text: 'The earlier reminder has been compacted from the surface.' }] }),
+      { surfaceOp: { op: 'replace', startSeq: original.seq, endSeq: original.seq }, sourceEventSeqs: [original.seq] })
+      assert.equal(agent.session.deriveMessages().some(message => message.id === original.data.id), false)
+    },
+    async storedDerived() {
+      assert.equal((await readdir(owned.root)).includes('context_care_reminders'), false, 'production never opens the retired candidate domain')
+      return { windows: 0, stickies: 0 }
+    },
+    activeStickies: () => runtime.snapshot(String(agent.id)).stickies.length,
+    async setModelEnabled(enabled) {
+      const controls = ctx.contextCareControls
+      for (const rule of source.rules) await controls.patch(agent.id, { revision: controls.revision(agent.id),
+        sourceId: source.sourceId, ruleId: rule.id, actionId: 'model', enabled })
+    },
+    async snooze() {
+      adapter.outputs.unshift({ blocks: [{ type: 'tool-call', id: 'real-snooze', name: 'reminder_snooze', arguments: '{}' }] })
+      await completionTurn(ctx, agent); await runtime.settle(String(agent.id))
+    },
+  }
+} })
 
 registerScopeHostCases({ async exercise(t, scenario) {
   const owned = await fixture(t, false, {}, {}, { reminders: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
@@ -1129,8 +1713,9 @@ registerScopeHostCases({ async exercise(t, scenario) {
     agentPreset: agent.session.header.agentPreset === 'alpha' ? 'beta' : 'alpha',
     callId: `scope:${agent.id}`, rootCallId: `scope:${agent.id}`, name: 'scope_probe', arguments: {},
   })))
+  // A matched candidate is pending until it is handed to the native inbox, then reserved.
   const pending = new Map(agents.map(agent => [agent.id, service.snapshot(agent.id).candidates
-    .filter(candidate => candidate.status === 'pending').length]))
+    .filter(candidate => candidate.status === 'pending' || candidate.status === 'reserved').length]))
   await Promise.all(agents.map(agent => completionTurn(ctx, agent)))
   const recipients = await Promise.all(agents.map(async agent => {
     assert.equal(ctx.sessions.get(agent.id), agent.session)
@@ -1143,8 +1728,9 @@ registerScopeHostCases({ async exercise(t, scenario) {
         && event.data.source?.kind === 'plugin:dsh-context-care:reminder').length,
       requestHasNotice: request.includes('SCOPED_HEADER_NOTICE') }
   }))
-  const claims = ctx.storageDomain.get('context_care_reminder_claims').table('claims').get('global').buckets
-    .reduce((total, bucket) => total + bucket.claims.length, 0)
+  const claims = agents.reduce((total, agent) => total + agent.session.snapshotEvents().filter(event =>
+    event.type === 'user/message' && event.data.source?.kind === 'plugin:dsh-context-care:reminder'
+    && event.data.source.reminder.shared !== null).length, 0)
   await owned.close(ctx)
   return { recipients, claims }
 } })
@@ -1163,15 +1749,187 @@ registerReminderHostCases({ async create(t, stream, maxInterrupts = 1) {
     pending: () => runtime.snapshot(agent.session.id).candidates.filter(item => item.status === 'pending').length,
     notices: () => agent.session.snapshotEvents().filter(event => event.type === 'user/message'
       && event.data.source?.kind === 'plugin:dsh-context-care:reminder').length,
-    claims: () => ctx.storageDomain.get('context_care_reminder_claims').table('claims').get('global').buckets
-      .reduce((total, bucket) => total + bucket.claims.length, 0),
+    claims: () => agent.session.snapshotEvents().filter(event => event.type === 'user/message'
+      && event.data.source?.kind === 'plugin:dsh-context-care:reminder' && event.data.source.reminder.shared !== null).length,
   }
 } })
+
+for (const outcome of ['completed', 'failed', 'cancelled', 'legacy', 'partial']) test(`native output replay reproduces live ${outcome} samples without side state`, async t => {
+  const config = { maxStreamChars: 16, maxStreamBlocks: 4, streamEveryChars: 4, streamFlushMs: 5 }
+  const owned = await fixture(t, false, {}, {}, { reminders: { ...config, ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
+  const ctx = await owned.open(), runtime = ctx.get('reminderRules')
+  const sideWrites = []
+  ctx.on('domain/changed', change => { if (change.domain === 'context_care_reminders') sideWrites.push(change) })
+  const live = /** @type {unknown[]} */ ([])
+  ctx.effect(() => {
+    const submit = runtime.submit
+    runtime.submit = (event, signal) => {
+      if (event !== null && typeof event === 'object' && 'type' in event && event.type === 'assistant.output') live.push(structuredClone(event))
+      return submit(event, signal)
+    }
+    return () => { runtime.submit = submit }
+  })
+  if (outcome !== 'legacy') ctx.effect(() => runtime.registerSource({ sourceId: 'native-output-replay', plugin: 'test', revision: 1, rules: [{
+    format: 'reminder/v4', id: 'observe', on: 'assistant.output', text: 'unused',
+    when: { blockTypes: ['text', 'reasoning'], pattern: { kind: 'literal', text: 'THIS_PATTERN_DOES_NOT_APPEAR' } },
+    effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
+  }] }).dispose)
+  const tracePath = resolve(owned.root, 'output-judges.jsonl')
+  const matches = { sourceId: 'native-output-matches', plugin: 'test', revision: 1,
+    rules: ['prefix', 'TEXT', 'prefix', 'TEXT'].map((text, index) => ({
+      format: 'reminder/v4', id: `r${index}`, on: 'assistant.output', text: `OUTPUT_${index}`,
+      ...(index >= 2 ? { exclusiveGroup: 'same-output-choice' } : {}),
+      when: { blockTypes: ['text'], pattern: outcome === 'partial' && index === 2
+        ? { kind: 'regex', regex: '^pref$' } : { kind: 'literal', text } },
+      judge: { ref: 'native-output', revision: 1, params: { tracePath, label: String(index) } },
+      effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
+    })) }
+  function registerOutputRules(scope) {
+    const rules = scope.get('reminderRules')
+    scope.effect(() => rules.registerDetector({ ref: 'native-output', revision: 1,
+      module: new URL('./fixtures/reminder-native-output.ts', import.meta.url).href }))
+    scope.effect(() => rules.registerSource(matches).dispose)
+  }
+  if (outcome !== 'legacy') registerOutputRules(ctx)
+  else {
+    // This actual observer uses DSH's lifecycle-local attempt id, the identity
+    // emitted by the previous provider. No committed seed event is rewritten.
+    const previous = createOutputStream({ config, sessionId: subject => String(subject.session.id),
+      submit: event => runtime.submit(event), afterSubmit: () => {}, report: error => { throw error }, enabled: () => true })
+    let installed = false
+    ctx.on('agent/assistant-stream', ({ agent: subject, frame }) => {
+      if (frame.type === 'start' && !installed) { registerOutputRules(ctx); installed = true }
+      if (frame.type === 'end') {
+        if (frame.outcome.kind === 'abandoned') return previous.abandon(subject, frame)
+        const terminal = subject.session.eventAt(frame.outcome.seq)
+        if (!terminal) throw new Error('legacy-output-terminal-missing')
+        previous.observe(subject, { ...frame, time: terminal.time })
+      } else previous.observe(subject, frame)
+    })
+    ctx.effect(() => () => previous.close())
+  }
+  let agent, calls = 0, cancellation = Promise.resolve()
+  class NativeOutputAdapter extends CompletionAdapter {
+    async *stream() {
+      if (calls++ > 0) {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: 'next' }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: 'next' } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      yield { type: 'block-start', index: 0, blockType: 'reasoning' }
+      yield { type: 'reasoning-delta', index: 0, text: 'ab' }
+      await new Promise(resolve => setTimeout(resolve, 15))
+      yield { type: 'reasoning-delta', index: 0, text: 'cd' }
+      yield { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'abcd' } }
+      yield { type: 'text-delta', index: 1, text: 'prefixTEXT' }
+      await new Promise(resolve => setTimeout(resolve, 15))
+      if (outcome === 'failed') throw new Error('native-output-attempt')
+      if (outcome === 'cancelled') { cancellation = agent.cancel({ kind: 'hook', reason: 'native-output-replay' }); return }
+      yield { type: 'block-end', index: 1, block: { type: 'text', text: 'prefixTEXT' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+  }
+  ctx.llm.registerAdapter(['care-test'], new NativeOutputAdapter([]))
+  agent = await ctx.agentLoop.create('native-output-replay', { provider: 'care-test', model: 'care-test' })
+  await completionTurn(ctx, agent)
+  await cancellation
+  await runtime.settle(String(agent.id))
+  const seed = await ctx.sessionQuery.readSession(agent.id), header = agent.session.header
+  assert.ok(live.length > 3, 'real character and timer prefixes were actually observed')
+  assert.equal(seed.events.some(event => event.type === 'assistant/attempt'), outcome === 'failed')
+  assert.equal(seed.events.some(event => event.type === 'assistant/message' && event.data.interrupted), outcome === 'cancelled')
+  await runtime.settle(String(agent.id))
+  const liveEvaluations = (await readFile(tracePath, 'utf8')).trim().split('\n').map(line => NativeOutputObservation.parse(JSON.parse(line)))
+  assert.ok(liveEvaluations.some(row => row.event.output.text.includes('prefix') && row.event.native === undefined),
+    'the live matching prefix ran in a real matcher Worker')
+  assert.equal(liveEvaluations.some(row => row.label === '3'), outcome === 'partial',
+    'a later prefix has its own exclusive choice when the earlier winner no longer matches')
+  const initialLive = structuredClone(live)
+  assert.equal(ctx.storageDomain.get('context_care_reminders'), undefined,
+    'production opens no candidate domain; only native stream and inbox facts survive restart')
+  assert.equal(sideWrites.length, 0, 'output detection does not write a duplicate JSON candidate record')
+  const expected = outcome === 'partial' ? ['OUTPUT_2', 'OUTPUT_0', 'OUTPUT_1', 'OUTPUT_3'] : ['OUTPUT_0', 'OUTPUT_2', 'OUTPUT_1']
+  if (outcome === 'partial') {
+    const messages = await runtime.collect({ sessionId: String(agent.session.id), visible: agent.session.deriveMessages() })
+    assert.deepEqual(messages.map(message => message.content[0].text), expected)
+    // Commit one actual model-input message, leaving the later choice unhanded.
+    // The cold fixture imports this real native record, never an edited seed.
+    agent.session.append('user/message', messages[0], { surfaceOp: 'append' })
+  } else await completionTurn(ctx, agent, 'Deliver the pending output notices at this natural request.')
+  await runtime.settle(String(agent.id))
+  const handedSeed = await ctx.sessionQuery.readSession(agent.id)
+  assert.deepEqual(handedSeed.events.filter(event => event.type === 'user/message'
+    && event.data.source.kind === 'plugin:dsh-context-care:reminder').map(event => event.data.content[0].text), outcome === 'partial' ? ['OUTPUT_2'] : expected)
+  assert.equal(sideWrites.length, 0, 'natural delivery also advances only native Session facts')
+  await owned.close(ctx)
+  async function openNative(snapshot) {
+    const next = await fixture(t, false, {}, {}, { reminders: { ...config, ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
+    const cold = await next.open()
+    await cold.loader.create({ name: '@deepseek-ai/dsh-session-persistence-jsonl',
+      config: { root: resolve(next.root, 'session-logs'), compression: 'none' } })
+    await cold.loader.await()
+    for (const entry of cold.loader.entries()) if (entry.options.name === '@deepseek-ai/dsh-session-persistence-jsonl') await entry.fiber.await()
+    const handle = await cold.sessionPersistence.create(header, { inheritedEventCount: snapshot.inheritedEventCount })
+    try { await handle.append(snapshot.events); await handle.flush() } finally { await handle.close() }
+    const doc = await cold.sessionQuery.readSession(header.id)
+    const detached = cold.sessions.prepare(header.id, { seed: doc.events, meta: doc.session,
+      inheritedEventCount: doc.inheritedEventCount, eventState: 'detached' })
+    registerOutputRules(cold)
+    const query = cold.sessionQuery, readSession = query.readSession.bind(query)
+    let reads = 0
+    query.readSession = (...args) => { reads++; return readSession(...args) }
+    return { cold, doc, detached, readCount: () => reads }
+  }
+  const { cold, doc, detached, readCount } = await openNative(seed)
+  const replayed = []
+  for (const event of doc.events) if (event.type === 'assistant/message' || event.type === 'assistant/attempt') {
+    replayed.push(...replayNativeOutput(config, detached, event, error => { throw error }))
+  }
+  if (outcome === 'legacy') {
+    const legacyId = initialLive[0].rootCallId, nativeId = replayed[0].rootCallId
+    assert.equal(legacyId, `${header.id}:1`, 'the previous observer uses the actual DSH lifecycle identity')
+    assert.match(nativeId, /^session:.*:output:\d+$/)
+    assert.deepEqual(replayed, initialLive.map(event => ({ ...event,
+      callId: event.callId.replace(legacyId, nativeId), rootCallId: nativeId,
+      output: { ...event.output, attemptId: nativeId },
+      textSamples: event.textSamples.map(sample => ({ ...sample, sampleId: sample.sampleId.replace(legacyId, nativeId) })),
+    })), 'only the explicitly migrated attempt identity differs; all recorded evidence remains equal')
+  } else assert.deepEqual(replayed, initialLive, 'identity, timestamps, prefix/complete phases and full-output evidence all come from the same native stream')
+  const input = { sessionId: String(header.id), visible: [] }
+  const recovered = await cold.get('reminderRules').collect(input)
+  assert.deepEqual(recovered.map(message => message.content[0].text), expected, 'a fresh Host reconstructs unhanded matches and the same ordered exclusive choices using actual Workers')
+  assert.ok(readCount() <= 8, `ordered output recovery shares native history and recipient snapshots across samples (${readCount()} reads)`)
+  const recoveredTrace = (await readFile(tracePath, 'utf8')).trim().split('\n').map(line => NativeOutputObservation.parse(JSON.parse(line)))
+  assert.ok(recoveredTrace.slice(liveEvaluations.length).every(row => row.event.native?.type === 'assistant-output'))
+  const traceCount = recoveredTrace.length
+  assert.deepEqual(await cold.get('reminderRules').collect(input), [])
+  assert.equal((await readFile(tracePath, 'utf8')).trim().split('\n').length, traceCount, 'repeat collection does not repeat output judges')
+  assert.equal(cold.sessions.list().length, 0)
+  assert.equal(cold.agents.list().length, 0)
+  const { cold: delivered, readCount: handedReads } = await openNative(handedSeed)
+  assert.deepEqual((await delivered.get('reminderRules').collect(input)).map(message => message.content[0].text),
+    outcome === 'partial' ? ['OUTPUT_0', 'OUTPUT_1', 'OUTPUT_3'] : [], 'native handoffs suppress only recorded deliveries and preserve later unhanded exclusive winners')
+  assert.ok(handedReads() <= (outcome === 'partial' ? 8 : 4), `handed output discovery does not reread history for each prefix or rule (${handedReads()} reads)`)
+  const afterHandoff = (await readFile(tracePath, 'utf8')).trim().split('\n').map(line => NativeOutputObservation.parse(JSON.parse(line))).slice(traceCount)
+  if (outcome === 'partial') assert.ok(afterHandoff.some(row => row.label === '3'), 'the unhanded later choice is evaluated by a real Worker')
+  else assert.ok(afterHandoff.every(row => row.label === '2'), 'independent handed rules and suppressed alternatives never rerun; only an unresolved exclusive choice needs its higher-priority barrier')
+  if (outcome !== 'legacy') {
+    const choice = handedSeed.events.find(event => event.type === 'user/message'
+      && event.data.source.kind === 'plugin:dsh-context-care:reminder' && event.data.source.contextCareTrace.ruleId === 'r2')
+    assert.ok(choice)
+    assert.equal(afterHandoff.some(row => row.event.callId === choice.data.source.contextCareTrace.callId), false,
+      'the exact exclusive choice with a native handoff is never judged again')
+  }
+  assert.equal(delivered.sessions.list().length, 0)
+  assert.equal(delivered.agents.list().length, 0)
+})
 
 async function completionTurn(ctx, agent, text = 'Continue the requested task.') {
   agent.followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
   await agent.whenIdle()
-  // The emit subscriber has its own write queue; Agent idle alone is no ACK.
+  // All completion facts are native commits; flush their Session writer.
   await ctx.get('contextCareCompletion')?.flush(String(agent.session.id))
 }
 
@@ -1201,14 +1959,13 @@ test('disabled model state report retains numeric sampling and explicit status r
   assert.doesNotMatch(text, /写细交接/)
 })
 
-test('real stream persists pending before settlement, excludes reasoning and quotes, and scopes cooldown by session/source', async t => {
+test('real completion commits exclude reasoning and quotes and replay cooldown without observation side files', async t => {
   const owned = await fixture(t)
   const ctx = await owned.open()
   const changes = []
-  const off = ctx.on('domain/changed', change => {
-    if (change.domain === 'context_care_completion') changes.push(change)
+  ctx.on('domain/changed', change => {
+    if (['context_care_completion', 'context_care_completion_notices'].includes(change.domain)) changes.push(change)
   })
-  t.after(off)
   const adapter = new CompletionAdapter([
     { blocks: [{ type: 'reasoning', text: 'DONE' }, { type: 'text', text: '> completed\n```\n搞定\n```\nNot done.' }] },
     { blocks: [{ type: 'text', text: '任务完成了。' }] },
@@ -1218,25 +1975,28 @@ test('real stream persists pending before settlement, excludes reasoning and quo
   ctx.llm.registerAdapter(['care-test'], adapter)
   const first = await ctx.agentLoop.create('completion-one', { provider: 'care-test', model: 'care-test' })
   await completionTurn(ctx, first)
-  assert.equal(changes.length, 0)
+  assert.deepEqual(ctx.contextCareCompletion.list(first.id), [])
   await completionTurn(ctx, first)
-  assert.equal(changes.length, 2, 'One pending ACK followed by one settlement ACK; block-end must not duplicate deltas')
-  assert.equal(changes[0].value.pending.line, '任务完成了。')
-  assert.equal(typeof changes[0].value.pending.occurrenceId, 'string')
-  assert.equal(changes[1].value.pending, undefined)
-  assert.ok(changes[1].value.cooldownUntil > Date.now())
-  assert.equal(changes[0].key, completionStateKey(String(first.session.id), 'assistant'))
+  assert.equal(ctx.contextCareCompletion.list(first.id)[0].line, '任务完成了。')
+  assert.equal(ctx.contextCareCompletion.list(first.id)[0].status, 'pending')
   await completionTurn(ctx, first)
-  assert.equal(changes.length, 2, 'A new attempt must not evade source cooldown')
+  const saved = ctx.contextCareCompletion.list(first.id)
+  assert.equal(saved.length, 1, 'native output times preserve source cooldown across different attempts')
+  assert.equal(saved[0].status, 'dispatched')
   const second = await ctx.agentLoop.create('completion-two', { provider: 'care-test', model: 'care-test' })
   await completionTurn(ctx, second)
-  assert.equal(changes.length, 4)
-  assert.notEqual(changes[2].key, changes[0].key)
-  const saved = changes[1].value
-  await owned.close(ctx)
-  const resumed = await owned.open()
-  const table = resumed.storageDomain.get('context_care_completion').table('observations')
-  assert.deepEqual(table.get(changes[0].key), { version: 1, cooldownUntil: saved.cooldownUntil, completedOccurrenceId: saved.completedOccurrenceId })
+  assert.equal(ctx.contextCareCompletion.list(second.id).length, 1, 'another Session has its own cooldown')
+  ctx.contextCareCompletion.clear()
+  assert.deepEqual(ctx.contextCareCompletion.list(first.id), saved)
+  assert.deepEqual(changes, [], 'completion does not write a second fact store')
+  assert.equal(ctx.storageDomain.get('context_care_completion'), undefined)
+  assert.equal(ctx.storageDomain.get('context_care_completion_notices'), undefined)
+  const log = first.session.snapshotEvents()
+  const cold = await fixture(t)
+  const resumed = await cold.open()
+  const restored = (await resumed.agents.create({ sessionId: first.id, seed: log,
+    agentOptions: { provider: 'care-test', model: 'care-test' } })).agent
+  assert.deepEqual(resumed.contextCareCompletion.list(restored.id), saved, 'an independent Host only needs the actual Session log')
 })
 
 test('disabled completion notices do not consume observation cooldown, and oversized text is unavailable', async t => {
@@ -1247,8 +2007,8 @@ test('disabled completion notices do not consume observation cooldown, and overs
     ctx.llm.registerAdapter(['care-test'], new CompletionAdapter([{ blocks: [{ type: 'text', text }] }]))
     const agent = await ctx.agentLoop.create(`completion-preferences-${Object.keys(config)[0]}`, { provider: 'care-test', model: 'care-test' })
     await completionTurn(ctx, agent)
-    const state = ctx.storageDomain.get('context_care_completion').table('observations').get(completionStateKey(String(agent.session.id), 'assistant'))
-    assert.equal(state, undefined)
+    assert.equal(ctx.storageDomain.get('context_care_completion'), undefined)
+    assert.equal(ctx.storageDomain.get('context_care_completion_notices'), undefined)
     assert.equal(ctx.contextCareCompletion.list(agent.session.id).length, 0)
     assert.deepEqual(ctx.contextCareCompletion.collect(agent.session, { provider: 'care-test', model: 'care-test' }), [])
   }
@@ -1297,12 +2057,12 @@ test('complete-input calibration shrinks once and does not repeat maintenance ov
   assert.deepEqual(agent.session.snapshotEvents().filter(event => event.type === 'assistant/attempt').map(event => event.data), [])
 })
 
-test('real failed model attempt clears pending without marking successful completion', async t => {
+test('real failed model attempt creates no completion and consumes no native cooldown', async t => {
   const owned = await fixture(t)
   const ctx = await owned.open()
   const adapter = new CompletionAdapter([{ blocks: [{ type: 'text', text: 'DONE' }], reason: {
     kind: 'error', failure: { code: 'TEST_FAILURE', message: 'Original provider failure' },
-  } }])
+  } }, { blocks: [{ type: 'text', text: 'DONE' }] }])
   ctx.llm.registerAdapter(['care-test'], adapter)
   const agent = await ctx.agentLoop.create('completion-failed', { provider: 'care-test', model: 'care-test' })
   const values = []
@@ -1310,9 +2070,11 @@ test('real failed model attempt clears pending without marking successful comple
   t.after(off)
   await completionTurn(ctx, agent)
   assert.ok(agent.session.snapshotEvents().some(event => event.type === 'assistant/attempt'))
-  assert.equal(values.length, 2)
-  assert.equal(values[0].pending.line, 'DONE')
-  assert.deepEqual(values[1], { version: 1, pending: undefined, cooldownUntil: 0 })
+  assert.deepEqual(ctx.contextCareCompletion.list(agent.id), [])
+  assert.deepEqual(values, [])
+  await completionTurn(ctx, agent)
+  assert.equal(ctx.contextCareCompletion.list(agent.id)[0].status, 'pending')
+  assert.equal(ctx.contextCareCompletion.list(agent.id)[0].line, 'DONE')
 })
 
 test('real first request enforces an exact route policy before adapter dispatch and preserves the local failure', async t => {
@@ -1488,9 +2250,13 @@ test('real deep rest commits one handoff, fixed shadow prices, and replayable co
   const deepActions = actions.actions.filter(action => action.action === 'deep-rest')
   assert.equal(deepActions.length, 1)
   assert.equal(deepActions[0].phase, 'completed')
-  assert.equal(deepActions[0].journalPersisted, true)
+  assert.equal(deepActions[0].journalPersisted, false, 'live prices are cache diagnostics, not a durable side audit')
   assert.ok(deepActions[0].replacements.some(item => item.newSeq === replacement.seq))
   const restored = Session.create('care-deep-replay', events, undefined, undefined, ctx.sessions.messageProjections)
+  const replayedAction = contextCareActions([], restored).actions.find(action => action.action === 'deep-rest')
+  assert.equal(replayedAction.auditStatus, 'session-only')
+  assert.equal(replayedAction.journalPersisted, false)
+  assert.ok(replayedAction.replacements.some(item => item.newSeq === replacement.seq))
   const { logRevision: restoredRevision, ...restoredInput } = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: restored }).measure()
   const { logRevision: liveRevision, ...liveInput } = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session }).measure()
   // Session.create owns an additional constructor-seed event, with no input cost.
@@ -1498,7 +2264,56 @@ test('real deep rest commits one handoff, fixed shadow prices, and replayable co
   assert.deepEqual(restoredInput, liveInput)
 })
 
-test('real request journal retains dispatch calibration facts and summary actions across Loader restart', async t => {
+test('real request cache rebuilds route and calibration from Session without request files', async t => {
+  const config = { modelScopedPrompts: [{ ruleId: 'replay-once', version: '1', provider: 'care-test', model: 'care-test',
+    trigger: 'model-switch', initialBind: true, text: 'CALIBRATION_REPLAY_NOTICE '.repeat(200) }] }
+  const owned = await fixture(t, false, config)
+  let ctx = await owned.open()
+  let agent
+  const requests = []
+  class ReplayAdapter extends LlmAdapter {
+    async resolveModel(provider, model) { return { provider, id: model, name: model, context: { contextWindow: 100000 } } }
+    async *stream(request) {
+      requests.push(request)
+      const raw = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session }).decomposeRequest(request)
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'Continue verified work.' } }
+      yield { type: 'usage', usage: { inputTokens: raw.textTokens * 2 + raw.visualTokens } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+  }
+  ctx.llm.registerAdapter(['care-test'], new ReplayAdapter())
+  const options = { provider: 'care-test', model: 'care-test' }
+  agent = await ctx.agentLoop.create('request-session-replay', options)
+  await completionTurn(ctx, agent, 'Use the actual session facts.')
+  await ctx.contextCareRequests.flush(agent.id)
+  assert.equal(requests.length, 1)
+  const initial = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session, requests: ctx.contextCareRequests }).pricingBasis
+  assert.equal(initial.textScale, 2, 'one-shot text must be included in the recovered denominator')
+  const facts = ctx.contextCareRequests.list(agent.id).filter(record => record.kind === 'request')
+    .map(({ data }) => ({ callId: data.callId, route: data.route, outcome: data.outcome, eventSeq: data.eventSeq, usage: data.usage }))
+  const logFile = resolve(owned.root, 'recorded-session.json')
+  await writeFile(logFile, JSON.stringify(agent.session.snapshotEvents()))
+  const seed = JSON.parse(await readFile(logFile, 'utf8'))
+  await owned.close(ctx)
+  const fresh = await fixture(t, false, config)
+  ctx = await fresh.open()
+  ctx.llm.registerAdapter(['care-test'], new ReplayAdapter())
+  agent = (await ctx.agents.create({ sessionId: 'request-session-replay', seed, agentOptions: options })).agent
+  const restored = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session, requests: ctx.contextCareRequests }).pricingBasis
+  assert.equal(restored.textScale, initial.textScale)
+  assert.equal(restored.sampleSeq, initial.sampleSeq)
+  assert.deepEqual(ctx.contextCareRequests.list(agent.id).filter(record => record.kind === 'request')
+    .map(({ data }) => ({ callId: data.callId, route: data.route, outcome: data.outcome, eventSeq: data.eventSeq, usage: data.usage })), facts)
+  await completionTurn(ctx, agent, 'Continue after reopening.')
+  assert.equal(requests.length, 2)
+  assert.doesNotMatch(JSON.stringify(requests[1]), /CALIBRATION_REPLAY_NOTICE/, 'a restored previous route must not fire the first-bind notice twice')
+  for (const root of [owned.root, fresh.root]) {
+    const files = await readdir(root, { recursive: true })
+    assert.equal(files.some(file => file.includes('context_care_requests')), false, 'no independent request domain is opened')
+  }
+})
+
+test('real request settlements and summary actions recover from the actual Session alone', async t => {
   const owned = await fixture(t)
   let ctx = await owned.open()
   const adapter = new OverflowAdapter()
@@ -1511,20 +2326,33 @@ test('real request journal retains dispatch calibration facts and summary action
   const conversation = records.filter(record => record.kind === 'request' && record.data.purpose === 'conversation')
   const summary = records.find(record => record.kind === 'request' && record.data.purpose === 'compaction')
   assert.equal(conversation.length, 3)
-  assert.ok(conversation.every(record => record.data.dispatched && record.data.phase === 'settled'))
+  assert.ok(conversation.every(record => record.data.phase === 'settled'))
+  assert.ok(conversation.filter(record => record.data.outcome === 'completed').every(record => record.data.dispatched),
+    'completed output establishes dispatch; an error-only attempt is not proof of provider handoff')
   assert.ok(conversation.some(record => record.data.outcome === 'failed'))
   assert.equal(summary.data.outcome, 'completed')
   assert.equal(summary.data.route.provider, 'care-test')
   assert.equal(summary.data.route.model, 'care-test')
-  assert.match(summary.data.inputHash, /^[a-f0-9]{64}$/u)
-  assert.ok(summary.data.budget.inputTokens > 0)
-  assert.equal(typeof summary.data.pricingBasis.textScale, 'number')
+  assert.equal(agent.session.eventAt(summary.data.eventSeq).type, 'compaction/summary')
+  assert.deepEqual(summary.data.usage, agent.session.eventAt(summary.data.eventSeq).data.usage)
   const action = records.find(record => record.kind === 'maintenance' && record.data.phase === 'committed')
   assert.ok(action.data.afterInput < action.data.beforeInput)
   assert.equal(agent.session.eventAt(action.data.summarySeq).type, 'compaction/summary')
+  const facts = rows => rows.filter(record => record.kind === 'request').map(({ data }) => ({
+    outcome: data.outcome, eventSeq: data.eventSeq, eventType: data.eventType, purpose: data.purpose, route: data.route, usage: data.usage }))
+  const expected = facts(records)
+  const actions = contextCareActions([], agent.session)
+  assert.ok(actions.actions.length > 0, 'the actual Session carries committed checkpoint actions')
+  assert.ok(contextCareActions(records, agent.session).actions.every(action => !action.journalPersisted),
+    'live diagnostics must not claim a separate persisted audit')
+  const seed = agent.session.snapshotEvents()
   await owned.close(ctx)
-  ctx = await owned.open()
-  assert.deepEqual(ctx.contextCareRequests.list(agent.session.id), records)
+  const fresh = await fixture(t)
+  ctx = await fresh.open()
+  const restored = (await ctx.agents.create({ sessionId: agent.id, seed,
+    agentOptions: { provider: 'care-test', model: 'care-test' } })).agent
+  assert.deepEqual(facts(ctx.contextCareRequests.list(restored.id)), expected)
+  assert.deepEqual(contextCareActions([], restored.session), actions)
 })
 
 test('exact model-switch prompts are request-only, logged, priced and absent from another summary route', async t => {
@@ -1575,7 +2403,10 @@ test('exact model-switch prompts are request-only, logged, priced and absent fro
   assert.equal(records.length, 2)
   for (const record of records) {
     assert.equal(record.data.promptDecision.segments.length, 1)
-    assert.ok(record.data.budget.inputTokens > 0)
+    const sent = [...adapter.requests, ...other.requests].find(request => hasReminder(request).some(block =>
+      record.data.promptDecision.message.content.some(expected => expected.text === block.text)))
+    assert.ok(sent, 'the logged one-shot prompt reached a real adapter')
+    assert.ok(operation.priceRequest(sent) > 0, 'price the actual request, not an independent saved budget')
     assert.equal(agent.session.eventAt(record.data.promptDecision.seq).data.contextCarePrompt.callId, record.data.callId)
   }
   const replay = Session.create('scoped-prompt-replay', agent.session.snapshotEvents(), undefined, undefined, ctx.sessions.messageProjections)
@@ -1614,7 +2445,10 @@ test('actual request calibration includes a large one-shot reminder and does not
   assert.equal(records[1].data.pricingBasis.textScale, 2)
   assert.equal(records[1].data.pricingBasis.sampleCallId, records[0].data.callId)
   assert.equal(records[1].data.budget.inputTokens, Math.ceil(records[1].data.rawInput.textTokens * 2 + records[1].data.rawInput.visualTokens))
-  assert.ok(records[0].data.rawInput.textTokens > records[1].data.rawInput.textTokens)
+  const pricing = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session })
+  const raw = adapter.requests.map(request => pricing.decomposeRequest(request))
+  assert.ok(raw[0].textTokens > raw[1].textTokens, 'the actual one-shot request is larger')
+  assert.equal(records[1].data.budget.inputTokens, Math.ceil(raw[1].textTokens * 2 + raw[1].visualTokens))
 })
 
 test('committed output feedback waits for a natural request, uses actual dispatch, and stays out of history', async t => {
@@ -1660,7 +2494,66 @@ test('committed output feedback waits for a natural request, uses actual dispatc
   assert.deepEqual(records[1].data.promptDecision.segments[0].sourceSeqs, [committed.seq])
 })
 
-test('a control edit during durable notice reservation refuses handoff and restores both delivery allowances', async t => {
+test('native output feedback cold replay ignores legacy episodes and retains unknown delivery allowance', async t => {
+  const rules = [{ ruleId: 'native-pattern', version: '1', provider: 'care-test', model: 'care-test', trigger: 'output-pattern',
+    detector: detectorFixture, text: 'OUTPUT_PATTERN_NOTICE {H} hits from {sourceModel}.' }]
+  const legacy = 'This obsolete feedback JSON must not be opened.\n'
+  async function open(outputs, seed) {
+    const owned = await fixture(t, false, { modelScopedPrompts: rules })
+    const directory = resolve(owned.root, 'context_care_output_feedback', 'episodes')
+    await mkdir(directory, { recursive: true })
+    const legacyFile = resolve(directory, 'legacy.json')
+    await writeFile(legacyFile, legacy)
+    const ctx = await owned.open()
+    assert.equal(await readFile(legacyFile, 'utf8'), legacy)
+    await ctx.loader.create({ name: '@deepseek-ai/dsh-session-persistence-jsonl',
+      config: { root: resolve(owned.root, 'session-logs'), compression: 'none' } })
+    await ctx.loader.await()
+    for (const entry of ctx.loader.entries()) if (entry.options.name === '@deepseek-ai/dsh-session-persistence-jsonl') await entry.fiber.await()
+    class NativeFeedbackAdapter extends CompletionAdapter {
+      requests = []
+      async *stream(request) { this.requests.push(request); yield* super.stream(request) }
+    }
+    const adapter = new NativeFeedbackAdapter(outputs)
+    ctx.llm.registerAdapter(['care-test'], adapter)
+    const agentOptions = { provider: 'care-test', model: 'care-test' }
+    const agent = seed ? (await ctx.agents.create({ sessionId: seed.id, seed: seed.events,
+      inheritedEventCount: seed.inheritedEventCount, meta: seed.header, agentOptions })).agent
+      : await ctx.agentLoop.create('feedback-native-cold', agentOptions)
+    return { ctx, agent, adapter, episodes: () => ctx.contextCareRequests.feedback(agent.id),
+      turn: () => completionTurn(ctx, agent),
+      async close() {
+        await ctx.sessions.flush(agent.session)
+        const log = await ctx.sessionQuery.readSession(agent.id)
+        const next = { id: agent.id, header: agent.session.header, events: log.events, inheritedEventCount: log.inheritedEventCount }
+        await owned.close(ctx)
+        assert.equal(await readFile(legacyFile, 'utf8'), legacy)
+        return next
+      } }
+  }
+  const failed = { blocks: [], reason: { kind: 'error', failure: { code: 'NATIVE_FEEDBACK_UNKNOWN', message: 'No provider response proves delivery' } } }
+  const first = await open([{ blocks: [{ type: 'text', text: '我不会做第一项。\n我不会做第二项。\n我不会做第三项。' }] }, failed])
+  await first.turn()
+  const original = structuredClone(first.episodes()[0].pending)
+  assert.equal(original.deliveries, 0)
+  await first.turn()
+  assert.equal(first.episodes()[0].pending.deliveries, 1)
+  assert.equal(first.episodes()[0].lastDelivery.status, 'delivery-unknown')
+  const second = await open([failed], await first.close())
+  assert.equal(second.episodes()[0].pending.segmentId, original.segmentId)
+  assert.equal(second.episodes()[0].pending.deliveries, 1)
+  await second.turn()
+  assert.equal(second.episodes()[0].pending.deliveries, 2)
+  const third = await open([{ blocks: [{ type: 'text', text: 'The verified work continues.' }] }], await second.close())
+  assert.equal(third.episodes()[0].pending.deliveries, 2)
+  await third.turn()
+  assert.doesNotMatch(JSON.stringify(third.adapter.requests[0].messages), /OUTPUT_PATTERN_NOTICE/)
+  assert.equal(third.episodes()[0].pending, undefined)
+  assert.equal(third.episodes()[0].lastDelivery.exhausted, true)
+  await third.close()
+})
+
+test('a control edit during notice preparation refuses handoff without logging a completion delivery', async t => {
   const owned = await fixture(t, true, { modelScopedPrompts: [{ ruleId: 'pattern', version: '1', provider: 'care-test', model: 'care-test',
     trigger: 'output-pattern', detector: detectorFixture, text: 'Review the output evidence.' }] })
   const ctx = await owned.open()
@@ -1675,8 +2568,7 @@ test('a control edit during durable notice reservation refuses handoff and resto
   assert.equal(beforeFeedback[0].pending.deliveries, 0)
   assert.equal(beforeCompletion[0].deliveries, 0)
   const reserve = completion.reserve
-  // Preserve the real Cordis outbox write, then exercise the asynchronous ACK
-  // boundary before Request Host can hand the prepared request to the adapter.
+  // Change controls after real preparation, before the provider sees the request.
   completion.reserve = async (...args) => {
     await reserve(...args)
     const controls = ctx.contextCareRequests.controls
@@ -1689,7 +2581,10 @@ test('a control edit during durable notice reservation refuses handoff and resto
   const request = { ...prepared.config, signal, sessionId: agent.id, messages: agent.session.deriveMessages() }
   await assert.rejects(async () => { for await (const chunk of prepared.stream(request)) void chunk }, { code: 'CONTROL_CHANGED' })
   assert.deepEqual(ctx.contextCareRequests.feedback(agent.id), beforeFeedback)
-  assert.deepEqual(completion.list(), beforeCompletion)
+  assert.deepEqual(completion.list(), [], 'the disabled generation cannot contribute old completion notices')
+  assert.equal(agent.session.snapshotEvents().some(event => event.type === 'request/header'
+    && event.data.contextCarePrompt?.callId === prepared.callId), false,
+  'a refused preparation must not leave a completion-delivery receipt')
   const call = ctx.contextCareRequests.snapshot(prepared.callId)
   assert.equal(call.dispatched, false)
   assert.equal(call.record.phase, 'failed')
@@ -1721,7 +2616,7 @@ test('source disposal during preflight invalidates a request even without a pref
   assert.equal(ctx.contextCareRequests.snapshot(prepared.callId).dispatched, false)
 })
 
-test('completion outbox restores a bounded notice and delivers it on the next natural request', async t => {
+test('completion Session replay restores a bounded notice and delivers it on the next natural request', async t => {
   const owned = await fixture(t)
   let ctx = await owned.open()
   ctx.llm.registerAdapter(['care-test'], new CompletionAdapter([{ blocks: [{ type: 'text', text: '任务完成了。' }] }]))
@@ -1731,7 +2626,7 @@ test('completion outbox restores a bounded notice and delivers it on the next na
   assert.equal(ctx.get('contextCareCompletion').list()[0].status, 'pending')
   await owned.close(ctx)
   ctx = await owned.open()
-  assert.equal(ctx.get('contextCareCompletion').list()[0].status, 'pending')
+  assert.deepEqual(ctx.get('contextCareCompletion').list(), [], 'no side file certifies a Session that has not been restored')
   class NoticeAdapter extends ScriptedAdapter {
     async *stream(options) {
       this.requests.push(options)
@@ -1751,7 +2646,7 @@ test('completion outbox restores a bounded notice and delivers it on the next na
   assert.ok(agent.session.deriveMessages().every(message => message.content.every(block => !block.text?.includes('上一份输出使用了'))))
 })
 
-test('cold completion reconciliation finishes a missed outbox write without bypassing source cooldown', async t => {
+test('cold completion reconciliation ignores conflicting side files and restores native source cooldown', async t => {
   const owned = await fixture(t)
   let ctx = await owned.open(false)
   ctx.llm.registerAdapter(['care-test'], new CompletionAdapter([
@@ -1762,13 +2657,11 @@ test('cold completion reconciliation finishes a missed outbox write without bypa
   await completionTurn(ctx, agent)
   await ctx.contextCareRequests.flush(agent.session.id)
   const records = ctx.contextCareRequests.list(agent.session.id).filter(record => record.kind === 'request')
-  // Reproduce a crash boundary: settlement was durable, publication was absent.
+  // Conflicting legacy data is deliberately present, but is not replay input.
   const store = createCompletionStateStore({ storageDomain: ctx.storageDomain })
   await store.ready
-  const observer = createCompletionObserver({ ...store })
-  const input = { sessionId: String(agent.session.id), sourceId: 'assistant', occurrenceId: records[0].data.attemptId, text: 'DONE' }
-  await observer.observe(input)
-  await observer.settle(input)
+  await store.save(completionStateKey(String(agent.id), 'assistant'), { version: 1,
+    cooldownUntil: Number.MAX_SAFE_INTEGER, completedOccurrenceId: 'unrelated-side-file-occurrence' })
   await store.close()
   const log = agent.session.snapshotEvents()
   await owned.close(ctx)
@@ -1778,7 +2671,9 @@ test('cold completion reconciliation finishes a missed outbox write without bypa
   assert.equal(agent.session.eventAt(records[0].data.eventSeq).type, 'assistant/message')
   await completionTurn(ctx, agent)
   const notices = ctx.contextCareCompletion.list(agent.session.id)
-  assert.equal(notices.length, 1, JSON.stringify({ state: ctx.storageDomain.get('context_care_completion').table('observations').get(completionStateKey('cold-completion', 'assistant')), records: ctx.contextCareRequests.list('cold-completion').map(record => ({ attempt: record.data.attemptId, seq: record.data.eventSeq, outcome: record.data.outcome, dispatched: record.data.dispatched, purpose: record.data.purpose })) }))
+  assert.equal(notices.length, 1, JSON.stringify(notices))
+  assert.equal(ctx.storageDomain.get('context_care_completion'), undefined)
+  assert.equal(ctx.storageDomain.get('context_care_completion_notices'), undefined)
   assert.equal(notices[0].eventSeq, records[0].data.eventSeq)
   assert.equal(notices[0].status, 'dispatched')
 })
@@ -1839,6 +2734,39 @@ test('real Connection admits session controls, rejects malformed writes, and pre
   assert.equal((await fetch(`${base}/context-care/rules?sessionId=missing`, { headers })).status, 404)
 })
 
+test('real prompt evidence replays from Session with an empty request journal', async t => {
+  const owned = await fixture(t, false)
+  const ctx = await owned.open()
+  await addFixtureRow(ctx, '@care-test/rules')
+  ctx.llm.registerAdapter(['care-test'], new CompletionAdapter([{ blocks: [{ type: 'text', text: 'Continue.' }] }]))
+  const options = { provider: 'care-test', model: 'care-test' }
+  const agent = await ctx.agentLoop.create('prompt-session-evidence', options)
+  await completionTurn(ctx, agent, 'MEMORIZE the evidence in this session.')
+  await ctx.contextCareRequests.flush(agent.id)
+  const records = ctx.contextCareRequests.list(agent.id)
+  assert.equal(records.filter(record => record.data.action === 'rule-evaluation').length, 0,
+    'a rule evaluation must not create an additional action_<uuid>.json')
+  const log = agent.session.snapshotEvents()
+  const notice = log.find(event => event.type === 'user/message' && event.data.source.contextCareTrace?.evaluation)
+  assert.ok(notice, 'the real rule engine must deliver its evaluation in the message')
+  const expected = contextCarePrompts([], agent.session).find(prompt => prompt.seq === notice.seq)
+  assert.equal(expected.evaluations.length, 1)
+  assert.deepEqual(expected.evaluations[0].facts, notice.data.source.contextCareTrace.evaluation.facts)
+  await owned.close(ctx)
+
+  // A different real Loader/storage root has no context-care side tables to restore.
+  // Reopen only the actual log produced above through the public Agent seed API.
+  const fresh = await fixture(t, false)
+  const reopened = await fresh.open()
+  reopened.llm.registerAdapter(['care-test'], new CompletionAdapter([]))
+  const restored = (await reopened.agents.create({ sessionId: agent.id, seed: log, agentOptions: options })).agent
+  const reconstructed = reopened.contextCareRequests.list(agent.id)
+  assert.equal(reconstructed.filter(record => record.kind === 'maintenance').length, 0)
+  assert.ok(reconstructed.some(record => record.kind === 'request'), 'the request query now reads committed Session facts')
+  const actual = contextCarePrompts(reconstructed, restored.session).find(prompt => prompt.seq === notice.seq)
+  assert.deepEqual(actual, expected)
+})
+
 test('Loader registrants execute declared rules, respect toggles, and unload without losing persisted choices', async t => {
   const owned = await fixture(t, false)
   let ctx = await owned.open()
@@ -1879,7 +2807,15 @@ test('Workbench v2 edits request copies, renders strict entry templates, logs th
   const ctx = await owned.open()
   class WorkbenchAdapter extends CompletionAdapter {
     requests = []
-    async *stream(request) { this.requests.push(request); yield* super.stream(request) }
+    async *stream(request) {
+      this.requests.push(request)
+      const raw = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session }).decomposeRequest(request)
+      for await (const chunk of super.stream(request)) {
+        if (chunk.type === 'usage') continue
+        if (chunk.type === 'finish') yield { type: 'usage', usage: { inputTokens: raw.textTokens * 2 + raw.visualTokens } }
+        yield chunk
+      }
+    }
   }
   const adapter = new WorkbenchAdapter([{ blocks: [{ type: 'text', text: 'The requested work is continuing.' }] }])
   ctx.llm.registerAdapter(['care-test'], adapter)
@@ -1908,6 +2844,17 @@ test('Workbench v2 edits request copies, renders strict entry templates, logs th
   assert.equal(audit.data.contextCareWorkbench.impact.providerSerialization, 'unknown')
   assert.equal(audit.data.contextCareWorkbench.impact.cacheHitTokens, null)
   assert.equal(ctx.contextCareControls.snapshot(agent.id).sources.find(source => source.sourceId === 'context-care:document:editable').rules.length, 2)
+  const seq = agent.session.seq
+  const cold = await openRequestJournal({ sessions: ctx.sessions,
+    measureInput: (session, request) => captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session }).decomposeRequest(request) })
+  const samples = cold.calibrationRecords(agent.session, agent.session.requestHeader())
+  const pricing = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session })
+  assert.equal(samples.length, 1)
+  assert.deepEqual(samples[0].data.rawInput, pricing.decomposeRequest(sent),
+    'cold recovery must price the logged AFTER request and injected entry, not the original BEFORE surface')
+  assert.equal(agent.session.seq, seq, 'reconstructing input appends no new events or rule evaluations')
+  assert.equal(adapter.requests.length, 1, 'reconstructing input dispatches no new provider request')
+  await cold.close()
 })
 
 test('Workbench v2 records all-token-skipped request decisions in the real dispatch log without spending successful state', async t => {

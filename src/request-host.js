@@ -22,9 +22,10 @@ import { releaseResources } from './resource-cleanup.js'
 import { openWorkbenchHost } from './workbench-host.js'
 import { MatcherFailure } from './bounded-matcher.js'
 import { ensureReminderService, ReminderConfig } from './reminder-runtime/index.js'
+import { createSummaryProposalHistory } from '../lib/summary-proposal-history.js'
 
 export const name = 'context-care-requests'
-export const inject = ['agents', 'sessions', 'tools', 'llm', 'tokenMeter', 'storageDomain']
+export const inject = ['agents', 'sessions', 'sessionQuery', 'tools', 'llm', 'tokenMeter', 'storageDomain']
 export const Config = z.object({ ruleFiles: z.array(z.string().min(1).max(4096)).max(64).default([]).refine(paths => new Set(paths).size === paths.length, 'duplicate rule file path'),
   executors: z.array(z.object({ executorRef: z.string().min(1), toolName: z.string().min(1), inputSchema: z.json(),
   requiresApproval: z.boolean().default(true), timeoutMs: z.number().int().min(1).max(86400000).default(10000),
@@ -66,16 +67,19 @@ export async function apply(ctx, config = {}) {
   await openRequestHost(ctx, config)
 }
 
-/** Own request identities and journals using the official rc.2 stream waterfall.
+/** Own live request operations and Session-derived history using the stream waterfall.
  * @param {Context} ctx @param {import('zod').input<typeof Config>} config */
 export async function openRequestHost(ctx, config = {}) {
-  const journal = await openRequestJournal({ storageDomain: ctx.storageDomain,
-    report: /** @param {unknown} error */ error => ctx.logger.warn(`context-care: request journal failed: ${String(error)}`) })
+  const journal = await openRequestJournal({ sessions: ctx.sessions,
+    measureInput: (session, request) => captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session }).decomposeRequest(request) })
   /** @type {Awaited<ReturnType<typeof openRuleControls>> | undefined} */
   let controls
   /** @type {Awaited<ReturnType<typeof openOutputFeedback>>} */
   let feedback
-  try { feedback = await openOutputFeedback(ctx.storageDomain, { eligible: /** @param {string} id @param {string} ruleId @param {number[]} seqs */ (id, ruleId, seqs) => controls === undefined
+  try { feedback = await openOutputFeedback({ sessions: ctx.sessions,
+    rulesFor: id => ownerFor(ctx.agents.get(/** @type {SessionId} */ (id)))?.promptRulesFor?.(/** @type {SessionId} */ (id)) ?? [],
+    revision: id => controls?.revision(id) ?? 0,
+    eligible: /** @param {string} id @param {string} ruleId @param {number[]} seqs */ (id, ruleId, seqs) => controls === undefined
     || (controls.enabled(id, 'dsh-context-care', `prompt:${ruleId}`, 'notice')
       && seqs.every(seq => seq > (controls?.sinceSeq(id, 'dsh-context-care', `prompt:${ruleId}`) ?? -1))) }) }
   catch (error) {
@@ -104,7 +108,10 @@ export async function openRequestHost(ctx, config = {}) {
   ctx.provide('contextCareWorkbench', workbench)
   ctx.effect(() => () => workbench.close())
   await ensureReminderService(ctx, Config.parse(config).reminders, controls)
-  let dispatchOrder = journal.list().reduce((latest, record) => Math.max(latest, record.data.dispatchOrder ?? 0), 0)
+  const proposals = createSummaryProposalHistory({ readSession: id => ctx.sessionQuery.readSession(id) })
+  ctx.on('session/event', (session, event) => proposals.observe(session, event))
+  ctx.effect(() => () => proposals.close())
+  let dispatchOrder = 0
   /** @type {Set<RequestOwner>} */
   const owners = new Set()
   /** @type {Map<string, RequestCall>} */
@@ -121,9 +128,9 @@ export async function openRequestHost(ctx, config = {}) {
   /** @param {Agent | undefined} agent */
   const ownerFor = agent => agent === undefined ? undefined : [...owners].find(owner => owner.owns(agent))
   /** @param {RequestCall} call @param {string} phase @param {Record<string, unknown>} details */
-  function persist(call, phase, details = {}) {
+  function recordPhase(call, phase, details = {}) {
     const previous = call.record ?? { callId: call.callId, logRevision: call.logRevision, sourceSeqs: call.sourceSeqs,
-      sourceHeader: call.measurement.pricingBasis.header, sourceMessagesHash: requestFingerprint(call.sourceMessages),
+      sourceMessagesHash: requestFingerprint(call.sourceMessages),
       purpose: call.original.purpose ?? 'conversation' }
     call.record = { ...previous, ...details, dispatched: call.dispatched, phase }
     return journal.put(`call_${call.callId}`, call.session.id, 'request', call.record)
@@ -140,9 +147,11 @@ export async function openRequestHost(ctx, config = {}) {
     /** @param {string} callId */
     release: callId => calls.delete(callId),
     /** @param {string} callId @param {Record<string, unknown>} details */
-    settle(callId, details) { const call = calls.get(callId); return call === undefined ? Promise.resolve() : persist(call, 'settled', details) },
+    settle(callId, details) { const call = calls.get(callId); return call === undefined ? Promise.resolve() : recordPhase(call, 'settled', details) },
     /** @param {Session} session @param {Record<string, unknown>} data */
     recordAction(session, data) { return journal.put(`action_${randomUUID()}`, session.id, 'maintenance', { logRevision: session.seq, ...data }) },
+    /** @param {Session} session @param {string} key @param {AbortSignal} [signal] */
+    wasProposalRejected(session, key, signal) { return proposals.has(session, key, signal) },
     // Auxiliary callers use this handle so their journal id never depends on a
     // nonexistent prepared.callId in the host. Each stream may be consumed once.
     /** @param {LlmCallConfig} config @param {AbortSignal} [signal] */
@@ -167,14 +176,13 @@ export async function openRequestHost(ctx, config = {}) {
     preview(session, request) {
       const owner = ownerFor(ctx.agents.get(session.id))
       const purpose = request.purpose ?? 'conversation'
-      const previous = journal.list(session.id).filter(record => record.kind === 'request' && record.data.dispatched
-        && record.data.purpose === purpose).sort((a, b) => (a.data.dispatchOrder ?? 0) - (b.data.dispatchOrder ?? 0)).at(-1)?.data.route
+      const previous = journal.previousRoute(session, purpose)
       const segments = [...(owner?.prompts?.({ ...request, sessionId: session.id }, previous) ?? []), ...feedback.collect(session, request, owner?.promptRulesFor?.(session.id) ?? []),
         ...(ctx.get('contextCareCompletion')?.collect(session, request) ?? [])]
       return { segments, request: withScopedPrompts(request, segments) }
     },
     /** @param {Session} session @param {Parameters<typeof journalCalibration>[1]} header @param {Parameters<typeof journalCalibration>[2]} fallback */
-    calibration: (session, header, fallback) => journalCalibration(journal.list(session.id), header, fallback),
+    calibration: (session, header, fallback) => journalCalibration(journal.calibrationRecords(session, header), header, fallback),
     feedback: feedback.list,
     list: journal.list,
     /** @param {string} [sessionId] */
@@ -204,7 +212,7 @@ export async function openRequestHost(ctx, config = {}) {
     call.settled = true
     const event = frame.outcome.kind === 'committed' ? agent.session.eventAt(frame.outcome.seq) : undefined
     const completed = event?.type === 'assistant/message' && !event.data.interrupted
-    void persist(call, 'settled', { attemptId: frame.attemptId,
+    void recordPhase(call, 'settled', { attemptId: frame.attemptId,
       outcome: completed ? 'completed' : event?.type === 'assistant/attempt' ? 'failed' : 'interrupted',
       eventSeq: event?.seq, eventType: event?.type, usage: event?.type === 'assistant/message' ? event.data.usage : undefined })
     if (completed && call.dispatched) {
@@ -242,15 +250,9 @@ export async function openRequestHost(ctx, config = {}) {
     /** @type {unknown} */
     let primaryError
     try {
-      await service.flush(session.id)
+      await feedback.flush(session.id)
       completion = ctx.get('contextCareCompletion')
       if (!reconciled.has(session)) {
-        const records = journal.list(session.id).filter(record => record.kind === 'request' && record.data.dispatched
-          && record.data.outcome === 'completed' && record.data.purpose === 'conversation').sort((a, b) => a.data.eventSeq - b.data.eventSeq)
-        for (const record of records) {
-          const event = session.eventAt(record.data.eventSeq)
-          if (event?.type === 'assistant/message' && !event.data.interrupted) await feedback.observe(session, event, record.data.route, owner.promptRulesFor?.(session.id) ?? [])
-        }
         await completion?.reconcile(session)
         reconciled.add(session)
       }
@@ -260,25 +262,28 @@ export async function openRequestHost(ctx, config = {}) {
       const controlRevision = controls.revision(String(session.id))
       const controlEpoch = controls.epoch(String(session.id), 'dsh-context-care', 'state')
       const { segments, request: promptRequest } = service.preview(session, bound)
-      call.workbenchPlan = await workbench.assemble(agent, promptRequest)
-      const composed = call.workbenchPlan.request
-      if (call.workbenchPlan.records.length) {
-        const data = {
-          header: session.requestHeader() ?? { config: prepared.config, ...(request.tools === undefined ? {} : { tools: request.tools }) }, reason: /** @type {const} */ ('series'),
-          contextCareWorkbench: JSON.parse(JSON.stringify({ callId: call.callId, token: call.workbenchPlan.token, documents: call.workbenchPlan.documents,
-            records: call.workbenchPlan.records, diff: call.workbenchPlan.diff,
-            injectionBudget: call.workbenchPlan.injectionBudget, impact: call.workbenchPlan.impact })),
+      const plan = await workbench.assemble(agent, promptRequest)
+      call.workbenchPlan = plan
+      const composed = plan.request
+      const commitRequestInputs = () => {
+        if (plan.records.length) {
+          const data = {
+            header: session.requestHeader() ?? { config: prepared.config, ...(request.tools === undefined ? {} : { tools: request.tools }) }, reason: /** @type {const} */ ('series'),
+            contextCareWorkbench: JSON.parse(JSON.stringify({ callId: call.callId, token: plan.token, documents: plan.documents,
+              records: plan.records, diff: plan.diff,
+              injectionBudget: plan.injectionBudget, impact: plan.impact })),
+          }
+          const decision = session.append('request/header', data)
+          call.workbenchDecision = { seq: decision.seq, records: plan.records, documents: plan.documents }
         }
-        const decision = session.append('request/header', data)
-        call.workbenchDecision = { seq: decision.seq, records: call.workbenchPlan.records, documents: call.workbenchPlan.documents }
-      }
-      if (segments.length) {
-        const data = {
-          header: session.requestHeader() ?? { config: prepared.config, ...(request.tools === undefined ? {} : { tools: request.tools }) }, reason: /** @type {const} */ ('series'),
-          contextCarePrompt: { callId: call.callId, segments, message: composed.messages.at(-1) },
+        if (segments.length) {
+          const data = {
+            header: session.requestHeader() ?? { config: prepared.config, ...(request.tools === undefined ? {} : { tools: request.tools }) }, reason: /** @type {const} */ ('series'),
+            contextCarePrompt: { callId: call.callId, segments, message: composed.messages.at(-1) },
+          }
+          const decision = session.append('request/header', data)
+          call.promptDecision = { seq: decision.seq, segments, message: composed.messages.at(-1) }
         }
-        const decision = session.append('request/header', data)
-        call.promptDecision = { seq: decision.seq, segments, message: composed.messages.at(-1) }
       }
       const model = await ctx.llm.resolveModelInfo(composed.provider, composed.model, request.signal)
       call.ready = { request: composed, model: { ...model, ...(prepared.context ? { context: prepared.context } : {}) },
@@ -289,8 +294,8 @@ export async function openRequestHost(ctx, config = {}) {
       const careInstructions = requestCareInstructions(composed)
       const summaryInstruction = careInstructions.find(instruction => instruction.kind === 'summary-instruction')
       const systemSeq = call.sourceSeqs.find(seq => session.eventAt(seq)?.type === 'system/message')
-      await persist(call, 'ready', { route: { provider: composed.provider, model: composed.model, maxTokens: composed.maxTokens,
-        reasoningEffort: composed.reasoningEffort, temperature: composed.temperature }, system: composed.system, tools: composed.tools,
+      await recordPhase(call, 'ready', { route: { provider: composed.provider, model: composed.model, maxTokens: composed.maxTokens,
+        reasoningEffort: composed.reasoningEffort, temperature: composed.temperature },
         inputHash: requestFingerprint({ system: composed.system, messages: composed.messages, tools: composed.tools }),
         pricingBasis: call.dispatchPricing.pricingBasis, budget: call.dispatchBudget,
         rawInput: call.dispatchPricing.decomposeRequest(composed), calibrationHeaderKey: calibrationHeaderKey(call.dispatchPricing.pricingBasis.header),
@@ -314,20 +319,22 @@ export async function openRequestHost(ctx, config = {}) {
       await completion?.reserve(session, segments, call.callId)
       assertCurrent()
       await workbench.reserve(agent, call.workbenchPlan, call.callId)
-      // Keep a durable unknown reservation for crashes, but do not certify an
-      // actual handoff until every preflight ACK and its final check have passed.
-      await persist(call, 'dispatch-reserved')
+      // This phase is live diagnostics only. Actual settlement is read from
+      // the Session, so an abandoned cache entry cannot certify a dispatch.
+      await recordPhase(call, 'dispatch-reserved')
       assertCurrent()
       forwarded.set(composed, call)
       iterator = prepared.stream(composed)[Symbol.asyncIterator]()
       assertCurrent()
-      // Calling next starts the bound stream synchronously, with no await gap
-      // after the final control check. Its first rejection is captured while
-      // the post-handoff audit/outbox acknowledgements are in flight.
+      // Log the actual request contribution only after preflight has succeeded.
+      // No await separates this intent from provider handoff, so a cold reader
+      // never mistakes a rejected preparation for a delivered completion prompt.
+      commitRequestInputs()
+      assertCurrent()
       const start = iterator.next()
       call.dispatched = true
       let pending = Promise.resolve(start).then(result => ({ result }), error => ({ error }))
-      await persist(call, 'dispatched', { dispatchOrder: ++dispatchOrder, dispatchBasis: 'prepared-stream-handoff' })
+      await recordPhase(call, 'dispatched', { dispatchOrder: ++dispatchOrder, dispatchBasis: 'prepared-stream-handoff' })
       await feedback.dispatched(session, segments, call.callId, composed)
       await completion?.dispatched(session, segments, call.callId, composed)
       await workbench.dispatched(agent, call.workbenchPlan, call.callId)
@@ -343,7 +350,7 @@ export async function openRequestHost(ctx, config = {}) {
         await delta?.feed(chunk, request.signal)
         if (chunk.type === 'finish' && (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted')) {
           call.failure = chunk.reason.failure
-          await persist(call, 'failed', { failure: call.failure })
+          await recordPhase(call, 'failed', { failure: call.failure })
         }
         yield chunk
         pending = Promise.resolve(iterator.next()).then(result => ({ result }), error => ({ error }))
@@ -360,7 +367,7 @@ export async function openRequestHost(ctx, config = {}) {
           }
         }
         call.failure = { code: error instanceof Error && 'code' in error && typeof error.code === 'string' ? error.code : 'REQUEST_PREFLIGHT_FAILED', message: error instanceof Error ? error.message : String(error) }
-        try { await persist(call, 'failed', { failure: call.failure, outcome: 'not-dispatched' }) }
+        try { await recordPhase(call, 'failed', { failure: call.failure, outcome: 'not-dispatched' }) }
         catch (secondary) { recordSecondaryFailure(error, secondary, 'preflight failure audit') }
       }
       if (call.dispatched) {
@@ -372,7 +379,7 @@ export async function openRequestHost(ctx, config = {}) {
       // Storage and programming failures remain thrown, with their original stack.
       if (!(error instanceof RequestBudgetExceeded) && !(error instanceof MatcherFailure)) throw error
       call.failure = { code: error.code, message: error.message }
-      await persist(call, 'failed', { failure: call.failure })
+      await recordPhase(call, 'failed', { failure: call.failure })
       yield { type: 'finish', reason: { kind: 'error', failure: call.failure } }
     } finally {
       // Both cleanups reach quiescence, even when detector reset fails during cancellation.
@@ -382,6 +389,7 @@ export async function openRequestHost(ctx, config = {}) {
   on('agent/status', ({ agent, status }) => {
     if (status !== 'idle') return
     attempts.delete(agent)
+    journal.release(agent.session)
     for (const [id, call] of calls) if (call.agent === agent) calls.delete(id)
   })
   ctx.effect(() => async () => {

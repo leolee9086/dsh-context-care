@@ -21,8 +21,9 @@ export function createProposalExecutor(requests, compact) {
     const key = createHash('sha256').update(JSON.stringify({ sources: seqs, messages,
       prices: messages.map(message => operation.priceMessages([message])), header: operation.pricingBasis.header,
       summary: spec.summary ?? service.config, prompts: spec.modelScopedPrompts })).digest('hex')
-    if (requests.list(session.id).some(record => record.kind === 'maintenance'
-      && record.data.proposalKey === key && record.data.phase === 'no-useful-range')) return null
+    // Only a paired native compaction execution proves a rejected proposal.
+    // Action rows remain diagnostics and cannot suppress future work.
+    if (await requests.wasProposalRejected(session, key, signal)) return null
     const audit = { operationId: randomUUID(), reason, proposalKey: key, rule: proposal.rule, comparisons: proposal.comparisons }
     await requests.recordAction(session, { ...audit, action: 'selection', phase: 'planning', sourceSeqs: proposal.sourceSeqs })
     try { return await compact(service, proposal, agent, signal, operation, undefined, audit) }

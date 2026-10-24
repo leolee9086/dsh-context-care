@@ -11,5 +11,5 @@
     "sourceMap": true,
     "types": ["node"]
   },
-  "include": ["src/reminder-runtime/**/*.ts"]
+  "include": ["src/reminder-runtime/**/*.ts", "src/matcher/**/*.ts", "src/request-history.ts", "src/request-cache.ts", "src/session-completions.ts", "src/summary-proposal-history.ts", "src/session-output-feedback.ts"]
 }

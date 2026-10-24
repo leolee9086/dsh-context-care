@@ -96,14 +96,8 @@ test('candidate eligibility is rechecked at delivery when presence or the time w
   f.time(date(15, 6)); assert.deepEqual(await f.collect({ sessionId: 'another' }), [])
 })
 
-test('failed claim and snooze saves do not publish suppression', async t => {
-  let fail = false
-  const f = fixture(t, { save: async () => { if (fail) throw new Error('disk') } })
-  await f.prepare(); fail = true
-  await assert.rejects(f.collect(), /disk/)
-  await assert.rejects(f.runtime.snooze({ sessionId: 's' }), /disk/)
-  fail = false; assert.equal((await f.collect()).length, 1)
-})
+// Failed claim/snooze writes and durable recovery are exercised with native
+// storage failures in reminder-request-real.test.ts via test:integration:source.
 
 test('concurrent collections reserve once; rollback of an acknowledged delivery cannot free its window', async t => {
   const f = fixture(t)

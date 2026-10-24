@@ -43,10 +43,17 @@ export function contextCarePrompts(records, session) {
     const source = event.data.source
     const checkpoint = isCheckpointSource(source) && (source.contextCareTrace?.producer === 'dsh-context-care' || ownedTransactions.has(source.compactionId))
     if (!own(source) && !checkpoint) continue
+    const trace = source.contextCareTrace
+    // The committed message is the evidence. Keep a read-only fallback for older
+    // messages that did not embed their evaluation, but never require a side ledger.
+    const evaluation = trace?.evaluation
+    const evaluations = evaluation?.evaluationId && evaluation.evaluationId === trace.evaluationId
+      ? [{ ...evaluation, key: `event:${event.seq}:evaluation`, at: event.time, eventSeq: event.seq }]
+      : actions.filter(({ data }) => data.action === 'rule-evaluation' && data.evaluationId
+        && data.evaluationId === trace?.evaluationId).map(({ key, at, data }) => ({ key, at, ...data }))
     prompts.set(`event:${event.seq}`, { id: `event:${event.seq}`, seq: event.seq, at: event.time, kind: checkpoint ? 'checkpoint' : 'message',
       producer: checkpoint ? 'dsh-context-care:checkpoint' : producerOf(source), title: source.summary, text: text(event.data.content), source,
-      evaluations: actions.filter(({ data }) => data.action === 'rule-evaluation' && data.evaluationId
-        && data.evaluationId === source.contextCareTrace?.evaluationId).map(({ key, at, data }) => ({ key, at, ...data })),
+      evaluations,
       sources: sourceFacts(source.contextCareTrace?.sourceSeqs ?? event.sourceEventSeqs),
       calls: calls.filter(record => (record.data.requestSourceSeqs ?? record.data.sourceSeqs)?.includes(event.seq)).map(record => reference(record.data)) })
   }

@@ -7,8 +7,8 @@ const fields = ['action', 'reason', 'phase', 'rule', 'outcome', 'beforeSeq', 'af
 const settled = new Set(['committed', 'completed', 'failed', 'no-useful-range'])
 
 /**
- * Merge this session's durable audits and committed history without inventing missing prices or ownership.
- * @param records durable records already filtered to the requested session
+ * Merge live diagnostics, legacy audits and committed history without inventing missing prices or ownership.
+ * @param records session-filtered records; transient diagnostics do not establish journal persistence
  * @param session optional loaded session containing replacement and summary facts
  * @returns ordered actions and latest conversation admission, without unrelated request text
  */
@@ -35,7 +35,7 @@ export function contextCareActions(records, session) {
     const id = data.operationId ?? transactionOwners.get(data.compactionId) ?? data.compactionId ?? record.key
     const previous = groups.get(id) ?? { id, phases: [], auditKeys: [] }
     const display = Object.fromEntries(fields.filter(field => data[field] !== undefined).map(field => [field, data[field]]))
-    groups.set(id, { ...previous, ...display, at: record.at, journalPersisted: true,
+    groups.set(id, { ...previous, ...display, at: record.at, journalPersisted: previous.journalPersisted === true || record.transient !== true,
       auditStatus: settled.has(data.phase) ? 'complete' : 'partial',
       auditKeys: [...previous.auditKeys, record.key], phases: [...previous.phases, data.phase] })
   }
@@ -63,7 +63,7 @@ export function contextCareActions(records, session) {
       groups.set(id, { ...previous, id, action: previous?.action ?? (event.data.source.contextCareTrace?.trigger === 'deep-rest' ? 'deep-rest' : summary?.data.llmStreamCall === true ? 'summary' : 'checkpoint'),
         phase: complete ? previous.phase : 'committed', at: previous?.at ?? event.time, phases: previous?.phases ?? [],
         auditKeys: previous?.auditKeys ?? [], auditStatus: hasAudit ? (complete ? 'complete' : 'partial') : 'session-only',
-        journalPersisted: Boolean(complete), checkpointSeq: previous?.checkpointSeq ?? event.seq,
+        journalPersisted: Boolean(complete && previous?.journalPersisted), checkpointSeq: previous?.checkpointSeq ?? event.seq,
         summarySeq: previous?.summarySeq ?? summary?.seq, shadowedSeqs: previous?.shadowedSeqs ?? sources,
         replacements, commits: [...(previous?.commits ?? []), fact] })
     }

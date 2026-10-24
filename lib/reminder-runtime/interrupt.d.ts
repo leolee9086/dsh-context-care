@@ -7,7 +7,8 @@ interface InterruptOptions<Agent> {
     runtime: Pick<Runtime, 'snapshot' | 'collect' | 'filterMessages' | 'rollback'>;
     maxInterrupts: number;
     sessionId: (agent: Agent) => string;
-    humanTurn: (agent: Agent) => string;
+    prepareHumanTurn?: (agent: Agent) => Promise<void>;
+    humanTurn: (agent: Agent) => string | undefined;
     visible: (agent: Agent) => MessageView[];
     isCurrent: (agent: Agent, output: OutputEvidence) => boolean;
     cancel: (agent: Agent) => void;

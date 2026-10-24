@@ -52,8 +52,20 @@ const Group = z.object({ kind: z.enum(['all', 'any']), conditions: z.array(z.unk
 const Not = z.object({ kind: z.literal('not'), condition: z.unknown() }).strict()
 const Tag = z.object({ kind: z.string() })
 
-/** Parse document or worker JSON into a bounded condition tree before execution. */
-export function compileReminderCondition(input: unknown, ceilings = CountLimits.parse(undefined)): ReminderCondition {
+/** Registration checks both the bounded data shape and rule-engine semantics. */
+export function compileReminderCondition(input: unknown, ceilings: CountLimitValues = CountLimits.parse(undefined)): ReminderCondition {
+  return conditionFrom(input, ceilings, true)
+}
+
+/**
+ * Structured clone does not retain a TypeScript proof. Recheck the bounded data
+ * shape in the worker without recompiling the rule-engine declaration each time.
+ */
+export function parseReminderCondition(input: unknown, ceilings: CountLimitValues): ReminderCondition {
+  return conditionFrom(input, ceilings, false)
+}
+
+function conditionFrom(input: unknown, ceilings: CountLimitValues, validateEngine: boolean): ReminderCondition {
   let nodes = 0
   function compile(value: unknown, depth: number): ReminderCondition {
     if (++nodes > 2048 || depth > 16) throw new TypeError('reminder-condition-tree-budget-exceeded')
@@ -75,6 +87,7 @@ export function compileReminderCondition(input: unknown, ceilings = CountLimits.
       return count
     }
     const leaf = Leaf.parse(value)
+    if (!validateEngine) return leaf
     // Delegate literal/regex/keyword validation to the existing engine. Its own
     // rejection names the malformed pattern but not the field, so add that here.
     try {
@@ -126,6 +139,42 @@ function readField(root: JsonValue, path: string): JsonValue | undefined {
 }
 
 /** Run inside the cancellable matcher worker; missing evidence never becomes true under not. */
+/**
+ * 执行期把规则自带的测量上限再夹一次宿主 ceilings。
+ *
+ * 注册时 `compileRule` 已经夹过一次，这里是纵深防御：worker 里跑的代码
+ * 不该信任调用方递过来的树。只走树、不做解析，而且没有任何节点需要改时
+ * 直接返回原对象——所以它不会像重新编译那样每轮分配一整棵新树。
+ */
+export function clampCountLimits(condition: ReminderCondition, ceilings: CountLimitValues): ReminderCondition {
+  switch (condition.kind) {
+    case 'all':
+    case 'any': {
+      const next = condition.conditions.map(child => clampCountLimits(child, ceilings))
+      return next.every((child, index) => child === condition.conditions[index]) ? condition : { ...condition, conditions: next }
+    }
+    case 'not': {
+      const inner = clampCountLimits(condition.condition, ceilings)
+      return inner === condition.condition ? condition : { ...condition, condition: inner }
+    }
+    case 'count': {
+      const limits = {
+        maxTextChars: Math.min(condition.limits.maxTextChars, ceilings.maxTextChars),
+        maxCandidates: Math.min(condition.limits.maxCandidates, ceilings.maxCandidates),
+        maxUnits: Math.min(condition.limits.maxUnits, ceilings.maxUnits),
+        maxEvidence: Math.min(condition.limits.maxEvidence, ceilings.maxEvidence),
+      }
+      const same = limits.maxTextChars === condition.limits.maxTextChars
+        && limits.maxCandidates === condition.limits.maxCandidates
+        && limits.maxUnits === condition.limits.maxUnits
+        && limits.maxEvidence === condition.limits.maxEvidence
+      return same ? condition : { ...condition, limits }
+    }
+    default:
+      return condition
+  }
+}
+
 export function matchReminderCondition(condition: ReminderCondition, snapshot: JsonValue, samples: readonly TextSampleValue[] = []): ReminderMatch {
   function evaluate(node: ReminderCondition, path: string): ReminderMatch {
     if (node.kind === 'all' || node.kind === 'any') {
