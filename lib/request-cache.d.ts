@@ -45,6 +45,9 @@ export declare function createRequestCache({ sessions, logs, measureInput, measu
         snapshot(): readonly CacheRecord[];
         consume(cursor: object): import("./diagnostic-pages.js").DiagnosticRecordDelta<CacheRecord>;
     };
+    /** Rewrite diagnostics are bounded maintenance rows, not native settlements.
+     * Reading them must not initialize or enumerate the full request directory. */
+    rewriteRecords(sessionId?: string): readonly unknown[];
     /** A stable read-only cut for diagnostic projections; list() still returns its own array. */
     view(sessionId: string): readonly CacheRecord[];
     /** Read actual settlements plus bounded live diagnostics for loaded sessions. */

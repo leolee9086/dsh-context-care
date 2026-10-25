@@ -36,6 +36,7 @@ import { registerSessionLogCases } from './session-log-host-cases.ts'
 import { registerDiagnosticPageCases } from './diagnostic-pages-host-cases.ts'
 import { registerDiagnosticPerformanceCases } from './diagnostic-performance-host-cases.ts'
 import { registerWorkbenchPerformanceCases } from './workbench-performance-host-cases.ts'
+import { registerRewritePerformanceCases } from './rewrite-performance-host-cases.ts'
 import { preV4State } from './fixtures/reminder-upgrade.ts'
 import { registerScopeHostCases } from './reminder-scope-host-cases.ts'
 import { registerDeliveryReplayCases } from './reminder-delivery-replay-cases.ts'
@@ -624,6 +625,42 @@ registerDenialLifetimeHostCases({ async open(t, ruleTimeoutMs) {
 } })
 
 registerDiagnosticPageCases({ async open(t) { const owned = await fixture(t, false); return owned.open() } })
+
+registerRewritePerformanceCases({ async open(t) {
+  const owned = await fixture(t, false), ctx = await owned.open(), { base, cookie } = await controlCookie(ctx)
+  ctx.llm.registerAdapter(['care-test'], new CompletionAdapter([{ blocks: [{ type: 'text', text: 'Independent rewrite probe completed.' }] }]))
+  const target = await ctx.agentLoop.create('long-rewrite-stream', { provider: 'care-test', model: 'care-test' }), session = target.session
+  let writer
+  ctx.provide('requestRewrite', { register(name, callback) {
+    assert.equal(name, 'context-care'); writer = callback
+    return () => { writer = undefined }
+  } })
+  await ctx.fiber.await(); assert.equal(typeof writer, 'function')
+  assert.equal(ctx.contextCareControls.enabled(session.id, 'dsh-context-care', 'loop-line-repeat', 'clean'), true)
+  return { ctx, session, base, cookie,
+    forbidFullReads() {
+      t.mock.method(ctx.contextCareRequests, 'list', () => { throw new Error('rewrite-full-list') })
+      t.mock.method(ctx.contextCareRequests, 'view', () => { throw new Error('rewrite-full-view') })
+    },
+    rewrite: async index => {
+      const original = `Unique original ${index}.\n` + '继续做这件事。\n'.repeat(30)
+      const body = JSON.stringify({ messages: [{ role: 'assistant', content: [{ type: 'text', text: original }] }] })
+      const result = await writer({ body, url: 'https://provider.test/v1/chat/completions', scope: { sessionId: session.id } })
+      assert.equal(typeof result, 'string'); assert.doesNotMatch(JSON.parse(result).messages[0].content[0].text, /继续做这件事/)
+      return result
+    },
+    http: async () => {
+      const response = await fetch(`${base}/context-care/rules?sessionId=${session.id}`, { headers: { cookie } })
+      assert.equal(response.status, 200); await response.json()
+    },
+    probe: async () => {
+      const agent = await ctx.agentLoop.create('rewrite-independent-probe', { provider: 'care-test', model: 'care-test' })
+      await completionTurn(ctx, agent, 'Answer independently of rewrite subscriptions.')
+      assert.ok(agent.session.deriveMessages().some(message => message.role === 'assistant'
+        && message.content.some(block => block.type === 'text' && block.text === 'Independent rewrite probe completed.')))
+    },
+  }
+} })
 
 registerDiagnosticPerformanceCases({ async open(t) {
   const owned = await fixture(t, false), ctx = await owned.open(), { base, cookie } = await controlCookie(ctx)
@@ -3011,6 +3048,8 @@ test('native activity pushes retained pages and rewrite deltas without follow-up
   await wait(rewrites.health, () => rewrites.health.getSnapshot().get(session.id)?.status === 'ready')
   assert.deepEqual(routes, ['/context-care/changes'])
   const initialRewriteFrames = frames.length
+  const fullRewriteList = t.mock.method(ctx.contextCareRequests, 'list', () => { throw new Error('rewrite-full-list') })
+  const fullRewriteView = t.mock.method(ctx.contextCareRequests, 'view', () => { throw new Error('rewrite-full-view') })
   const config = { provider: 'care-test', model: 'care-test' }
   for (let index = 0; index < 12; index++) {
     session.append('user/message', createMessage({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: `Turn ${index}` }] }), { surfaceOp: 'append' })
@@ -3024,6 +3063,7 @@ test('native activity pushes retained pages and rewrite deltas without follow-up
   await ctx.contextCareRequests.recordAction(session, { action: 'request-rewrite', phase: 'recorded', rewrite: { sessionId: session.id, hash: 'new-rewrite' } })
   await wait(rewrites.records, () => rewrites.records.getSnapshot().has(`${session.id}:new-rewrite`))
   assert.equal(frames.at(-1).type, 'delta'); assert.equal(frames.at(-1).value.records.length, 1)
+  assert.equal(fullRewriteList.mock.callCount(), 0); assert.equal(fullRewriteView.mock.callCount(), 0)
   await ctx.contextCareRequests.recordAction(session, { action: 'prune', phase: 'completed', operationId: 'native-action' })
   await wait(actions.source, () => actions.source.getSnapshot().get(`${session.id}:0`)?.actions.some(action => action.id === 'native-action'))
   assert.deepEqual(routes, ['/context-care/changes'], 'continuous activity has no actions, prompts or rewrite-journal GETs')

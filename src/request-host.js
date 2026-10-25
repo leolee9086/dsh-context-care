@@ -217,6 +217,7 @@ export async function openRequestHost(ctx, config = {}) {
     list: journal.list,
     view: journal.view,
     diagnosticFeed: journal.diagnosticFeed,
+    rewriteRecords: journal.rewriteRecords,
     /** @param {string} [sessionId] */
     async flush(sessionId) { await journal.flush(sessionId); await feedback.flush(sessionId) },
   }

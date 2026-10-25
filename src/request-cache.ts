@@ -199,6 +199,16 @@ export function createRequestCache({ sessions, logs, measureInput, measurementDe
       if (!session) throw new Error(`context-care: request session unavailable: ${sessionId}`)
       return diagnosticFeed(session)
     },
+    /** Rewrite diagnostics are bounded maintenance rows, not native settlements.
+     * Reading them must not initialize or enumerate the full request directory. */
+    rewriteRecords(sessionId?: string): readonly unknown[] {
+      const selected = sessionId === undefined ? sessions.list() : [getSession(sessionId)].filter((session): session is Session => session !== undefined)
+      const values: unknown[] = []
+      for (const session of selected) for (const row of cacheOf(session).recent.values()) {
+        if (row.kind === 'maintenance' && row.data.action === 'request-rewrite' && row.data.rewrite !== undefined) values.push(row.data.rewrite)
+      }
+      return values
+    },
     /** A stable read-only cut for diagnostic projections; list() still returns its own array. */
     view(sessionId: string): readonly CacheRecord[] {
       const session = getSession(sessionId)

@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { rewriteCut } from './rewrite-feed.js'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-host-webserver'
@@ -7,7 +8,6 @@ import type { createCareChanges } from './care-changes.js'
 import { CARE_FRAME_BYTES, CareSubscription, careSubscriptionKey, type CareSubscriptionValue, type CareFrameValue } from './care-stream.js'
 
 const Value = z.record(z.string(), z.json())
-const Rewrites = z.object({ records: z.array(z.object({ hash: z.string().min(1), sessionId: z.string() }).catchall(z.json())) })
 type Reader = (query: CareSubscriptionValue, signal: AbortSignal) => Promise<unknown>
 
 /** One authenticated connection pushes the subscribed data, including its initial snapshot.
@@ -32,7 +32,7 @@ export function installChangeRoute(ctx: Context, changes: ReturnType<typeof crea
     if (queries.some(query => !ctx.sessions.get(query.sessionId as SessionId))) { res.writeHead(404); res.end(); return }
     const subscriptions = new Map(queries.map(query => [careSubscriptionKey(query), {
       query, dirty: true, failed: false, revision: 0, signature: undefined as string | undefined,
-      rewrites: undefined as Map<string, z.infer<typeof Rewrites>['records'][number]> | undefined,
+      rewrites: undefined as ReturnType<typeof rewriteCut>, cursor: {},
     }]))
     res.writeHead(200, { 'content-type': 'application/x-ndjson', 'cache-control': 'no-store', 'x-accel-buffering': 'no' })
     res.flushHeaders()
@@ -62,28 +62,31 @@ export function installChangeRoute(ctx: Context, changes: ReturnType<typeof crea
           const { query } = subscription
           const envelope = { key, sessionId: query.sessionId, topic: query.topic, revision: subscription.revision + 1 }
           try {
-            // Detach optional owner fields at the JSON wire boundary once. Reads never
-            // write owner state or emit another change notification.
-            const value = Value.parse(JSON.parse(JSON.stringify(await read(query, controller.signal))))
+            const raw = await read(query, controller.signal)
             if (closed) break
-            const signature = JSON.stringify(value)
-            if (signature === subscription.signature) continue
-            let frame: CareFrameValue = { ...envelope, type: 'snapshot', value }
-            let nextRewrites = subscription.rewrites
             if (query.topic === 'rewrites') {
-              const records = Rewrites.parse(value).records
-              if (records.some(record => record.sessionId !== query.sessionId)) throw new Error('context-care: cross-session rewrite')
-              nextRewrites = new Map(records.map(record => [record.hash, record]))
-              if (subscription.rewrites) {
-                const previous = subscription.rewrites
-                frame = { ...envelope, type: 'delta', value: {
-                  records: records.filter(record => JSON.stringify(record) !== JSON.stringify(previous.get(record.hash))),
-                  removed: [...previous.keys()].filter(hash => !nextRewrites?.has(hash)),
-                } }
-              }
+              // The shared owner already validates/normalizes each actual rewrite.
+              // Do not clone, validate or stringify the complete history per subscriber.
+              const cut = rewriteCut(raw)
+              if (!cut) throw new Error('context-care: rewrite projection unavailable')
+              const initial = subscription.rewrites?.feed !== cut.feed
+              if (initial) subscription.cursor = {}
+              const delta = cut.feed.consume(subscription.cursor)
+              if (!initial && !delta.added.length && !delta.removed.length) continue
+              if (delta.added.some(record => record.sessionId !== query.sessionId)) throw new Error('context-care: cross-session rewrite')
+              const replaced = new Set(delta.added.map(record => record.hash))
+              send(initial ? { ...envelope, type: 'snapshot', value: { records: [...delta.added] } }
+                : { ...envelope, type: 'delta', value: { records: [...delta.added],
+                  removed: delta.removed.filter(record => !replaced.has(record.hash)).map(record => record.hash) } })
+              subscription.rewrites = cut; subscription.revision++
+            } else {
+              // Detach optional fields only for the selected bounded page.
+              const value = Value.parse(JSON.parse(JSON.stringify(raw)))
+              const signature = JSON.stringify(value)
+              if (signature === subscription.signature) continue
+              send({ ...envelope, type: 'snapshot', value })
+              subscription.signature = signature; subscription.revision++
             }
-            send(frame)
-            subscription.signature = signature; subscription.rewrites = nextRewrites; subscription.revision++
           } catch (error) {
             if (closed) break
             subscription.failed = true

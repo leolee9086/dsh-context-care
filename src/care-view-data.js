@@ -42,7 +42,7 @@ export function createCarePages(ctx) {
 
 /** Build the subscribed page from committed owner state, without performing HTTP reads.
  * @param {import('@deepseek-ai/cordis').Context} ctx
- * @param {{ list(filter: { sessionId: string }): Promise<object[]> }} journal
+ * @param {{ view(sessionId: string): Promise<object> }} journal
  * @returns {(query: import('./care-stream.js').CareSubscriptionValue, signal: AbortSignal) => Promise<unknown>} */
 export function createCareViewReader(ctx, journal, pages = createCarePages(ctx)) {
   return async (query, signal) => {
@@ -53,7 +53,7 @@ export function createCareViewReader(ctx, journal, pages = createCarePages(ctx))
     if (!session) throw new Error(`context-care: session unavailable: ${sessionId}`)
     switch (topic) {
       case 'status': return careStatus(ctx, sessionId)
-      case 'rewrites': return { records: await journal.list({ sessionId }) }
+      case 'rewrites': return journal.view(sessionId)
       case 'controls': {
         const snapshot = ctx.contextCareRequests.controls.snapshot(sessionId)
         const reminders = ctx.get('reminderRules')

@@ -2,6 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { contentHash, changedBlocks, createRewriteJournal, NAMESPACE, REWRITE_NAME } from '../src/rewrite-journal.js'
 import { contentHash as clientContentHash } from '../src/rewrite-view.js'
+import { createSessionCache } from '../lib/session-cache.js'
+import { rewriteCut, rewriteSnapshot } from '../lib/rewrite-feed.js'
 
 test('Host 与客户端的哈希实现必须一致 —— 不一致卡片就永远不出现', () => {
   const samples = [
@@ -125,6 +127,74 @@ test('属性表写不进去时退到进程内,且不抛', async () => {
   assert.match(warns[0], /只留在进程内/)
   // 记录还在,读得到。
   assert.equal((await journal.list({ sessionId: 's1' })).length, 1)
+})
+
+test('managed rewrite reads preserve legacy precedence, concurrent reads, removals and failed writes', async () => {
+  const cache = createSessionCache(), owner = {}, sessionId = 'one'
+  const durableRows = [{ sessionId, hash: 'same', at: 2, pattern: 'native' }]
+  let stored = [{ sessionId, value: { hash: 'same', at: 2, pattern: 'legacy-tie' } },
+    { sessionId, value: { hash: 'external', at: 1 } }]
+  let reads = 0, failWrite = false
+  const journal = createRewriteJournal({ logs: { cache }, owner: () => owner,
+    store: () => ({ async listAttributes(query) { reads++; assert.equal(query.sessionId, sessionId); return stored } }),
+    durable: { list: async () => durableRows, put: async () => { if (failWrite) throw new Error('rejected-rewrite') } } })
+  const [one, two] = await Promise.all([journal.view(sessionId), journal.view(sessionId)])
+  assert.equal(one, two); assert.equal(reads, 1)
+  const cursor = {}, initial = rewriteCut(one).feed.consume(cursor)
+  assert.equal(initial.added.find(row => row.hash === 'same').pattern, 'native')
+  const old = await journal.list({ sessionId })
+  assert.equal(rewriteSnapshot(one), rewriteSnapshot(two), 'first readers share the full wire cut')
+  stored = [{ sessionId, value: { hash: 'same', at: 3, pattern: 'new-external' } },
+    { sessionId: 'private', value: { hash: 'private', at: 20 } }]
+  const after = await journal.view(sessionId), delta = rewriteCut(after).feed.consume(cursor)
+  assert.deepEqual(delta.added.map(row => row.hash), ['same']); assert.equal(delta.removed.length, 2)
+  assert.equal(delta.added[0].pattern, 'new-external'); assert.equal(old.length, 2)
+  await journal.record({ sessionId, hash: 'same', at: 4, pattern: 'local' })
+  assert.equal((await journal.list({ sessionId }))[0].pattern, 'local')
+  failWrite = true
+  await assert.rejects(journal.record({ sessionId, hash: 'rejected' }), /rejected-rewrite/)
+  assert.equal((await journal.list({ sessionId })).some(row => row.hash === 'rejected'), false)
+  journal.close(); assert.equal(cache.report().some(row => row.name.startsWith('rewrite-')), false); cache.close()
+})
+
+test('managed rewrite failure discards partially advanced cursors and retries all selected facts', async () => {
+  const cache = createSessionCache(), owner = {}, sessionId = 'one'
+  let rows = [{ sessionId, hash: 'first', at: 1 }], invalid = true
+  const journal = createRewriteJournal({ logs: { cache }, owner: () => owner, store: () => undefined,
+    durable: { put: async () => {}, list: async () => invalid ? [...rows, { sessionId, hash: 'bad', at: 2, extra: () => {} }] : rows } })
+  // JSON intentionally excludes functions; invalid JSON numbers are normalized too.
+  const cold = await journal.view(sessionId), cursor = {}; rewriteCut(cold).feed.consume(cursor)
+  rows = [...rows, { sessionId, hash: 'later', at: 3 }]
+  const circular = { sessionId, hash: 'circular' }; circular.self = circular
+  rows.push(circular); invalid = false
+  await assert.rejects(journal.view(sessionId), /circular/i)
+  rows.pop()
+  const rebuilt = await journal.view(sessionId)
+  assert.notEqual(rewriteCut(rebuilt).feed, rewriteCut(cold).feed)
+  assert.deepEqual(rewriteSnapshot(rebuilt).map(row => row.hash), ['later', 'first'])
+  journal.close(); cache.close()
+})
+
+test('managed rewrite explicit lists retain durable, index and local tie ordering', async () => {
+  const cache = createSessionCache(), owner = {}, sessionId = 'one'
+  const journal = createRewriteJournal({ logs: { cache }, owner: () => owner,
+    store: () => ({ listAttributes: async () => [{ sessionId, value: { hash: 'index', at: 1 } }] }),
+    durable: { put: async () => {}, list: async () => [{ sessionId, hash: 'durable', at: 1 }] } })
+  await journal.record({ sessionId, hash: 'local', at: 1 })
+  assert.deepEqual((await journal.list({ sessionId })).map(row => row.hash), ['durable', 'index', 'local'])
+  journal.close(); cache.close()
+})
+
+test('managed rewrite close rejects pending reads and writes without resurrecting cache owners', async () => {
+  const cache = createSessionCache(), owner = {}; let releaseRead, releaseWrite
+  const journal = createRewriteJournal({ logs: { cache }, owner: () => owner, store: () => undefined,
+    durable: { list: () => new Promise(resolve => { releaseRead = resolve }), put: () => new Promise(resolve => { releaseWrite = resolve }) } })
+  const reading = journal.view('one'), writing = journal.record({ sessionId: 'one', hash: 'pending' })
+  const rejectedRead = assert.rejects(reading, /journal closed/), rejectedWrite = assert.rejects(writing, /journal closed/)
+  journal.close(); releaseRead([]); releaseWrite()
+  await Promise.all([rejectedRead, rejectedWrite])
+  assert.equal(cache.report().length, 0); await assert.rejects(journal.list({ sessionId: 'one' }), /journal closed/)
+  cache.close()
 })
 
 test('属性表与进程内合并去重', async () => {

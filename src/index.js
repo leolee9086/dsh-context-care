@@ -257,6 +257,7 @@ export function installContextCare(ctx, raw, compactionSource) {
   // 改写由本插件的 Host 持久域保管，不依赖可选索引服务。
   // 索引属性表仍可写副本用于 JOIN；在调用边界现取，允许它晚于本插件注册。
   const rewriteJournal = createRewriteJournal({
+    logs: history, owner: id => ctx.sessions.get(id),
     store: () => ctx.get('sessionBlockQuery'),
     durable: {
       put(entry) {
@@ -265,11 +266,12 @@ export function installContextCare(ctx, raw, compactionSource) {
         return ctx.contextCareRequests.recordAction(session, { action: 'request-rewrite', phase: 'recorded', rewrite: entry })
       },
       async list(sessionId) {
-        return ctx.contextCareRequests.list(sessionId).filter(record => record.kind === 'maintenance' && record.data.action === 'request-rewrite').map(record => record.data.rewrite)
+        return ctx.contextCareRequests.rewriteRecords(sessionId)
       },
     },
     warn: message => ctx.logger.warn(message),
   })
+  ctx.effect(() => () => rewriteJournal.close())
   /** 运行诊断写 logger；已投递提示的依据由消息中的 contextCareTrace 保留。 */
   const recordHit = (layer, record, where) => transformLog.record({ ...record, ...where, layer })
 

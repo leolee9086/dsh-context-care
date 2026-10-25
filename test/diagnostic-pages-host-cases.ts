@@ -10,6 +10,8 @@ import type { DiagnosticRead, DiagnosticRecordInput } from '../lib/diagnostic-pa
 import { ensureSessionLog } from '../lib/session-log.js'
 import { createDiagnosticPages, createDiagnosticIndex, isDiagnosticDelta, createDiagnosticRecordFeed, compareDiagnosticRecords } from '../lib/diagnostic-pages.js'
 import { createRequestCache } from '../lib/request-cache.js'
+import { createRewriteJournal } from '../src/rewrite-journal.js'
+import { rewriteCut, rewriteSnapshot } from '../lib/rewrite-feed.js'
 import type { CacheRecord } from '../lib/request-cache.js'
 import { createPromptIndex, promptEventTypes } from '../src/prompt-view-data.js'
 import { createActionIndex, actionEventTypes } from '../src/action-view-data.js'
@@ -72,6 +74,48 @@ export function registerDiagnosticPageCases(harness: Harness): void {
     assert.equal(old.length, 1000); assert.equal(cache.view(String(session.id)).length, 1001)
     // Restore the native array iterator before Host teardown, not to permit production rescans.
     Object.defineProperty(native, Symbol.iterator, { configurable: true, value: originalIterator })
+  })
+
+  test('native rewrite views never initialize settled history and coalesce exact wire changes', async t => {
+    const ctx = await harness.open(t), logs = ensureSessionLog(ctx), session = ctx.sessions.create(SessionId('native-rewrite-view'))
+    const cache = createRequestCache({ sessions: ctx.sessions, logs, measureInput: () => ({ textTokens: 0, visualTokens: 0 }) })
+    const journal = createRewriteJournal({ logs, owner: () => session, store: () => undefined, durable: {
+      put: async (rewrite: object) => cache.put('rewrite', String(session.id), 'maintenance', { action: 'request-rewrite', phase: 'recorded', rewrite }),
+      list: () => cache.rewriteRecords(String(session.id)),
+    } })
+    t.after(async () => { journal.close(); await cache.close() })
+    const reads = t.mock.method(session, 'eventAt'), snapshot = t.mock.method(session, 'snapshotEvents')
+    t.mock.method(cache, 'list', () => { throw new Error('full-request-list') })
+    t.mock.method(cache, 'view', () => { throw new Error('full-request-view') })
+    for (let index = 0; index < 1000; index++) await journal.record({ sessionId: String(session.id), hash: `rewrite-${index}`, at: index, removed: 'x'.repeat(2048) })
+    const cold = await journal.view(String(session.id)), cursor = {}, slow = {}
+    assert.equal(rewriteCut(cold)!.feed.consume(cursor).added.length, 1000)
+    assert.equal(rewriteCut(cold)!.feed.consume(slow).added.length, 1000)
+    const old = [...rewriteSnapshot(cold)]
+    const work = () => logs.cache.report().find(row => row.name === 'rewrite-view')?.work
+    assert.equal(work(), 1000)
+    const wireBuilds = () => logs.cache.report().find(row => row.name === 'rewrite-wire')?.builds
+    const built = wireBuilds()
+    for (let index = 0; index < 10; index++) {
+      assert.equal(await journal.view(String(session.id)), cold)
+      assert.equal(rewriteCut(cold)!.feed.consume(cursor).added.length, 0)
+    }
+    assert.equal(work(), 1000)
+    assert.equal(wireBuilds(), built, 'unchanged reads never reparse or clone rewrite bodies')
+    for (let index = 1000; index < 1020; index++) {
+      await journal.record({ sessionId: String(session.id), hash: 'rewrite-0', at: index, added: String(index) })
+      const value = await journal.view(String(session.id))
+      const delta = rewriteCut(value)!.feed.consume(cursor)
+      assert.equal(delta.added.length, 1); assert.equal(delta.removed.length, 1)
+    }
+    const latest = await journal.view(String(session.id)), delta = rewriteCut(latest)!.feed.consume(slow)
+    assert.equal(delta.added.length, 1); assert.equal(delta.removed.length, 1)
+    assert.equal(delta.added[0].added, '1019'); assert.equal(old[999].at, 0)
+    assert.equal(work(), 1020); assert.equal(reads.mock.callCount(), 0); assert.equal(snapshot.mock.callCount(), 0)
+    logs.cache.release(session)
+    const rebuilt = await journal.view(String(session.id))
+    assert.notEqual(rewriteCut(rebuilt)!.feed, rewriteCut(latest)!.feed)
+    assert.equal(rewriteSnapshot(rebuilt).length, 1000)
   })
 
   test('native diagnostic pages materialize only requested bodies and retain unaffected entries', async t => {

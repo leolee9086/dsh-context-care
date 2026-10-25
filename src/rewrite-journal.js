@@ -1,3 +1,5 @@
+import { createRewriteProjection, rewriteSnapshot } from '../lib/rewrite-feed.js'
+
 // src/rewrite-journal.js — 改写记录:会话日志**之外**的旁路流水账。
 //
 // 为什么不在会话日志里(2026-09-23/24 查实的结论):
@@ -158,14 +160,46 @@ export function changedBlocks(before, after) {
  * @param {object} deps
  * @param {() => object|undefined} deps.store 取索引插件服务;每次现取(它可能晚于本插件注册)。
  * @param {{put: Function, list: Function}} [deps.durable] Host 持久写入及 ACK 后读取；正式 runtime 提供。
+ * @param {import('../lib/session-log.js').SessionLog} [deps.logs] 正式运行统一缓存所有者。
+ * @param {(id: string) => object|undefined} [deps.owner] 当前原生Session身份；不能按字符串跨重建复用。
  * @param {(message: string) => void} [deps.warn] 旧属性表的诊断输出。
  * @returns 记录、查询和持久格式标识。
  */
-export function createRewriteJournal({ store, durable, warn = () => {} }) {
+export function createRewriteJournal({ store, durable, logs, owner, warn = () => {} }) {
   /** 进程内的那份。sessionId → 记录数组。 */
   const memory = new Map()
+  const projection = logs ? createRewriteProjection(logs) : undefined
+  // Only in-flight I/O lives here; completed facts belong to the unified cache.
+  const pending = new WeakMap()
+  let closed = false
 
   return {
+    close() { closed = true; projection?.close(); memory.clear() },
+    /** Internal stable cut; production stream consumes its coalesced delta. */
+    async view(sessionId) {
+      if (closed) throw new Error('context-care: rewrite journal closed')
+      if (!projection || !owner) throw new Error('context-care: rewrite projection unavailable')
+      const session = owner(sessionId)
+      if (!session) throw new Error(`context-care: rewrite session unavailable: ${sessionId}`)
+      const running = pending.get(session)
+      if (running) return running
+      const reading = (async () => {
+      const durableRows = durable ? (await durable.list(sessionId)).filter(value => typeof value?.hash === 'string' && value.hash) : []
+      const service = store()
+      let stored = []
+      if (service && typeof service.listAttributes === 'function') {
+        try {
+          stored = (await service.listAttributes({ namespace: NAMESPACE, name: REWRITE_NAME, sessionId }))
+            .filter(item => typeof item.value?.hash === 'string' && item.value.hash && item.sessionId === sessionId)
+            .map(item => ({ ...item.value, sessionId: item.sessionId }))
+        } catch (error) { warn('context-care: 旧索引读取失败，仍返回 Host 持久记录: ' + (error instanceof Error ? error.message : String(error))) }
+      }
+      if (closed) throw new Error('context-care: rewrite journal closed')
+      return projection.read(session, sessionId, memory.get(sessionId) ?? [], durableRows, stored)
+      })()
+      pending.set(session, reading)
+      try { return await reading } finally { if (pending.get(session) === reading) pending.delete(session) }
+    },
     // 供 HTTP 诊断确认当前进程实际加载了 wire 格式解析，不以磁盘修改时间推断。
     format: 'wire-v1',
     /**
@@ -177,6 +211,7 @@ export function createRewriteJournal({ store, durable, warn = () => {} }) {
      * @returns {Promise<{persisted: boolean}>} 是否由 Host 或旧属性表确认持久化。
      */
     async record(entry) {
+      if (closed) throw new Error('context-care: rewrite journal closed')
       const row = {
         sessionId: entry.sessionId,
         seq: undefined,
@@ -199,6 +234,7 @@ export function createRewriteJournal({ store, durable, warn = () => {} }) {
       // Publish the local index only after the authoritative write acknowledges it.
       // A failed or pending write must not appear as a completed rewrite.
       if (durable) await durable.put(row.value)
+      if (closed) throw new Error('context-care: rewrite journal closed')
       const bucket = memory.get(row.sessionId) ?? []
       bucket.push(row)
       memory.set(row.sessionId, bucket)
@@ -223,7 +259,9 @@ export function createRewriteJournal({ store, durable, warn = () => {} }) {
      * @returns {Promise<Array<object>>} 记录数组,新在前。
      */
     async list(filter = {}) {
+      if (closed) throw new Error('context-care: rewrite journal closed')
       const sessionId = filter.sessionId
+      if (projection && sessionId !== undefined) return [...rewriteSnapshot(await this.view(sessionId))]
       const rows = []
       if (durable) for (const value of await durable.list(sessionId)) rows.push({ hash: value.hash, value })
       const service = store()
