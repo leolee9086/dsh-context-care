@@ -53,7 +53,19 @@ function planRequest({ request, blocks, rules, events, templates, snapshot, deci
   let next = request
   // Notifications and scheduled jobs do not mutate request payloads. Copy only
   // at the first actual patch, preserving native signal and prepared-call handles.
-  const writable = () => { if (next === request) next = ownedRequest(request); return next }
+  const writable = () => {
+    if (next === request) {
+      next = ownedRequest(request)
+      analysis?.modelProjection?.cloned(request.messages, next.messages)
+    }
+    return next
+  }
+  const writeBlock = (block, value) => {
+    const owned = writable()
+    if (block.messageIndex >= 0) analysis?.modelProjection?.changed(owned.messages[block.messageIndex])
+    // Cached bodies are immutable; rewritten requests retain independently writable JSON.
+    setRequestBlock(owned, block, value === undefined ? undefined : structuredClone(value))
+  }
   const indexed = analysis ? analysis.blockIndex(blocks) : indexRequestBlocks(blocks)
   const writableBlocks = indexed.model, writableById = indexed.byId
   const patches = []; const filters = new Set(); const filteredCalls = new Set(); const insertions = []; const records = []; const applied = []; const scheduled = []
@@ -103,7 +115,7 @@ function planRequest({ request, blocks, rules, events, templates, snapshot, deci
           const currentArgs = changes.at(-1)?.value ?? block.arguments
           const value = patchArguments(currentArgs, action.patch.path, bindInputs(action.patch.value, context))
           changes.push({ path: action.patch.path, value }); argumentPatches.set(block.id, changes)
-          setRequestBlock(writable(), block, { ...block.raw, arguments: JSON.stringify(value) })
+          writeBlock(block, { ...block.raw, arguments: JSON.stringify(value) })
           record.before = JSON.stringify(currentArgs); record.after = JSON.stringify(value)
         } else {
           if ((event.field ?? 'block.text') !== 'block.text') throw new Error('replacement-evidence-is-not-block-text')
@@ -167,7 +179,7 @@ function planRequest({ request, blocks, rules, events, templates, snapshot, deci
     }
   }
   const patched = applyBlockPatchesV2(writableBlocks, patches)
-  for (const block of patched.blocks) if (block !== writableById.get(block.id) && !filters.has(block.id)) setRequestBlock(writable(), block, block.raw)
+  for (const block of patched.blocks) if (block !== writableById.get(block.id) && !filters.has(block.id)) writeBlock(block, block.raw)
   // Match parent paths only in the same message, excluding synthetic result wrappers.
   const removedPaths = new Set()
   if (filters.size) for (const block of blocks) if (filters.has(block.id) && block.path !== '$result') {
@@ -175,9 +187,12 @@ function planRequest({ request, blocks, rules, events, templates, snapshot, deci
   }
   // Deletions run deepest and rightmost first so they never shift an outstanding path.
   for (const block of writableBlocks.filter(block => filters.has(block.id)).sort((a, b) => b.messageIndex - a.messageIndex || b.path.localeCompare(a.path, undefined, { numeric: true }))) {
-    if (block.path === '$result') { writable().messages[block.messageIndex].content = []; continue }
+    if (block.path === '$result') {
+      const owned = writable(); analysis?.modelProjection?.changed(owned.messages[block.messageIndex])
+      owned.messages[block.messageIndex].content = []; continue
+    }
     if (filteredAncestor(block, removedPaths)) continue
-    if (next.messages[block.messageIndex]?.content.length || block.messageIndex === -1) setRequestBlock(writable(), block, undefined)
+    if (next.messages[block.messageIndex]?.content.length || block.messageIndex === -1) writeBlock(block, undefined)
   }
   for (const insertion of [...insertions].sort((a, b) => b.at - a.at || a.priority - b.priority || b.key.localeCompare(a.key))) {
     writable()

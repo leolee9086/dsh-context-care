@@ -16,8 +16,15 @@ interface Analysis<T> {
  * @param cache Host-owned projection storage; close releases this operation's domain.
  * @returns Scoped analysis, comparison and disposal functions.
  */
-export declare function createRequestPlanCache<R extends Payload, I>(measure: (before: R, after: R) => I, cache: SessionCache): {
+export declare function createRequestPlanCache<R extends Payload, I, B = unknown>(measure: (before: R, after: R) => I, cache: SessionCache, project?: (message: R['messages'][number]) => readonly B[]): {
     read: (request: R) => Analysis<I>;
+    modelProjection: {
+        read(message: R["messages"][number]): readonly B[];
+        system(text: string, message: R["messages"][number]): readonly B[];
+        cloned(before: readonly R["messages"][number][], after: readonly R["messages"][number][]): void;
+        changed(message: R["messages"][number]): void;
+        close(): void;
+    } | undefined;
     blockIndex: (blocks: readonly RequestBlock[]) => {
         model: RequestBlock[];
         byId: Map<string, RequestBlock>;

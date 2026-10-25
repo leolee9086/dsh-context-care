@@ -1,5 +1,19 @@
 # 诊断查询与数据推送验收
 
+## v0.14.7：规划内模型正文复用与实际视图依赖（2026-10-26）
+
+第36轮沿request-blocks.modelRequestBlocks和workbench显式cascade局部处理，未重扫业务长日志。旧实现每次完整遍历并clone各块raw/source/parse参数；现正文与每视图envelope分离，TS request-model-projection由既有createRequestPlanCache纳入Host统一SessionCache，弱message身份复用冻结的自有正文。规划器完整复制前后消息可明确继承已构建正文；在文本/参数/filter写入前只失效该message，system按文本失效。ID/requestId/messageIndex/native origin/turn继续每视图建立；不把不同view位置缓存进正文。真正变更请求仍full ownedRequest独立可写，写入的raw再复制，缓存不能冻结源请求或污染旧cut。close清域并拒绝重建，部分project失败可显式retry。
+
+同路径发现cascade始终originalSessionBlocks，即使剩余规则只选择model；原生历史正文被无用展开后还进入Worker传输。现按remaining的选择及动作target实际view依赖读取，没有截断生产历史/修改Harness/放宽Worker计时或输入上限。额外复查发现original选择可注入model，故初始及cascade都合并select.view与action.target.view；跨view原生回归保留原始证据到模型锚点再到下一次级联。单次生成千条消息真实三级链先因4MiB输入上限正确失败；最终保留1000消息全请求，生成正文256字符（原样本1024），规则显式depth1，未以失败样本宣称通过。另一次失败为测试错误要求原生createMessage可写，原生本就冻结；现比较输入原冻结状态，仍要求结果独立可写。两个失败日志保留。
+
+严格类型和20项定向请求回归通过；其中7项新增覆盖1000消息2KB正文十次不变/clone身份/仅一条编辑重建/旧cut/system/重排/来源/requestId，嵌套tool-result/签名/解析错误、partial-failure/close后拒绝重建，实际replace/tool-arguments/成对filter/预算排除重规划。真实Host千消息三级级联bodyProjections恰1003（1000输入+system+两个已检查注入），应用3项，返回1003消息，输入及原冻结状态不变，结果独立可写；nativeReads1000、snapshotEvents/deriveMessages0、所有request-plan/model缓存释放。最终定向观测plan460.25ms、鉴权HTTP90.21ms/另一Agent107.93ms、CPU813/47ms、loop30.44ms；该样本在去除无依赖original展开前曾约35秒但在原生冻结断言处失败，没有把失败计为通过或直接用不完整时点作精确加速比。
+
+最终同代码完整release:check通过：strict/104JS/62事件目录、506/506单元（17506.71ms）、Host/Client构建；完整源码Host216/216（243128.40ms）、Client3文件24/24（4.04s）。在最后跨view修复前启动的完整任务已kill并收取，不计最终结果；最终任务从定向跨view、release到完整Host/Client串行重跑，未放宽阈值或修改Harness。
+
+同次最终Host：千消息三级链project1003，plan499.15ms、HTTP33.71ms/另一Agent46.53ms、CPU547/125ms、loop32.67ms；500配对工具/1000请求消息过滤909.46ms、HTTP43.51ms/另一Agent55.55ms、两次预览CPU1828/125ms、loop553.65ms，后者冷路径仍明显阻塞，不据前者改善称全修。2012工作台display354.62/3.25ms、reconcile566.74/3.01ms、HTTP29.22ms/另一Agent37.48ms、reconcile HTTP3.63ms、CPU922/172ms、loop46.83ms；7001诊断cold155.03/warm3.27/追加2.46ms、20阶段96.19ms、阶段HTTP24.52ms/另一Agent39.34ms、CPU516/47ms、loop130.48ms；4002提醒collect4.45/0.19ms、historyReads0、HTTP25.23ms/另一Agent33.81ms、CPU47/0ms、loop23.64ms。改写无外部20新增105.54ms/HTTP104.22ms/另一Agent113.10ms/CPU156+15ms/loop72.55ms/wire1020；外部fresh500为207.67ms/HTTP204.23ms/另一Agent215.27ms/CPU266+16ms/loop108.13ms/wire1540，21帧且每delta仅1记录、阶段零新增native读。
+
+桌面0.2.1-rc.3 ASAR隔离22/22实质、0skip、stderr空、exit0（20180.88ms）；新增千消息三级链341.78ms、HTTP19.87ms/另一Agent26.65ms、CPU375/109ms、loop27.66ms/project1003；工具过滤537.65ms/loop283.90ms；工作台reconcile451.46/2.56ms，7001诊断20阶段40.41ms/HTTP10.89ms/另一Agent18.72ms、loop79.82ms。包括原生取消/旧cut/内容更新及新增跨view锚点，没有代装插件。最终包用唯一artifacts/final-v0147-round36路径及全新.local/consumer-final-v0.14.7-20261026普通pnpm add --offline安装，无脚本/依赖例外；8个公开入口、Client factory、嵌套raw块、已安装model投影复用/单消息改写/结果独立可写/close全域释放及真实Worker通过，src/lib共215个JS/d.ts逐字一致。SHA256与提交/tag/独立远端核验写持久记录，包之后源码无变化。尚有首次正文构造/每视图envelope遍历、实际变更full-copy/完整byte比较/Worker JSON传输及无revision外部查询比较成本；不将本次计数证明写成所有未知路径完成。同GUI实际加载/CPU/loop/鉴权HTTP/另一Agent、14思源规则原生接纳/最终投递/去重仍需哥哥安装后现场，真实时间窗不伪造；未代装启用重启。
+
 ## v0.14.6：请求规划的工具组与删除祖先索引（2026-10-26）
 
 第35轮从request-blocks到实际workbench plan发现：每个工具过滤action都blocks.filter完整块列表，多个子块命中同call还会重复校验/添加整组；每个删除块blocks.some重扫全表寻找已删祖先。现TypeScript纯索引按输入顺序保留模型块、ID和跨view工具组；既有createRequestPlanCache将不可变数组索引纳入Host统一SessionCache，在同操作及预算重规划复用，finally close同时释放分析和块索引。相同call只校验/加入一次，仍保留每个命中的动作记录；删除祖先以同messageIndex和完整路径组件查询，排除$result包装，不改变深层/从右到左顺序。

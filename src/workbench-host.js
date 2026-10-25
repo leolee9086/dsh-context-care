@@ -7,7 +7,7 @@ import { createTemplates } from './templates.js'
 import { createBoundedMatcher, MatcherFailure } from './bounded-matcher.js'
 import { createDetectorRegistry } from './detector-registry.js'
 import { createExecutorRegistry, createActionRuns, compactExecutorRef } from './action-runs.js'
-import { originalSessionBlocks as readOriginalBlocks, modelRequestBlocks as readModelBlocks, sessionTurn as readSessionTurn } from './request-blocks.js'
+import { originalSessionBlocks as readOriginalBlocks, modelRequestBlocks as readModelBlocks, projectRequestMessage, sessionTurn as readSessionTurn } from './request-blocks.js'
 import { ensureSessionLog } from '../lib/session-log.js'
 import { createWorkbenchWindow } from '../lib/workbench-window.js'
 import { planRequestV2 } from './request-plan.js'
@@ -19,6 +19,8 @@ import { importWorkbench } from './workbench-import.js'
 import { createDeltaProjection } from './delta-projection.js'
 import { readRuleFiles, assertFileRevision } from './rule-files.js'
 
+// Injection anchors can live in a different view from the matching evidence.
+const requestViews = rules => new Set(rules.flatMap(rule => [rule.select.view, ...rule.actions.map(action => action.target?.view).filter(Boolean)]))
 const actionKey = (event, action) => JSON.stringify([event.sourceId, event.ruleId, event.ruleRevision, action.id])
 const dispatchKey = (event, action) => `$dispatch:${actionKey(event, action)}`
 const dispatchItems = planned => [...new Map([...planned.applied, ...(planned.entryTransitions ?? [])].map(item => [dispatchKey(item.event, item.action), item])).values()]
@@ -36,7 +38,7 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
   const sessionTurn = session => history.withLive(session, log => readSessionTurn(session, log))
   const entryTurn = session => history.withLive(session, log => readEntryTurn(session, log))
   const originalSessionBlocks = session => readOriginalBlocks(session, history)
-  const modelRequestBlocks = (session, request, requestId) => readModelBlocks(String(session.id), request, requestId, history.origins(session), sessionTurn(session))
+  const modelRequestBlocks = (session, request, requestId, analysis) => readModelBlocks(String(session.id), request, requestId, history.origins(session), sessionTurn(session), analysis.modelProjection)
   const report = error => ctx.logger.warn(`context-care: workbench failed: ${String(error)}`)
   const templates = createTemplates()
   const registrations = new Map(); const observations = new Map(); const admittedSessions = new Map(); let generation = 0; let closed = false; let closing
@@ -231,7 +233,7 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
   /** @param {ReturnType<typeof createRequestPlanCache<import('@deepseek-ai/dsh-llm').GenerateOptions, ReturnType<typeof requestImpact>>>} [analysis] */
   async function plan(agent, request, stage, suppliedBlocks, freshSeq, analysis) {
     const ownedAnalysis = analysis === undefined
-    analysis ??= createRequestPlanCache(requestImpact, history.cache)
+    analysis ??= createRequestPlanCache(requestImpact, history.cache, projectRequestMessage)
     try { return await evaluatePlan(agent, request, stage, suppliedBlocks, freshSeq, analysis) }
     catch (error) {
       if (!(error instanceof MatcherFailure) || request.signal?.aborted) throw error
@@ -252,10 +254,10 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
     const rules = definitions(agent).filter(rule => rule.on.includes(stage))
     const snapshot = { session: { id: String(agent.session.id), turnId: sessionTurn(agent.session) }, vars: variableSnapshot({ ...record(agent), documents: docs }, sessionTurn(agent.session)),
       ...(freshSeq === undefined ? {} : { currentSeq: freshSeq }) }
-    const views = new Set(rules.map(rule => rule.select.view))
+    const views = requestViews(rules)
     const blocks = suppliedBlocks ?? [
       ...(views.has('original') ? originalSessionBlocks(agent.session) : []),
-      ...(views.has('model') ? modelRequestBlocks(agent.session, request, randomUUID()) : []),
+      ...(views.has('model') ? modelRequestBlocks(agent.session, request, randomUUID(), analysis) : []),
     ]
     const id = String(agent.session.id)
     const admissions = freshSeq === undefined ? undefined : ruleAdmissions(agent, rules, docs)
@@ -309,7 +311,11 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
         const remaining = enabled.filter(rule => cascading.has(JSON.stringify([rule.sourceId, rule.id])) && !visited.has(JSON.stringify([rule.sourceId, rule.id])))
         if (!remaining.length) break
         // Only explicit cascade entries scan the changed model view. Baseline rules and programs never replay here.
-        const nextBlocks = [...originalSessionBlocks(agent.session), ...modelRequestBlocks(agent.session, planned.request, randomUUID())]
+        const nextViews = requestViews(remaining)
+        const nextBlocks = [
+          ...(nextViews.has('original') ? originalSessionBlocks(agent.session) : []),
+          ...(nextViews.has('model') ? modelRequestBlocks(agent.session, planned.request, randomUUID(), analysis) : []),
+        ]
         const found = await matcher.detect({ rules: remaining, blocks: nextBlocks, stage, snapshot }, request.signal,
           { sessionId: id, current: () => captured === token(agent) })
         if (!found.length) break
@@ -632,7 +638,7 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
         if (!fresh.length) return
         const all = originalSessionBlocks(agent.session)
         let request = { messages: history.messages(agent.session), purpose: 'preview', signal }
-        const analysis = createRequestPlanCache(requestImpact, history.cache)
+        const analysis = createRequestPlanCache(requestImpact, history.cache, projectRequestMessage)
         try {
           const indexed = { length: all.length, at: index => all[index], slice: (from, end) => all.slice(from, end) }
           const generation = agent.session.surface.replaceGeneration

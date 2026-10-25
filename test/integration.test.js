@@ -712,12 +712,26 @@ registerWorkbenchPerformanceCases({ async open(t) {
   const owned = await fixture(t, false), ctx = await owned.open(), service = ctx.contextCareWorkbench
   const agent = await ctx.agentLoop.create('workbench-performance', { provider: 'care-test', model: 'care-test' })
   const displayCalls = t.mock.method(service, 'display')
+  const projectionCalls = t.mock.method(ensureSessionLog(ctx).cache, 'worked')
   const { base, cookie } = await controlCookie(ctx)
   ctx.llm.registerAdapter(['care-test'], new CompletionAdapter([{ blocks: [{ type: 'text', text: 'Independent workbench probe completed.' }] }]))
   return { session: agent.session,
     preview: request => service.preview(agent, request), cacheNames: () => ensureSessionLog(ctx).cache.report().map(row => row.name),
+    projectionWork: () => projectionCalls.mock.calls.filter(call => call.arguments[0].name === 'request-model-projection')
+      .reduce((sum, call) => sum + (call.arguments[1] ?? 1), 0),
     configure: filters => service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: {
-      schemaVersion: 2, id: 'workbench-performance', revision: 1, title: 'Performance', rules: filters ? [
+      schemaVersion: 2, id: 'workbench-performance', revision: 1, title: 'Performance',
+      entries: filters === 'cascade' ? [
+        { id: 'first', revision: 1, title: 'First', enabledDefault: true, template: 'SECOND_LINK',
+          activation: { kind: 'keywords', keywords: ['START_CHAIN'] }, select: { view: 'model', roles: ['user'], blockTypes: ['text'], depth: { unit: 'message', limit: 1 } },
+          target: { view: 'model', role: 'user', anchor: 'end', position: 'after' } },
+        { id: 'second', revision: 1, title: 'Second', enabledDefault: true, cascade: true, template: 'THIRD_LINK',
+          activation: { kind: 'keywords', keywords: ['SECOND_LINK'] }, select: { view: 'model', roles: ['user'], blockTypes: ['text'], depth: { unit: 'message', limit: 1 } },
+          target: { view: 'model', role: 'user', anchor: 'end', position: 'after' } },
+        { id: 'third', revision: 1, title: 'Third', enabledDefault: true, cascade: true, template: 'FINAL_LINK',
+          activation: { kind: 'keywords', keywords: ['THIRD_LINK'] }, select: { view: 'model', roles: ['user'], blockTypes: ['text'], depth: { unit: 'message', limit: 1 } },
+          target: { view: 'model', role: 'user', anchor: 'end', position: 'after' } },
+      ] : [], rules: filters === 'cascade' ? [] : filters ? [
         { schemaVersion: 2, id: 'filter-pairs', revision: 1, on: ['request.assemble'],
           select: { view: 'model', roles: ['tool'], blockTypes: ['text'] }, match: { kind: 'regex', pattern: '^REMOVE' },
           actions: [{ id: 'filter', kind: 'filter', stage: 'request.assemble', enabledDefault: true }] },
@@ -3241,6 +3255,25 @@ test('Workbench v2 records all-token-skipped request decisions in the real dispa
   assert.equal(audit.records.find(record => record.ruleId === 'entry:large').reason, 'injection-token-budget-exceeded')
   assert.equal(audit.injectionBudget.tokens, 0); assert.equal(audit.impact.cacheHitTokens, null)
   assert.equal(ctx.contextCareWorkbench.store.read(agent.id).runtime.state[JSON.stringify(['context-care:document:budget-skipped', 'entry:large', 1, 'inject'])], undefined)
+})
+
+test('Workbench cascades preserve original-selected model injection anchors', async t => {
+  const owned = await fixture(t, false), ctx = await owned.open()
+  ctx.llm.registerAdapter(['care-test'], new ScriptedAdapter())
+  const agent = await ctx.agentLoop.create('cross-view-cascade', { provider: 'care-test', model: 'care-test' })
+  const message = createMessage({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'START_CHAIN' }] })
+  agent.session.append('user/message', message, { surfaceOp: 'append' })
+  const entry = (id, view, keyword, template, cascade) => ({ id, revision: 1, title: id, enabledDefault: true, template, cascade,
+    activation: { kind: 'keywords', keywords: [keyword] }, select: { view, roles: ['user'], blockTypes: ['text'] },
+    target: { view: 'model', role: 'user', anchor: 'end', position: 'after' } })
+  await ctx.contextCareWorkbench.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'cross-view', revision: 1, title: 'Cross view',
+    entries: [entry('first', 'original', 'START_CHAIN', 'SECOND_LINK', false), entry('second', 'model', 'SECOND_LINK', 'FINAL_LINK', true)] } })
+  const request = { messages: [message] }, before = structuredClone(request)
+  const result = await ctx.contextCareWorkbench.preview(agent, request)
+  assert.equal(result.applied.length, 2)
+  assert.deepEqual(result.request.messages.slice(1).map(message => message.content[0].text), ['SECOND_LINK', 'FINAL_LINK'])
+  assert.deepEqual(request, before)
+  assert.ok(!ensureSessionLog(ctx).cache.report().some(row => row.name === 'request-model-projection' || row.name.startsWith('request-plan-')))
 })
 
 test('Workbench v2 cascades only explicit entries, previews without writes and rejects stale automatic variable snapshots', async t => {

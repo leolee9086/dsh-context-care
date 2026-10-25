@@ -6,13 +6,47 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import { createMessage, createToolResultMessage, ToolCallId, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 
 interface Harness {
-  open(t: test.TestContext): Promise<{ session: Session; configure(filters?: boolean): Promise<void>; display(seq: number): Promise<unknown>;
-    preview(request: GenerateOptions): Promise<{ request: GenerateOptions; applied: unknown[] }>; cacheNames(): string[];
+  open(t: test.TestContext): Promise<{ session: Session; configure(filters?: boolean | 'cascade'): Promise<void>; display(seq: number): Promise<unknown>;
+    preview(request: GenerateOptions): Promise<{ request: GenerateOptions; applied: unknown[]; records: { cascadePass?: number }[] }>; cacheNames(): string[]; projectionWork(): number;
     reconcile(): Promise<void>; http(): Promise<void>; probe(): Promise<void>; runs(): number; displayCalls(): number }>
 }
 
 /** Run in the real Loader composition; spy methods delegate to native Session. */
 export function registerWorkbenchPerformanceCases(harness: Harness): void {
+  test('long native cascade projects each unchanged message body once and only adds new injected bodies', { timeout: 120000 }, async t => {
+    const fixture = await harness.open(t), { session } = fixture
+    const request: GenerateOptions = { provider: 'care-test', model: 'care-test', system: 'SYSTEM', messages: [] }
+    for (let index = 0; index < 1000; index++) {
+      const message = createMessage({ role: 'user', source: { kind: 'user' },
+        content: [{ type: 'text', text: index === 999 ? 'START_CHAIN' : `HIST ${index} ` + 'x'.repeat(256) }] })
+      session.append('user/message', message, { surfaceOp: 'append' }); request.messages.push(message)
+    }
+    await fixture.configure('cascade')
+    const before = structuredClone(request), initiallyFrozen = Object.isFrozen(request.messages[0].content[0]), nativeReads = t.mock.method(session, 'eventAt')
+    const snapshots = t.mock.method(session, 'snapshotEvents'), derive = t.mock.method(session, 'deriveMessages')
+    const loop = monitorEventLoopDelay({ resolution: 10 }); loop.enable(); t.after(() => loop.disable())
+    await yieldToHost(); const cpuStart = process.cpuUsage(), began = performance.now(), workBefore = fixture.projectionWork()
+    const timed = async (run: () => Promise<unknown>) => { const start = performance.now(); const value = await run(); return { ms: performance.now() - start, value } }
+    const [planned, http, other] = await Promise.all([timed(() => fixture.preview(request)), timed(fixture.http), timed(fixture.probe)])
+    const result = planned.value as Awaited<ReturnType<typeof fixture.preview>>
+    t.diagnostic(`workbench-model-cascade-timing ${JSON.stringify({ planMs: planned.ms, httpMs: http.ms, otherAgentMs: other.ms, bodyProjections: fixture.projectionWork() - workBefore })}`)
+    assert.equal(result.applied.length, 3, JSON.stringify(result.records)); assert.equal(result.records.filter(row => row.cascadePass).length, 2)
+    assert.equal(result.request.messages.length, 1003)
+    assert.deepEqual(result.request.messages.slice(-3).map(message => message.content[0]).map(block => block.type === 'text' ? block.text : ''), ['SECOND_LINK', 'THIRD_LINK', 'FINAL_LINK'])
+    const projected = fixture.projectionWork() - workBefore
+    assert.equal(projected, 1003, '1000 input messages + one system + two newly inspected injections, never the cloned historical bodies again')
+    assert.deepEqual(request, before); assert.equal(Object.isFrozen(request.messages[0].content[0]), initiallyFrozen)
+    const first = result.request.messages[0].content[0]
+    if (first.type === 'text') first.text = 'Owned result remains writable'
+    assert.deepEqual(request, before)
+    assert.equal(snapshots.mock.callCount(), 0); assert.equal(derive.mock.callCount(), 0)
+    assert.equal(nativeReads.mock.callCount(), 1000)
+    assert.ok(!fixture.cacheNames().some(name => name.startsWith('request-plan-') || name === 'request-model-projection'))
+    await yieldToHost(); loop.disable(); const cpu = process.cpuUsage(cpuStart)
+    t.diagnostic(`workbench-model-cascade ${JSON.stringify({ events: session.seq, messages: 1000, bodyProjections: projected, planMs: planned.ms, httpMs: http.ms, otherAgentMs: other.ms, cpuUserMs: cpu.user / 1000, cpuSystemMs: cpu.system / 1000, loopMaxMs: loop.max / 1e6, wallMs: performance.now() - began })}`)
+    assert.ok(planned.ms < 5000 && http.ms < 1000 && other.ms < 1500 && loop.max / 1e6 < 1000)
+  })
+
   test('long paired tool filtering uses native workbench planning without retaining lookup caches', { timeout: 120000 }, async t => {
     const fixture = await harness.open(t), { session } = fixture
     const request: GenerateOptions = { provider: 'care-test', model: 'care-test', messages: [] }
@@ -42,7 +76,7 @@ export function registerWorkbenchPerformanceCases(harness: Harness): void {
     assert.deepEqual(again.request, result.request)
     assert.equal(reads.mock.callCount(), beforeWarm, 'repeat preview borrows the existing native cut')
     assert.equal(snapshots.mock.callCount(), 0); assert.equal(fullMessages.mock.callCount(), 0)
-    assert.ok(!fixture.cacheNames().some(name => name === 'request-plan-analysis' || name === 'request-plan-block-index'))
+    assert.ok(!fixture.cacheNames().some(name => name === 'request-plan-analysis' || name === 'request-plan-block-index' || name === 'request-model-projection'))
     await yieldToHost(); loop.disable(); const cpu = process.cpuUsage(cpuStart)
     t.diagnostic(`workbench-tool-filter ${JSON.stringify({ events: session.seq, messages: request.messages.length, matchedChildren: 500, planMs: planned.ms, httpMs: http.ms, otherAgentMs: other.ms, cpuUserMs: cpu.user / 1000, cpuSystemMs: cpu.system / 1000, loopMaxMs: loop.max / 1e6, nativeReads: reads.mock.callCount() })}`)
     assert.ok(planned.ms < 5000 && http.ms < 1000 && other.ms < 1500 && loop.max / 1e6 < 1000)
