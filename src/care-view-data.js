@@ -37,7 +37,7 @@ export function createCarePages(ctx) {
   /** @param {import('@deepseek-ai/dsh-session').Session} session
    * @param {'actions' | 'prompts'} topic
    * @param {{ offset: number, limit: number, seq?: number }} query */
-  return (session, topic, query) => (topic === 'actions' ? actions : prompts)(session, ctx.contextCareRequests.view(String(session.id)), query)
+  return (session, topic, query) => (topic === 'actions' ? actions : prompts)(session, ctx.contextCareRequests.diagnosticFeed(String(session.id)), query)
 }
 
 /** Build the subscribed page from committed owner state, without performing HTTP reads.

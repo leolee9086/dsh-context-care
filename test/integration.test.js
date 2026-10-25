@@ -628,8 +628,10 @@ registerDiagnosticPageCases({ async open(t) { const owned = await fixture(t, fal
 registerDiagnosticPerformanceCases({ async open(t) {
   const owned = await fixture(t, false), ctx = await owned.open(), { base, cookie } = await controlCookie(ctx)
   const session = ctx.sessions.create('long-diagnostic-pages')
-  ctx.llm.registerAdapter(['care-test'], new CompletionAdapter([{ blocks: [{ type: 'text', text: 'Independent page probe completed.' }] }]))
+  let probeId = 0
+  ctx.llm.registerAdapter(['care-test'], new CompletionAdapter(Array.from({ length: 2 }, () => ({ blocks: [{ type: 'text', text: 'Independent page probe completed.' }] }))))
   return { ctx, session,
+    phase: index => ctx.contextCareRequests.recordAction(session, { action: 'rule-evaluation', phase: 'completed', operationId: `phase-${index}` }),
     page: async (offset, seq) => {
       const query = new URLSearchParams({ sessionId: session.id, limit: '20', offset: String(offset), ...(seq === undefined ? {} : { seq: String(seq) }) })
       const response = await fetch(`${base}/context-care/prompts?${query}`, { headers: { cookie } })
@@ -640,7 +642,7 @@ registerDiagnosticPerformanceCases({ async open(t) {
       assert.equal(response.status, 200); await response.json()
     },
     probe: async () => {
-      const other = await ctx.agentLoop.create('pages-other-agent', { provider: 'care-test', model: 'care-test' })
+      const other = await ctx.agentLoop.create(`pages-other-agent-${++probeId}`, { provider: 'care-test', model: 'care-test' })
       await completionTurn(ctx, other, 'Answer independently of diagnostic pagination.')
       assert.ok(other.session.deriveMessages().some(message => message.role === 'assistant'
         && message.content.some(block => block.type === 'text' && block.text === 'Independent page probe completed.')))
@@ -997,6 +999,7 @@ test('exported Host rows mount together, serve the journal, and remove routes an
   assert.deepEqual((await rewritePage.json()).records.map(record => record.hash), ['visible'])
   assert.equal((await fetch(url, { headers: { origin: 'http://foreign.test' } })).status, 403)
   const actionsUrl = `http://127.0.0.1:${ctx.webServer.port}/context-care/actions`
+  const fullView = t.mock.method(ctx.contextCareRequests, 'view', () => { throw new Error('production-page-requested-full-list') })
   assert.equal((await fetch(actionsUrl)).status, 400)
   assert.equal((await fetch(`${actionsUrl}?sessionId=s1&limit=999`)).status, 400)
   const firstActionSession = ctx.sessions.create('s1'), secondActionSession = ctx.sessions.create('s2')
@@ -1029,6 +1032,7 @@ test('exported Host rows mount together, serve the journal, and remove routes an
   assert.equal(selectedPage.total, 25)
   assert.equal(selectedPage.prompts.at(-1).text, '<context-care>exact notice 0</context-care>')
   assert.doesNotMatch(JSON.stringify(selectedPage), /private-s2/)
+  assert.equal(fullView.mock.callCount(), 0, 'authenticated production pages consume the shared delta feed')
   const missingSelection = await (await fetch(`${promptsUrl}?sessionId=prompt-history&limit=20&seq=999999`)).json()
   assert.equal(missingSelection.selectedFound, false)
   assert.equal(missingSelection.offset, 0, 'A missing selection must not fabricate a matching historical page')

@@ -38,6 +38,13 @@ export declare function createRequestCache({ sessions, logs, measureInput, measu
     put(key: string, sessionId: string, kind: CacheRecord["kind"], input: Record<string, unknown>): Promise<void>;
     /** The durability checkpoint belongs to Session, not to a second writer. */
     flush(sessionId?: string): Promise<void>;
+    /** Production pages consume exact coalesced changes, not a full sorted snapshot. */
+    diagnosticFeed(sessionId: string): {
+        set(id: string, record: CacheRecord): void;
+        delete(id: string): void;
+        snapshot(): readonly CacheRecord[];
+        consume(cursor: object): import("./diagnostic-pages.js").DiagnosticRecordDelta<CacheRecord>;
+    };
     /** A stable read-only cut for diagnostic projections; list() still returns its own array. */
     view(sessionId: string): readonly CacheRecord[];
     /** Read actual settlements plus bounded live diagnostics for loaded sessions. */

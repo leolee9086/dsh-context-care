@@ -1,6 +1,6 @@
 import { producerOf, producedUnder, isCheckpointSource } from './producer-source.js'
 import { GUIDANCE } from './policy.js'
-import { createDiagnosticIndex, createDiagnosticRelations } from '../lib/diagnostic-pages.js'
+import { createDiagnosticIndex, createDiagnosticRelations, compareDiagnosticRecords, createDiagnosticRecordChanges } from '../lib/diagnostic-pages.js'
 
 const own = source => producerOf(source) === 'dsh-context-care' || producedUnder(source, 'dsh-context-care:')
 const text = value => typeof value === 'string' ? value : (Array.isArray(value) ? value : []).filter(block => block.type === 'text').map(block => block.text).join('\n')
@@ -30,12 +30,12 @@ const sourceFacts = (seqs, log) => [...new Set(seqs ?? [])].map(seq => {
 export function createPromptIndex() {
   const entries = createDiagnosticIndex(), facts = new Map(), requests = new Map(), systems = new Map()
   const dependencies = new Map(), dependenciesById = new Map(), callEntries = new Map()
-  const callsBySeq = createDiagnosticRelations(record => record.kind === 'request' ? record.data.requestSourceSeqs ?? record.data.sourceSeqs ?? [] : [])
-  const callsById = createDiagnosticRelations(record => record.kind === 'request' ? [record.data.callId] : [])
-  const evaluations = createDiagnosticRelations(record => record.kind === 'maintenance' && record.data.action === 'rule-evaluation' && record.data.evaluationId ? [record.data.evaluationId] : [])
-  const transactions = createDiagnosticRelations(record => record.kind === 'maintenance' ? [record.data.compactionId, ...(record.data.summaryTransactions ?? [])].filter(Boolean) : [])
-  const instructionsBySource = createDiagnosticRelations(record => record.kind === 'request' ? (record.data.careInstructions ?? []).flatMap(item => item.sourceSeq === undefined ? [] : [item.sourceSeq]) : [])
-  let previousRecords
+  const callsBySeq = createDiagnosticRelations(record => record.kind === 'request' ? record.data.requestSourceSeqs ?? record.data.sourceSeqs ?? [] : [], compareDiagnosticRecords)
+  const callsById = createDiagnosticRelations(record => record.kind === 'request' ? [record.data.callId] : [], compareDiagnosticRecords)
+  const evaluations = createDiagnosticRelations(record => record.kind === 'maintenance' && record.data.action === 'rule-evaluation' && record.data.evaluationId ? [record.data.evaluationId] : [], compareDiagnosticRecords)
+  const transactions = createDiagnosticRelations(record => record.kind === 'maintenance' ? [record.data.compactionId, ...(record.data.summaryTransactions ?? [])].filter(Boolean) : [], compareDiagnosticRecords)
+  const instructionsBySource = createDiagnosticRelations(record => record.kind === 'request' ? (record.data.careInstructions ?? []).flatMap(item => item.sourceSeq === undefined ? [] : [item.sourceSeq]) : [], compareDiagnosticRecords)
+  const changes = createDiagnosticRecordChanges()
   const depend = (id, keys) => {
     for (const key of dependenciesById.get(id) ?? []) { const bucket = dependencies.get(key); bucket.delete(id); if (!bucket.size) dependencies.delete(key) }
     dependenciesById.set(id, keys)
@@ -99,12 +99,13 @@ export function createPromptIndex() {
   }
   return (records, added) => {
     const dirtyFacts = new Set(), dirtyCalls = new Set()
-    if (records !== previousRecords) {
-      for (const [prefix, changed] of [['seq', callsBySeq.update(records)], ['evaluation', evaluations.update(records)], ['transaction', transactions.update(records)]])
+    const delta = changes(records)
+    if (delta.added.length || delta.removed.length || delta.order) {
+      const relationRecords = delta.order ?? delta
+      for (const [prefix, changed] of [['seq', callsBySeq.update(relationRecords)], ['evaluation', evaluations.update(relationRecords)], ['transaction', transactions.update(relationRecords)]])
         for (const key of changed) for (const id of dependencies.get(`${prefix}:${key}`) ?? []) dirtyFacts.add(id)
-      for (const callId of callsById.update(records)) dirtyCalls.add(callId)
-      instructionsBySource.update(records)
-      previousRecords = records
+      for (const callId of callsById.update(relationRecords)) dirtyCalls.add(callId)
+      instructionsBySource.update(relationRecords)
     }
     for (const event of added) {
       if (event.type === 'user/message') {

@@ -1,5 +1,5 @@
 import { isCheckpointSource } from './producer-source.js'
-import { createDiagnosticIndex, createDiagnosticRelations } from '../lib/diagnostic-pages.js'
+import { createDiagnosticIndex, createDiagnosticRelations, createDiagnosticRecordChanges, compareDiagnosticRecords, createDiagnosticOrder } from '../lib/diagnostic-pages.js'
 
 const fields = ['action', 'reason', 'phase', 'rule', 'outcome', 'beforeSeq', 'afterSeq', 'beforeGeneration', 'afterGeneration',
   'beforeInput', 'afterInput', 'routeSaving', 'heuristicSaving', 'sourceSeqs', 'shadowedSeqs', 'oldSourceSeqs', 'replacements',
@@ -12,10 +12,18 @@ export const actionEventTypes = /** @type {const} */ (['compaction/summary', 'us
 export function createActionIndex() {
   const entries = createDiagnosticIndex(), summaries = new Map(), checkpoints = new Map()
   const byTransaction = new Map(), checkpointGroups = new Map(), groupCheckpoints = new Map()
-  let transactionOwners = new Map(), auditOwners = new Map(), previousRecords, admission
+  const transactionOwners = new Map(), auditOwners = new Map(), groupAudits = new Map(), auditCandidates = new Map()
+  const changes = createDiagnosticRecordChanges()
+  const ownerDeclarations = createDiagnosticRelations(record => record.kind === 'maintenance' && record.data.operationId
+    ? [record.data.compactionId, ...(record.data.summaryTransactions ?? [])].filter(Boolean) : [], compareDiagnosticRecords)
+  const transactionMembers = createDiagnosticRelations(record => eligible(record) && record.data.compactionId ? [record.data.compactionId] : [], compareDiagnosticRecords)
+  const admissions = createDiagnosticOrder((left, right) => (left.data.logRevision ?? 0) - (right.data.logRevision ?? 0)
+    || (left.data.dispatchOrder ?? 0) - (right.data.dispatchOrder ?? 0) || compareDiagnosticRecords(left, right))
+  const isAdmission = record => record.kind === 'request' && record.data.purpose === 'conversation' && record.data.budget
+  let selectedAdmission, admission
   const groupId = record => record.data.operationId ?? transactionOwners.get(record.data.compactionId) ?? record.data.compactionId ?? record.key
   const eligible = record => record.kind === 'maintenance' && !['rule-evaluation', 'request-rewrite'].includes(record.data.action)
-  const members = createDiagnosticRelations(record => eligible(record) ? [groupId(record)] : [])
+  const members = createDiagnosticRelations(record => eligible(record) ? [groupId(record)] : [], compareDiagnosticRecords)
   const assign = (event, dirty) => {
     const transactionId = event.data.source.compactionId
     const id = auditOwners.get(event.seq) ?? transactionOwners.get(transactionId) ?? transactionId ?? `checkpoint:${event.seq}`
@@ -59,38 +67,56 @@ export function createActionIndex() {
   }
   return (records, added) => {
     const dirty = new Set(), affected = new Set()
-    if (records !== previousRecords) {
-      const owners = new Map(), audits = new Map(), metadata = new Map()
-      for (const record of records) if (record.kind === 'maintenance' && record.data.operationId)
-        for (const id of [record.data.compactionId, ...(record.data.summaryTransactions ?? [])].filter(Boolean)) owners.set(id, record.data.operationId)
-      let ownershipChanged = false
-      for (const id of new Set([...transactionOwners.keys(), ...owners.keys()])) if (transactionOwners.get(id) !== owners.get(id)) {
-        ownershipChanged = true
+    const delta = changes(records)
+    if (delta.added.length || delta.removed.length || delta.order) {
+      const relationRecords = delta.order ?? delta
+      const rekey = new Set()
+      transactionMembers.update(relationRecords)
+      for (const id of ownerDeclarations.update(relationRecords)) {
+        const owner = ownerDeclarations.get(id).at(-1)?.data.operationId
+        if (owner === transactionOwners.get(id)) continue
+        if (owner === undefined) transactionOwners.delete(id); else transactionOwners.set(id, owner)
+        for (const record of transactionMembers.get(id)) rekey.add(record)
         for (const event of byTransaction.get(id)?.values() ?? []) affected.add(event)
       }
-      transactionOwners = owners
-      // Only grouping scalars are inspected here; no body or source excerpt work.
-      admission = undefined
-      for (const record of records) {
-        const data = record.data
-        if (record.kind === 'request' && data.purpose === 'conversation' && data.budget && (!admission || data.logRevision > admission.logRevision
-          || (data.logRevision === admission.logRevision && (data.dispatchOrder ?? 0) >= admission.dispatchOrder))) {
-          admission = { callId: data.callId, at: record.at, route: data.route, budget: data.budget, dispatched: data.dispatched, phase: data.phase,
-            logRevision: data.logRevision, dispatchOrder: data.dispatchOrder ?? 0, rawInput: data.rawInput,
-            pricing: data.pricingBasis && { kind: data.pricingBasis.kind, source: data.pricingBasis.source, textScale: data.pricingBasis.textScale, sampleSeq: data.pricingBasis.sampleSeq } }
-        }
-        if (!eligible(record)) continue
-        const id = groupId(record), meta = metadata.get(id) ?? {}
-        if (data.checkpointSeq !== undefined) meta.checkpointSeq = data.checkpointSeq
-        if (data.replacements !== undefined) meta.replacements = data.replacements
-        metadata.set(id, meta)
+      for (const id of members.update(relationRecords)) dirty.add(id)
+      for (const id of members.rekey(rekey)) dirty.add(id)
+      admissions.update({ added: delta.added.filter(isAdmission), removed: delta.removed.filter(isAdmission) })
+      const selected = admissions.last()
+      if (selected !== selectedAdmission) {
+        selectedAdmission = selected
+        const data = selected?.data
+        admission = data && { callId: data.callId, at: selected.at, route: data.route, budget: data.budget, dispatched: data.dispatched, phase: data.phase,
+          logRevision: data.logRevision, dispatchOrder: data.dispatchOrder ?? 0, rawInput: data.rawInput,
+          pricing: data.pricingBasis && { kind: data.pricingBasis.kind, source: data.pricingBasis.source, textScale: data.pricingBasis.textScale, sampleSeq: data.pricingBasis.sampleSeq } }
       }
-      for (const [id, meta] of metadata) for (const seq of [meta.checkpointSeq, ...(meta.replacements ?? []).map(item => item.newSeq)])
-        if (seq !== undefined && !audits.has(seq)) audits.set(seq, id)
-      for (const seq of new Set([...auditOwners.keys(), ...audits.keys()])) if (auditOwners.get(seq) !== audits.get(seq) && checkpoints.has(seq)) affected.add(checkpoints.get(seq))
-      auditOwners = audits
-      for (const id of members.update(records, ownershipChanged)) dirty.add(id)
-      previousRecords = records
+      // Only changed groups recompute their latest audit scalars. Conflicting
+      // explicit seq claims preserve the original earliest-group precedence.
+      const changedSeqs = new Set()
+      for (const id of dirty) {
+        for (const seq of groupAudits.get(id) ?? []) { auditCandidates.get(seq)?.delete(id); changedSeqs.add(seq) }
+        const records = members.get(id), meta = {}
+        for (const record of records) {
+          if (record.data.checkpointSeq !== undefined) meta.checkpointSeq = record.data.checkpointSeq
+          if (record.data.replacements !== undefined) meta.replacements = record.data.replacements
+        }
+        const seqs = new Set([meta.checkpointSeq, ...(meta.replacements ?? []).map(item => item.newSeq)].filter(seq => seq !== undefined))
+        if (seqs.size) groupAudits.set(id, seqs); else groupAudits.delete(id)
+        for (const seq of seqs) {
+          let candidates = auditCandidates.get(seq)
+          if (!candidates) { candidates = new Map(); auditCandidates.set(seq, candidates) }
+          candidates.set(id, records[0]); changedSeqs.add(seq)
+        }
+      }
+      for (const seq of changedSeqs) {
+        let owner, first
+        const candidates = auditCandidates.get(seq)
+        for (const [id, record] of candidates ?? []) if (!first || compareDiagnosticRecords(record, first) < 0) { first = record; owner = id }
+        if (!candidates?.size) auditCandidates.delete(seq)
+        if (auditOwners.get(seq) === owner) continue
+        if (owner === undefined) auditOwners.delete(seq); else auditOwners.set(seq, owner)
+        if (checkpoints.has(seq)) affected.add(checkpoints.get(seq))
+      }
     }
     for (const event of added) {
       if (event.type === 'compaction/summary') {

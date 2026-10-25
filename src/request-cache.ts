@@ -6,6 +6,7 @@ import { z } from 'zod'
 import { createRequestHistory, type SessionRequestRecord } from './request-history.js'
 import type { SessionLog } from './session-log.js'
 import type { CacheKey } from './session-cache.js'
+import { createDiagnosticRecordFeed, compareDiagnosticRecords } from './diagnostic-pages.js'
 
 const JsonRecord = z.record(z.string(), z.json())
 type Data = Readonly<Record<string, unknown>>
@@ -24,7 +25,13 @@ interface SessionCache {
   /** Only the latest completed operation of each purpose/action, not every past phase. */
   recent: Map<string, CacheRecord>
   revision: number
-  listed?: { count: number; revision: number; rows: CacheRecord[] }
+  syncedRevision?: number
+  through: number
+  committed?: readonly SessionRequestRecord[]
+  byEvent: Map<number, SessionRequestRecord>
+  byCompaction: Map<string, Set<SessionRequestRecord>>
+  diagnostics: Map<string, CacheRecord>
+  feed: ReturnType<typeof createDiagnosticRecordFeed<CacheRecord>>
   publicRows: Map<SessionRequestRecord, { diagnostic?: CacheRecord; value: CacheRecord }>
 }
 interface Options {
@@ -65,7 +72,8 @@ export function createRequestCache({ sessions, logs, measureInput, measurementDe
   const history = createRequestHistory(logs)
   const cacheKey: CacheKey<Session, SessionCache> = logs.cache.define('request-cache',
     'Native Session identity; transient diagnostic revisions advance only after accepted writes.',
-    () => ({ active: new Map(), recent: new Map(), revision: 0, publicRows: new Map() }))
+    () => ({ active: new Map(), recent: new Map(), revision: 0, through: 0, byEvent: new Map(), byCompaction: new Map(),
+      diagnostics: new Map(), feed: createDiagnosticRecordFeed<CacheRecord>(compareDiagnosticRecords), publicRows: new Map() }))
   function measuredFor(session: Session, header: EpochHeader | undefined, key: string): CalibrationInput {
     const values = logs.cache.use(session, calibrationInputKey)
     let headers = values.get(measureInput)
@@ -80,44 +88,62 @@ export function createRequestCache({ sessions, logs, measureInput, measurementDe
   }
   const getSession = (id: string) => sessions.get(id as SessionId)
   function cacheOf(session: Session): SessionCache { return logs.cache.use(session, cacheKey) }
-  function listOne(session: Session): CacheRecord[] {
-    // The immutable Session rows win if a live diagnostic disagrees about settlement.
-    const committed = history.read(session)
-    const cache = cacheOf(session), rowsBySource = cache.publicRows
-    // The native fold appends immutable rows; unrelated events cannot change an
-    // existing settlement. Keep one list until a settlement or live fact changes.
-    if (cache.listed?.count === committed.length && cache.listed.revision === cache.revision) return cache.listed.rows
-    const transient = [...(cache?.recent.values() ?? []), ...(cache?.active.values() ?? [])]
-    const byEvent = new Map(transient.filter(row => row.kind === 'request' && typeof row.data.eventSeq === 'number')
-      .map(row => [row.data.eventSeq, row]))
-    const byCompaction = new Map(transient.filter(row => row.kind === 'request' && typeof row.data.compactionId === 'string')
-      .map(row => [row.data.compactionId, row]))
-    const rows: CacheRecord[] = committed.map(row => {
-      const diagnostic = byEvent.get(row.data.eventSeq) ?? (row.data.compactionId ? byCompaction.get(row.data.compactionId) : undefined)
-      const cached = rowsBySource.get(row)
-      if (cached && cached.diagnostic === diagnostic) return cached.value
-      // Keep the header by reference inside the private fold. Repeating its
-      // entire tool schema in every public row is not request evidence.
-      const { sourceHeader: _sourceHeader, ...facts } = row.data
-      // These values already crossed the Session or diagnostic admission boundary.
-      // Deep JSON validation here used to traverse every historical request diff
-      // on every read, blocking unrelated Host HTTP handlers in the same process.
-      const data = { ...diagnostic?.data, ...facts }
-      const value = { ...row, data }
-      rowsBySource.set(row, { diagnostic, value })
-      return value
-    })
-    const settled = new Set(committed.map(row => row.data.eventSeq as number))
-    const compactions = new Set(committed.map(row => row.data.compactionId).filter(id => id !== undefined))
-    for (const row of transient) {
-      const committedRequest = row.kind === 'request' && ((typeof row.data.eventSeq === 'number' && settled.has(row.data.eventSeq))
-        || (typeof row.data.compactionId === 'string' && compactions.has(row.data.compactionId)))
-      if (!committedRequest) rows.push(row)
+  function diagnosticFeed(session: Session) {
+    const committed = history.read(session), cache = cacheOf(session)
+    // A failed native projection may rebuild its array. Only that exceptional
+    // identity change resets consumers; normal appends retain the exact cursor.
+    if (cache.committed && cache.committed !== committed) {
+      cache.through = 0; cache.syncedRevision = undefined
+      cache.byEvent.clear(); cache.byCompaction.clear(); cache.publicRows.clear(); cache.diagnostics.clear()
+      cache.feed = createDiagnosticRecordFeed<CacheRecord>(compareDiagnosticRecords)
     }
-    rows.sort((a, b) => a.at - b.at || a.key.localeCompare(b.key))
-    cache.listed = { count: committed.length, revision: cache.revision, rows }
-    return rows
+    cache.committed = committed
+    if (cache.through === committed.length && cache.syncedRevision === cache.revision) return cache.feed
+    const dirty = new Set<SessionRequestRecord>()
+    for (; cache.through < committed.length; cache.through++) {
+      const row = committed[cache.through]
+      cache.byEvent.set(row.data.eventSeq, row)
+      if (row.data.compactionId !== undefined) {
+        let bucket = cache.byCompaction.get(row.data.compactionId)
+        if (!bucket) { bucket = new Set(); cache.byCompaction.set(row.data.compactionId, bucket) }
+        bucket.add(row)
+      }
+      dirty.add(row)
+    }
+    // This is only the bounded current-operation/live-request set, never all
+    // settled requests. Changed identities find their exact native dependents.
+    const transient = new Map([...cache.recent.values(), ...cache.active.values()].map(row => [row.key, row]))
+    const byEvent = new Map<number, CacheRecord>(), byCompaction = new Map<string, CacheRecord>()
+    const affect = (row: CacheRecord) => {
+      if (row.kind !== 'request') return
+      if (typeof row.data.eventSeq === 'number') { const source = cache.byEvent.get(row.data.eventSeq); if (source) dirty.add(source) }
+      if (typeof row.data.compactionId === 'string') for (const source of cache.byCompaction.get(row.data.compactionId) ?? []) dirty.add(source)
+    }
+    for (const [key, previous] of cache.diagnostics) if (transient.get(key) !== previous) { affect(previous); cache.feed.delete(`live:${key}`) }
+    for (const [key, row] of transient) {
+      if (cache.diagnostics.get(key) !== row) affect(row)
+      if (row.kind === 'request') {
+        if (typeof row.data.eventSeq === 'number') byEvent.set(row.data.eventSeq, row)
+        if (typeof row.data.compactionId === 'string') byCompaction.set(row.data.compactionId, row)
+      }
+      const settled = row.kind === 'request' && (typeof row.data.eventSeq === 'number' && cache.byEvent.has(row.data.eventSeq)
+        || typeof row.data.compactionId === 'string' && cache.byCompaction.has(row.data.compactionId))
+      if (settled) cache.feed.delete(`live:${key}`)
+      else cache.feed.set(`live:${key}`, row)
+    }
+    for (const row of dirty) {
+      const diagnostic = byEvent.get(row.data.eventSeq) ?? (row.data.compactionId ? byCompaction.get(row.data.compactionId) : undefined)
+      const cached = cache.publicRows.get(row)
+      if (cached && cached.diagnostic === diagnostic) continue
+      const { sourceHeader: _sourceHeader, ...facts } = row.data
+      const value = { ...row, data: { ...diagnostic?.data, ...facts } }
+      cache.publicRows.set(row, { diagnostic, value }); cache.feed.set(`native:${row.data.eventSeq}`, value)
+      logs.cache.worked(cacheKey)
+    }
+    cache.diagnostics = transient; cache.syncedRevision = cache.revision
+    return cache.feed
   }
+  function listOne(session: Session): readonly CacheRecord[] { return diagnosticFeed(session).snapshot() }
   return {
     /** Record only an operation currently owned by this process; never write a JSON side record. */
     async put(key: string, sessionId: string, kind: CacheRecord['kind'], input: Record<string, unknown>) {
@@ -166,6 +192,12 @@ export function createRequestCache({ sessions, logs, measureInput, measurementDe
     async flush(sessionId?: string) {
       const selected = sessionId === undefined ? sessions.list() : [getSession(sessionId)].filter((session): session is Session => session !== undefined)
       await Promise.all(selected.map(session => sessions.flush(session)))
+    },
+    /** Production pages consume exact coalesced changes, not a full sorted snapshot. */
+    diagnosticFeed(sessionId: string) {
+      const session = getSession(sessionId)
+      if (!session) throw new Error(`context-care: request session unavailable: ${sessionId}`)
+      return diagnosticFeed(session)
     },
     /** A stable read-only cut for diagnostic projections; list() still returns its own array. */
     view(sessionId: string): readonly CacheRecord[] {

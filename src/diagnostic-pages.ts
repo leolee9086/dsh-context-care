@@ -2,6 +2,91 @@ import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SessionLog, SessionLogRead } from './session-log.js'
 import type { CacheKey } from './session-cache.js'
 
+export const compareDiagnosticRecords = (left: { at: number; key: string }, right: { at: number; key: string }) => left.at - right.at || left.key.localeCompare(right.key)
+export interface DiagnosticRecordDelta<R> { readonly added: readonly R[]; readonly removed: readonly R[]; readonly order?: readonly R[] }
+export interface DiagnosticRecordFeed<R> { consume(cursor: object): DiagnosticRecordDelta<R> }
+export type DiagnosticRecords<R> = readonly R[] | DiagnosticRecordFeed<R>
+export type DiagnosticRecordInput<R> = readonly R[] | DiagnosticRecordDelta<R>
+export const isDiagnosticDelta = <R>(records: DiagnosticRecordInput<R>): records is DiagnosticRecordDelta<R> => !Array.isArray(records)
+const emptyDelta: DiagnosticRecordDelta<never> = { added: [], removed: [] }
+
+/** The owning Session cache contains this feed. Consumers hold only their cursor;
+ * weak readers cannot retain disposed page projections or abandoned subscriptions.
+ * Coalesce pending edits by record identity instead of retaining a revision log. */
+export function createDiagnosticRecordFeed<R>(compare: (left: R, right: R) => number) {
+  const values = new Map<string, R>()
+  type Pending = { before?: R; after?: R }
+  type Reader = { pending: Map<string, Pending> }
+  const cursors = new WeakMap<object, Reader>(), readers = new Set<WeakRef<Reader>>()
+  let snapshot: readonly R[] | undefined
+  const readSnapshot = () => snapshot ??= [...values.values()].sort(compare)
+  const publish = (id: string, before: R | undefined, after: R | undefined) => {
+    if (before === after) return
+    snapshot = undefined
+    for (const reference of readers) {
+      const reader = reference.deref()
+      if (!reader) { readers.delete(reference); continue }
+      const pending = reader.pending.get(id)
+      const change = { before: pending ? pending.before : before, after }
+      if (change.before === change.after) reader.pending.delete(id)
+      else reader.pending.set(id, change)
+    }
+  }
+  return {
+    set(id: string, record: R) { const before = values.get(id); values.set(id, record); publish(id, before, record) },
+    delete(id: string) { const before = values.get(id); if (values.delete(id)) publish(id, before, undefined) },
+    snapshot(): readonly R[] { return readSnapshot() },
+    consume(cursor: object): DiagnosticRecordDelta<R> {
+      let reader = cursors.get(cursor)
+      if (!reader) {
+        const added = readSnapshot()
+        reader = { pending: new Map() }; cursors.set(cursor, reader); readers.add(new WeakRef(reader))
+        return { added, removed: [] }
+      }
+      if (!reader.pending.size) return emptyDelta
+      const added: R[] = [], removed: R[] = []
+      for (const change of reader.pending.values()) {
+        if (change.before !== undefined) removed.push(change.before)
+        if (change.after !== undefined) added.push(change.after)
+      }
+      added.sort(compare)
+      reader.pending.clear()
+      return { added, removed }
+    },
+  }
+}
+
+/** Whole-list compatibility callers may replace arrays; production passes deltas. */
+export function createDiagnosticRecordChanges<R>() {
+  let previous: readonly R[] | undefined
+  return (records: DiagnosticRecordInput<R>): DiagnosticRecordDelta<R> => {
+    if (isDiagnosticDelta(records)) return records
+    if (records === previous) return emptyDelta
+    const before = new Set(previous), after = new Set(records)
+    const delta = { added: records.filter(record => !before.has(record)), removed: (previous ?? []).filter(record => !after.has(record)), order: records }
+    previous = records
+    return delta
+  }
+}
+
+/** Sorted scalar candidates. Updates inspect only changed records; array shifts
+ * move references but never re-parse or re-sort the complete historical list. */
+export function createDiagnosticOrder<R>(compare: (left: R, right: R) => number) {
+  const values: R[] = []
+  const position = (value: R) => {
+    let low = 0, high = values.length
+    while (low < high) { const middle = (low + high) >>> 1; if (compare(values[middle], value) < 0) low = middle + 1; else high = middle }
+    return low
+  }
+  return {
+    update(delta: DiagnosticRecordDelta<R>) {
+      for (const record of delta.removed) { const at = position(record); if (values[at] === record) values.splice(at, 1) }
+      for (const record of delta.added) values.splice(position(record), 0, record)
+    },
+    last(): R | undefined { return values.at(-1) },
+  }
+}
+
 export type DiagnosticRead = Pick<SessionLogRead, 'at'>
 /** Entries are immutable revisions; only the selected page builds bodies. */
 export interface DiagnosticEntry<T> { id: string; order: number; seq?: number; materialize(log: DiagnosticRead): T }
@@ -60,12 +145,32 @@ export function createDiagnosticIndex<T>(): DiagnosticIndex<T> {
 }
 
 /** Keep relation buckets stable across immutable record-list revisions. */
-export function createDiagnosticRelations<R, K>(keys: (record: R) => readonly K[]) {
+export function createDiagnosticRelations<R, K>(keys: (record: R) => readonly K[], compare?: (left: R, right: R) => number) {
   const indexed = new Map<R, readonly K[]>(), buckets = new Map<K, Set<R>>()
-  let order = new Map<R, number>()
+  let order = new Map<R, number>(), deltaOrder = false
   const views = new Map<K, readonly R[]>()
   return {
-    update(records: readonly R[], rekey = false): ReadonlySet<K> {
+    update(records: DiagnosticRecordInput<R>, rekey = false): ReadonlySet<K> {
+      if (isDiagnosticDelta(records)) {
+        deltaOrder = true
+        const changed = new Set<K>()
+        for (const record of records.removed) {
+          for (const key of indexed.get(record) ?? []) {
+            const bucket = buckets.get(key)!; bucket.delete(record); if (!bucket.size) buckets.delete(key); changed.add(key)
+          }
+          indexed.delete(record); order.delete(record)
+        }
+        for (const record of records.added) {
+          const selected = [...new Set(keys(record))]; indexed.set(record, selected)
+          for (const key of selected) {
+            let bucket = buckets.get(key); if (!bucket) { bucket = new Set(); buckets.set(key, bucket) }
+            bucket.add(record); changed.add(key)
+          }
+        }
+        for (const key of changed) views.delete(key)
+        return changed
+      }
+      deltaOrder = false
       const next = new Map(records.map((record, index) => [record, index])), changed = new Set<K>()
       for (const [record, previous] of indexed) if (!next.has(record) || (rekey && (() => {
         const selected = [...new Set(keys(record))]
@@ -93,9 +198,23 @@ export function createDiagnosticRelations<R, K>(keys: (record: R) => readonly K[
       for (const key of changed) views.delete(key)
       return changed
     },
+    rekey(records: Iterable<R>): ReadonlySet<K> {
+      const changed = new Set<K>()
+      for (const record of records) {
+        const previous = indexed.get(record)
+        if (!previous) continue
+        const selected = [...new Set(keys(record))]
+        if (selected.length === previous.length && selected.every((key, index) => key === previous[index])) continue
+        for (const key of previous) { const bucket = buckets.get(key)!; bucket.delete(record); if (!bucket.size) buckets.delete(key); changed.add(key) }
+        indexed.set(record, selected)
+        for (const key of selected) { let bucket = buckets.get(key); if (!bucket) { bucket = new Set(); buckets.set(key, bucket) }; bucket.add(record); changed.add(key) }
+      }
+      for (const key of changed) views.delete(key)
+      return changed
+    },
     get(key: K): readonly R[] {
       let view = views.get(key)
-      if (!view) { view = [...(buckets.get(key) ?? [])].sort((a, b) => order.get(a)! - order.get(b)!); views.set(key, view) }
+      if (!view) { view = [...(buckets.get(key) ?? [])].sort(deltaOrder && compare ? compare : ((a, b) => order.get(a)! - order.get(b)!)); views.set(key, view) }
       return view
     },
   }
@@ -103,23 +222,28 @@ export function createDiagnosticRelations<R, K>(keys: (record: R) => readonly K[
 
 interface Projection<T, A> { entries: DiagnosticIndex<T>; admission?: A }
 interface PageQuery { offset: number; limit: number; seq?: number }
-interface State<R, T, A> { through: number; records?: readonly R[]; index?: Projection<T, A>;
-  update: (records: readonly R[], added: readonly SessionEvent[]) => Projection<T, A> }
+interface State<R, T, A> { through: number; records?: DiagnosticRecords<R>; index?: Projection<T, A>;
+  update: (records: DiagnosticRecordInput<R>, added: readonly SessionEvent[]) => Projection<T, A> }
 
 /** HTTP and subscriptions borrow the same owner-scoped Session projection. */
 export function createDiagnosticPages<R, T, A>(history: SessionLog, types: readonly SessionEvent['type'][],
-  create: () => (records: readonly R[], added: readonly SessionEvent[]) => Projection<T, A>) {
+  create: () => (records: DiagnosticRecordInput<R>, added: readonly SessionEvent[]) => Projection<T, A>) {
   const stateKey: CacheKey<Session, State<R, T, A>> = { name: `diagnostic-index:${types.join(',')}`,
     validity: 'Native Session identity; relevant event cursor and immutable record-list identity.',
     create: () => ({ through: 0, update: create() }) }
   const bodyKey: CacheKey<DiagnosticEntry<T>, { cached?: { value: T; missing?: number } }> = { name: `diagnostic-body:${types.join(',')}`,
     validity: 'Immutable entry identity; a missing future evidence seq expires when that event exists.', create: () => ({}) }
-  const page = (session: Session, records: readonly R[], query: PageQuery) => {
+  const page = (session: Session, records: DiagnosticRecords<R>, query: PageQuery) => {
     using log = history.live(session)
-    const state = history.cache.use(session, stateKey)
+    let state = history.cache.use(session, stateKey)
+    if ('consume' in records && state.records && state.records !== records) {
+      history.cache.invalidate(session, stateKey); state = history.cache.use(session, stateKey)
+    }
     const added = log.select(types, state.through)
-    if (!state.index || added.length || state.records !== records) {
-      try { state.index = state.update(records, added) }
+    const input = 'consume' in records ? records.consume(state) : records
+    const changed = isDiagnosticDelta(input) ? input.added.length + input.removed.length > 0 : state.records !== records
+    if (!state.index || added.length || changed) {
+      try { state.index = state.update(input, added) }
       catch (error) {
         // A builder may already have changed its relation buckets before failing.
         // Rebuild from cached native facts on explicit retry, not that partial state.
