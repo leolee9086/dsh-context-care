@@ -1,12 +1,15 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { Context } from '@deepseek-ai/cordis'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, deriveEventMessage, type SessionSeq } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { ensureSessionLog, sessionMessageTail } from '../lib/session-log.js'
 import { createRequestCache } from '../lib/request-cache.js'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
 
+declare module '@deepseek-ai/dsh-session/types' {
+  interface SessionEventMap { 'context-care-test/project': { seq: SessionSeq; text: string } }
+}
 interface Harness { open(t: test.TestContext): Promise<Context> }
 const message = (text: string) => createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text }] })
 
@@ -157,6 +160,33 @@ export function registerSessionLogCases(harness: Harness): void {
     history.close()
     assert.throws(() => history.messages(session), /session-log-closed/)
     assert.throws(() => history.projectHistory(session, historicKey, ['user/message'], () => []), /session-log-closed/)
+  })
+
+  test('shared Session projections retain native content updates and interpreter disposal', async t => {
+    const ctx = await harness.open(t), history = ensureSessionLog(ctx)
+    const dispose = ctx.sessions.registerMessageProjection({ type: 'context-care-test/project', project(event, context) {
+      if (event.type !== 'context-care-test/project') throw new Error('unexpected native projection event')
+      const source = context.events[event.data.seq - context.baseSeq]
+      assert.ok(source)
+      const original = deriveEventMessage(source, context.messages)
+      assert.ok(original)
+      return new Map([[source.seq, Object.freeze({ ...original, content: Object.freeze([Object.freeze({ type: 'text' as const, text: event.data.text })]) })]])
+    } })
+    t.after(dispose)
+    const session = ctx.sessions.create(SessionId('shared-content-generation'))
+    const event = session.append('user/message', message('original'), { surfaceOp: 'append' })
+    const key = {}, original = history.messages(session), origins = history.origins(session)
+    const raw = history.projectSurface(session, key, entry => [entry.event])
+    session.append('context-care-test/project', { seq: event.seq, text: 'projected' })
+    const projected = history.messages(session)
+    assert.deepEqual(projected[0].content, [{ type: 'text', text: 'projected' }])
+    assert.deepEqual(original[0].content, [{ type: 'text', text: 'original' }])
+    assert.notEqual(history.origins(session), origins)
+    assert.equal(history.projectSurface(session, key, () => { throw new Error('raw event reparsed') }), raw)
+    assert.equal(history.messages(session), projected)
+    await dispose()
+    assert.throws(() => history.messages(session), /was removed or replaced/)
+    assert.throws(() => history.origins(session), /was removed or replaced/)
   })
 
   test('request diagnostic views invalidate only for settlements or changed live records', async t => {

@@ -629,7 +629,7 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
         const fresh = events.filter(event => event.seq > lastSeq && (event.type === 'assistant/message' && !event.data.interrupted || event.type === 'tool/result'))
         if (!fresh.length) return
         const all = originalSessionBlocks(agent.session)
-        const request = { messages: history.messages(agent.session), purpose: 'preview', signal }
+        let request = { messages: history.messages(agent.session), purpose: 'preview', signal }
         const analysis = createRequestPlanCache(requestImpact)
         const indexed = { length: all.length, at: index => all[index], slice: (from, end) => all.slice(from, end) }
         const generation = agent.session.surface.replaceGeneration
@@ -637,6 +637,8 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
           // Query the declared history window, not a new full-prefix copy per output.
           const stage = event.type === 'tool/result' ? 'tool.result' : 'output.complete'
           const selected = windowFor(agent.session, 'output')(indexed, rules.filter(rule => rule.on.includes(stage)), event.seq, generation)
+          const messages = history.messages(agent.session)
+          if (messages !== request.messages) request = { ...request, messages }
           const planned = await plan(agent, request, stage, selected, event.seq, analysis)
           await jobs.enqueue(id, planned.scheduled, planned.token)
           await store.runtime(id, runtime => {

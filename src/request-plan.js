@@ -28,7 +28,7 @@ function patchArguments(argumentsValue, pointer, value) {
 }
 const evidenceActionKey = (event, action) => JSON.stringify([event.sourceId, event.ruleId, event.occurrenceId, action.id])
 
-/** Plan against an immutable request. Cache-budget exclusions are recorded and replan dependencies; character and byte errors remain explicit failures. */
+/** Plan against an immutable request; unchanged results borrow it, mutations own a copy. Cache-budget exclusions replan dependencies; character and byte errors remain explicit failures. */
 export function planRequestV2(input) {
   const excluded = new Set()
   const rank = new Map(input.rules.map(rule => [JSON.stringify([rule.sourceId, rule.id]), rule.priority]))

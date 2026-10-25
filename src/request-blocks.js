@@ -13,6 +13,7 @@ function surfaceEvents(session, log) {
   return [...log.select(['turn/start']), ...session.surface.nodes.map(seq => log.at(seq))]
     .sort((a, b) => a.seq - b.seq)
 }
+/** Borrow chronological raw blocks from the Host projection when supplied. */
 export function originalSessionBlocks(session, log, history) {
   if (history) return history.projectSurface(session, originalSessionBlocks, ({ event, turnId }) =>
     event.type === 'turn/start' ? [] : extractRawBlocks(event, { sessionId: String(session.id), turnId }))
