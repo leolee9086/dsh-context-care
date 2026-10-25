@@ -13,6 +13,7 @@ import { createWorkbenchWindow } from '../lib/workbench-window.js'
 import { planRequestV2 } from './request-plan.js'
 import { requestImpact } from './request-impact.js'
 import { createRequestPlanCache } from '../lib/request-plan-cache.js'
+import { withPlanningToken } from '../lib/planning-token.js'
 import { entryTurn as readEntryTurn, entryPolicy, deliveredEntry, deactivatedEntry } from './entry-lifecycle.js'
 import { releaseResources } from './resource-cleanup.js'
 import { importWorkbench } from './workbench-import.js'
@@ -133,11 +134,13 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
   }
   const token = (agent, variables) => JSON.stringify([store.token(String(agent.session.id), presetId(agent), variables), generation, executors.token(), detectors.token(), controls.revision(String(agent.session.id)),
     controls.epoch(String(agent.session.id), '', ''), templates.versions()])
+  const tokenStamp = agent => [store.tokenRevision(), String(agent.session.id), presetId(agent), generation, executors.token(), detectors.token(),
+    controls.revision(String(agent.session.id)), controls.epoch(String(agent.session.id), '', ''), templates.tokenRevision()]
   function decision(agent, event, action, expected, { delivery = false, dispatchId, planning } = {}) {
     const id = String(agent.session.id)
     if (fileFailure) return { enabled: false, reason: `rule-file-load-failed: ${fileFailure.message}` }
     if (closed || !store.available(id)) return { enabled: false, reason: 'workbench-storage-unavailable' }
-    if (expected !== undefined && expected !== token(agent)) return { enabled: false, reason: 'workbench-changed' }
+    if (expected !== undefined && !(planning ? planning.current() : expected === token(agent))) return { enabled: false, reason: 'workbench-changed' }
     const selected = planning ? planning.select(event.sourceId, event.ruleId, action.id) : controls.decision(id, event.sourceId, event.ruleId, action.id)
     if (!selected.enabled) return selected
     const evidence = event.triggerSeq === undefined ? event.sourceSeqs : [event.triggerSeq]
@@ -302,14 +305,14 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
     const decisionEntries = new Map(docs.flatMap(document => document.entries.map(entry =>
       [JSON.stringify([`context-care:document:${document.id}`, `entry:${entry.id}`]), entry])))
     // No await inside the callback: delivery always rechecks live policy separately.
-    const planPass = input => controls.withDecisions(id, select => {
-      const planning = { select, entries: decisionEntries, state: record(agent), turnId: sessionTurn(agent.session) }
+    const planPass = input => controls.withDecisions(id, select => withPlanningToken(captured, () => tokenStamp(agent), () => token(agent), current => {
+      const planning = { select, current, entries: decisionEntries, state: record(agent), turnId: sessionTurn(agent.session) }
       return planRequestV2({ ...input, decision(event, action) {
         const selected = decision(agent, event, action, captured, { planning })
         const policy = policies[actionKey(event, action)]
         return selected.enabled && policy?.reason ? { enabled: false, reason: policy.reason } : selected
       } })
-    })
+    }))
     const estimateMessage = message => ctx.tokenMeter.estimateMessage(message)
     const planned = planPass({ request, blocks, rules, events, templates: localTemplates, snapshot,
       maxInjectedChars, maxInjectedTokens, maxCacheChangedBytes, maxRequestBytes, estimateMessage, analysis })

@@ -86,7 +86,7 @@ export function validateDocumentSet(documents, templates) {
 export function createWorkbenchStore({ entries = [], save, templates, maxDocuments = 64, maxRuns = 1000, report = () => {}, externalDocuments = () => [], admissionSeq = () => -1, changed = () => {} }) {
   const prospective = new Map()
   const records = new Map(entries.map(([id, value]) => [id, Stored.parse(value)])); const chains = new Map(); const failures = new Map()
-  let closed = false; let closing = false
+  let closed = false; let closing = false; let tokenRevision = 0
   for (const record of records.values()) for (const document of record.documents) validateDocument(document, templates)
   const current = id => records.get(id) ?? empty()
   function mutate(id, change) {
@@ -101,8 +101,8 @@ export function createWorkbenchStore({ entries = [], save, templates, maxDocumen
       prospective.set(id, next.documents)
       try {
         await save(id, structuredClone(next))
-        records.set(id, next); failures.delete(id); changed(id)
-      } catch (error) { failures.set(id, error); report(error); changed(id); throw new ControlError(503, 'workbench-storage-unavailable', error) }
+        records.set(id, next); failures.delete(id); tokenRevision++; changed(id)
+      } catch (error) { failures.set(id, error); tokenRevision++; report(error); changed(id); throw new ControlError(503, 'workbench-storage-unavailable', error) }
       finally { prospective.delete(id) }
       return result ?? structuredClone(next)
     })
@@ -119,6 +119,9 @@ export function createWorkbenchStore({ entries = [], save, templates, maxDocumen
         scopeRevisions: { global: current(globalId).revision, preset: presetScopeId ? current(presetScopeId).revision : null },
         storageError: [id, globalId, presetScopeId].some(scopeId => failures.has(scopeId)) ? 'workbench-storage-unavailable' : undefined }
     },
+    // Mutation revision is only a cheap invalidation hint. Token equality still
+    // uses the existing full serialization, including automatic variable ACKs.
+    tokenRevision: () => tokenRevision,
     token: (id, presetId, variables = current(id).variables) => JSON.stringify([id, current(id).revision, variables, current('$scope:global').revision,
       presetId === undefined ? null : current(`$scope:preset:${presetId}`).revision, [...failures.keys()], closing, closed]),
     available: id => !closed && !closing && !failures.has(id) && ![...failures.keys()].some(id => id.startsWith('$scope:')),
@@ -195,8 +198,8 @@ export function createWorkbenchStore({ entries = [], save, templates, maxDocumen
       return mutate(id, next => { assertCurrent(); next.variables[variableKey(declaration, turnId)] = structuredClone(value); next.runtimeRevision++ })
     },
     async close() {
-      closing = true
-      const settled = await Promise.allSettled(chains.values()); closed = true
+      closing = true; tokenRevision++
+      const settled = await Promise.allSettled(chains.values()); closed = true; tokenRevision++
       const errors = settled.filter(item => item.status === 'rejected' && !(item.reason instanceof ControlError)).map(item => item.reason)
       if (errors.length) throw new AggregateError(errors, 'workbench-close-failed')
     },

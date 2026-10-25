@@ -40,7 +40,7 @@ function frozenJson(value, depth = 0) {
 export function createTemplates({ maxTemplateChars = 16384, maxOutputChars = 65536, maxIterations = 256, maxPartialDepth = 8 } = {}) {
   const env = Handlebars.create()
   const partials = new Map(); const helpers = new Map(); const cache = new Map()
-  let frame
+  let frame; let tokenRevision = 0
   env.unregisterHelper('lookup'); env.unregisterHelper('log')
   env.registerHelper('eq', (a, b) => a === b)
   env.registerHelper('json', value => JSON.stringify(value))
@@ -104,15 +104,15 @@ export function createTemplates({ maxTemplateChars = 16384, maxOutputChars = 655
         if (++frame.partialDepth > maxPartialDepth) throw new Error('template-partial-depth-exceeded')
         try { return render(context, options) } finally { frame.partialDepth-- }
       }
-      partials.set(name, { revision, template, wrapped }); env.registerPartial(name, wrapped)
-      return () => { if (partials.get(name)?.wrapped === wrapped) { partials.delete(name); env.unregisterPartial(name) } }
+      partials.set(name, { revision, template, wrapped }); env.registerPartial(name, wrapped); tokenRevision++
+      return () => { if (partials.get(name)?.wrapped === wrapped) { partials.delete(name); env.unregisterPartial(name); tokenRevision++ } }
     },
     registerHelper({ name, revision, render }) {
       if (!name || !revision || allowed.has(name) || helpers.has(name) || unsafe.has(name) || disabledHelpers.has(name)) throw new Error('template-helper-conflict')
       if (typeof render !== 'function') throw new Error('template-helper-render-required')
       // Registration is trusted plugin code; values passed to it are immutable snapshots.
-      helpers.set(name, { revision, render }); env.registerHelper(name, render)
-      return () => { if (helpers.get(name)?.render === render) { helpers.delete(name); env.unregisterHelper(name) } }
+      helpers.set(name, { revision, render }); env.registerHelper(name, render); tokenRevision++
+      return () => { if (helpers.get(name)?.render === render) { helpers.delete(name); env.unregisterHelper(name); tokenRevision++ } }
     },
     render(source, snapshot) {
       if (frame) throw new Error('template-reentrant-render')
@@ -124,6 +124,7 @@ export function createTemplates({ maxTemplateChars = 16384, maxOutputChars = 655
       } finally { frame = undefined }
     },
     bind: (input, snapshot) => bindInputs(input, frozenJson(snapshot)),
+    tokenRevision: () => tokenRevision,
     versions: () => ({ partials: [...partials].map(([name, value]) => ({ name, revision: value.revision })), helpers: [...helpers].map(([name, value]) => ({ name, revision: value.revision })) }),
   }
 }

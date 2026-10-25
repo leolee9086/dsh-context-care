@@ -1,5 +1,15 @@
 # 更新记录
 
+## v0.14.9
+
+**2026-10-26：同步规划批次内按真实依赖复用精确策略token比较。**
+
+- 第38轮沿已测逐证据token热点新增TS withPlanningToken；同同步pass内以session/preset、store ACK/故障/close、来源generation、executor/detector、control revision/epoch、template注册移除版本检查是否需要重读原token。变更戳只作失效提示，仍以原token字节精确相等；无关runtime ACK、同版本移除恢复不被误认成新policy。失败token读不发布，显式retry、callback退出释放且不能逃逸，不跨await/请求缓存。
+- workbench计划逐证据仍检查stamp，模板helper渲染中同步删除模板/来源让下一证据失效；模板同revision恢复保留原来的精确相等语义。投递、matcher current和最终计划校验仍使用原live token。新增owner计数器不改store.token/templates.versions内容和disposer语义。
+- 新增4TS guard与4真实owner单元，覆盖1000决策1序列化、全部依赖变化、失败retry/逃逸、模板同步变更、自动变量不增document revision但token变化、session/global/preset ACK、未ACK不发布、故障/恢复/close和无关ACK精确相等。新增1条真实Host回归含3原生组合；原500证据用例完整tokenReads5/catalog3/record14，pause/resume及native复用保持。
+- 定向16单元通过；Host同步移除/恢复三个组合通过（1实质+5空suite不计6实质）。后CPU采样实际1实质通过：plan533.05ms/HTTP112.92ms/另一Agent123.82ms/loop104.99ms，原token inclusive约1.60ms、轻stamp26.27ms，对照上轮token45.87ms。整体时间没有证明显著改善，不编加速比；首读投影约116.94ms/full ownedRequest/byte比较与传输仍有成本。
+- 新单元初始错误假设同render函数重注册后旧disposer无效、Host初始错误要求前缀替换吞掉后缀，均只改夹具断言，未改生产语义或阈值。最终release:check通过strict/104JS/62事件目录、516/516单元（21118.16ms）、Host/Client构建；完整源码Host217/217（284748.12ms）、Client3文件24/24（4.60s）。桌面ASAR隔离23/23实质、0skip、stderr空、exit0（24792.75ms），含新增同步模板/来源失效与精确恢复组合；工具346.70ms/loop60.16ms/token5/catalog3/record14。独立包最终结果见验收和持久记录；未改Harness/Worker时钟取消预算，未代装启用重启，旧tag保留。
+
 ## v0.14.8
 
 **2026-10-26：按实测热点清除逐证据控制目录及运行状态重建。**

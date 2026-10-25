@@ -714,11 +714,12 @@ registerWorkbenchPerformanceCases({ async open(t) {
   const displayCalls = t.mock.method(service, 'display')
   const projectionCalls = t.mock.method(ensureSessionLog(ctx).cache, 'worked')
   const recordReads = t.mock.method(service.store, 'read')
+  const policyTokenReads = t.mock.method(service.store, 'token')
   let catalogReads = 0
   t.after(ctx.contextCareControls.registerProvider(id => { if (id === agent.id) catalogReads++; return [] }))
   const { base, cookie } = await controlCookie(ctx)
   ctx.llm.registerAdapter(['care-test'], new CompletionAdapter([{ blocks: [{ type: 'text', text: 'Independent workbench probe completed.' }] }]))
-  return { session: agent.session, catalogReads: () => catalogReads, recordReads: () => recordReads.mock.calls.filter(call => call.arguments[0] === agent.id).length,
+  return { session: agent.session, tokenReads: () => policyTokenReads.mock.calls.filter(call => call.arguments[0] === agent.id).length, catalogReads: () => catalogReads, recordReads: () => recordReads.mock.calls.filter(call => call.arguments[0] === agent.id).length,
     pauseFilter: paused => ctx.contextCareControls.patch(agent.id, { revision: ctx.contextCareControls.revision(agent.id),
       sourceId: 'context-care:document:workbench-performance', ruleId: 'filter-pairs', paused }).then(() => undefined),
     preview: request => service.preview(agent, request), cacheNames: () => ensureSessionLog(ctx).cache.report().map(row => row.name),
@@ -3300,6 +3301,46 @@ test('Workbench v2 cascades only explicit entries, previews without writes and r
   assert.doesNotThrow(() => service.assertCurrent(agent, planned))
   await service.store.automaticVariable(agent.id, before.documents[0].variables[0], 2, 'turn')
   assert.throws(() => service.assertCurrent(agent, planned), { code: 'CONTROL_CHANGED' })
+})
+
+test('Workbench planning tokens retain synchronous template and source invalidation and exact restored equality', async t => {
+  for (const mutation of ['template-remove', 'source-remove', 'template-restore']) {
+    const owned = await fixture(t, false), ctx = await owned.open()
+    const service = ctx.contextCareWorkbench
+    const agent = await ctx.agentLoop.create(`planning-token-${mutation}`, { provider: 'care-test', model: 'care-test' })
+    let renders = 0, removeSource, removeHelper
+    removeHelper = service.registerHelper({ name: 'changePolicy', revision: 1, render: () => {
+      renders++
+      if (renders === 1) {
+        if (mutation === 'source-remove') removeSource()
+        else {
+          removeHelper()
+          if (mutation === 'template-restore') removeHelper = service.registerHelper({ name: 'changePolicy', revision: 1, render: () => 'PATCHED' })
+        }
+      }
+      return 'PATCHED'
+    } })
+    t.after(() => removeHelper())
+    removeSource = service.register({ plugin: 'token-invalidation-test', registrationId: `token-${mutation}`, sessionId: agent.id, documents: [{
+      schemaVersion: 2, id: 'token', revision: 1, title: 'Token', rules: [{ schemaVersion: 2, id: 'replace', revision: 1, on: ['request.assemble'],
+        select: { view: 'model', roles: ['user'], blockTypes: ['text'] }, match: { kind: 'regex', pattern: '^TOKEN' },
+        actions: [{ id: 'replace', kind: 'replace', stage: 'request.assemble', enabledDefault: true, template: '{{changePolicy}}' }] }],
+    }] })
+    t.after(() => removeSource())
+    const request = { messages: [{ role: 'user', content: [{ type: 'text', text: 'TOKEN first' }] },
+      { role: 'user', content: [{ type: 'text', text: 'TOKEN second' }] }] }
+    const before = structuredClone(request), stored = service.store.read(agent.id)
+    if (mutation === 'template-restore') {
+      const result = await service.preview(agent, request)
+      assert.equal(result.applied.length, 2); assert.equal(renders, 2, 'exact restored versions retain the original equality semantics')
+      assert.deepEqual(result.request.messages.map(message => message.content[0].text), ['PATCHED first', 'PATCHED second'])
+    } else {
+      await assert.rejects(service.preview(agent, request), /workbench-changed-during-planning/)
+      assert.equal(renders, 1, 'the next evidence must observe synchronous policy removal before rendering')
+    }
+    assert.deepEqual(request, before); assert.deepEqual(service.store.read(agent.id), stored)
+    assert.ok(!ensureSessionLog(ctx).cache.report().some(row => row.name.startsWith('request-plan-') || row.name === 'request-model-projection'))
+  }
 })
 
 test('Workbench v2 shares token and cache budgets across real Host cascade passes without consuming skipped entries', async t => {
