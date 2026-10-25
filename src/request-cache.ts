@@ -22,6 +22,8 @@ interface SessionCache {
   active: Map<string, CacheRecord>
   /** Only the latest completed operation of each purpose/action, not every past phase. */
   recent: Map<string, CacheRecord>
+  revision: number
+  listed?: { count: number; revision: number; rows: CacheRecord[] }
 }
 interface Options {
   sessions: Pick<Context['sessions'], 'get' | 'list' | 'flush' | 'prepare'>
@@ -54,13 +56,16 @@ export function createRequestCache({ sessions, measureInput, now = Date.now, cha
   const getSession = (id: string) => sessions.get(id as SessionId)
   function cacheOf(session: Session): SessionCache {
     let cache = caches.get(session)
-    if (!cache) { cache = { active: new Map(), recent: new Map() }; caches.set(session, cache) }
+    if (!cache) { cache = { active: new Map(), recent: new Map(), revision: 0 }; caches.set(session, cache) }
     return cache
   }
   function listOne(session: Session): CacheRecord[] {
     // The immutable Session rows win if a live diagnostic disagrees about settlement.
     const committed = history.read(session)
-    const cache = caches.get(session)
+    const cache = cacheOf(session)
+    // The native fold appends immutable rows; unrelated events cannot change an
+    // existing settlement. Keep one list until a settlement or live fact changes.
+    if (cache.listed?.count === committed.length && cache.listed.revision === cache.revision) return cache.listed.rows
     const transient = [...(cache?.recent.values() ?? []), ...(cache?.active.values() ?? [])]
     const byEvent = new Map(transient.filter(row => row.kind === 'request' && typeof row.data.eventSeq === 'number')
       .map(row => [row.data.eventSeq, row]))
@@ -84,6 +89,8 @@ export function createRequestCache({ sessions, measureInput, now = Date.now, cha
         || (typeof row.data.compactionId === 'string' && compactions.has(row.data.compactionId)))
       if (!committedRequest) rows.push(row)
     }
+    rows.sort((a, b) => a.at - b.at || a.key.localeCompare(b.key))
+    cache.listed = { count: committed.length, revision: cache.revision, rows }
     return rows
   }
   return {
@@ -125,12 +132,18 @@ export function createRequestCache({ sessions, measureInput, now = Date.now, cha
           cache.recent.set(`${family}${String(data.phase)}`, merged)
         }
       }
+      cache.revision++
       changed(String(sessionId), value)
     },
     /** The durability checkpoint belongs to Session, not to a second writer. */
     async flush(sessionId?: string) {
       const selected = sessionId === undefined ? sessions.list() : [getSession(sessionId)].filter((session): session is Session => session !== undefined)
       await Promise.all(selected.map(session => sessions.flush(session)))
+    },
+    /** A stable read-only cut for diagnostic projections; list() still returns its own array. */
+    view(sessionId: string): readonly CacheRecord[] {
+      const session = getSession(sessionId)
+      return session ? listOne(session) : []
     },
     /** Read actual settlements plus bounded live diagnostics for loaded sessions. */
     list(sessionId?: string): CacheRecord[] {
@@ -191,7 +204,10 @@ export function createRequestCache({ sessions, measureInput, now = Date.now, cha
       return [{ ...sample, data: { ...sample.data, ...measured } }]
     },
     /** Idle/unloaded Agents retain no unfinished request objects. */
-    release(session: Session) { caches.get(session)?.active.clear() },
+    release(session: Session) {
+      const cache = caches.get(session)
+      if (cache?.active.size) { cache.active.clear(); cache.revision++ }
+    },
     /** Forgetting the cache does not modify any Session or existing storage files. */
     async close() { history.clear(); caches = new WeakMap(); measurements = new WeakMap(); headerKeys = new WeakMap() },
   }

@@ -13,7 +13,9 @@ function surfaceEvents(session, log) {
   return [...log.select(['turn/start']), ...session.surface.nodes.map(seq => log.at(seq))]
     .sort((a, b) => a.seq - b.seq)
 }
-export function originalSessionBlocks(session, log) {
+export function originalSessionBlocks(session, log, history) {
+  if (history) return history.projectSurface(session, originalSessionBlocks, ({ event, turnId }) =>
+    event.type === 'turn/start' ? [] : extractRawBlocks(event, { sessionId: String(session.id), turnId }))
   let turnId = `${session.id}:seed`
   const blocks = []
   for (const event of surfaceEvents(session, log)) {
@@ -23,10 +25,11 @@ export function originalSessionBlocks(session, log) {
   return blocks
 }
 /** Associate model messages by their public message id; transient request-only input never receives an invented committed seq. */
-export function modelRequestBlocks(session, request, requestId, log) {
-  const origins = new Map()
+export function modelRequestBlocks(session, request, requestId, log, history) {
+  const shared = history?.origins(session)
+  const origins = shared?.byId ?? new Map()
   let turnId = `${session.id}:seed`
-  for (const event of surfaceEvents(session, log)) {
+  for (const event of shared ? [] : surfaceEvents(session, log)) {
     if (event.type === 'turn/start') { turnId = `${session.id}:turn:${event.data.turn ?? event.seq}`; continue }
     const message = session.deriveEventMessage(event)
     if (message) origins.set(message.id, { event, turnId, message })
@@ -48,7 +51,7 @@ export function modelRequestBlocks(session, request, requestId, log) {
     walkContentBlocks(message.content, appendBlock, '', message.toolCallId)
   }
   if (typeof request.system === 'string' && request.system.length) {
-    const origin = [...origins.values()].find(value => value.message.role === 'system')
+    const origin = shared ? shared.system : [...origins.values()].find(value => value.message.role === 'system')
     append({ role: 'system', id: 'request-system', content: [{ type: 'text', text: request.system }] }, -1, origin)
   }
   request.messages.forEach((message, i) => append(message, i, origins.get(message.id)))

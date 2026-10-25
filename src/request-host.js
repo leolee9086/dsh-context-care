@@ -213,6 +213,7 @@ export async function openRequestHost(ctx, config = {}) {
     calibration: (session, header, fallback) => journalCalibration(journal.calibrationRecords(session, header), header, fallback),
     feedback: feedback.list,
     list: journal.list,
+    view: journal.view,
     /** @param {string} [sessionId] */
     async flush(sessionId) { await journal.flush(sessionId); await feedback.flush(sessionId) },
   }

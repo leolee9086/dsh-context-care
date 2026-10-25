@@ -4,6 +4,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { ensureSessionLog, sessionMessageTail } from '../lib/session-log.js'
+import { createRequestCache } from '../lib/request-cache.js'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
 
 interface Harness { open(t: test.TestContext): Promise<Context> }
@@ -94,6 +95,87 @@ export function registerSessionLogCases(harness: Harness): void {
     history.close()
     assert.throws(() => current.at(0), /session-log-closed/)
     await assert.rejects(history.read(session.id), /session-log-closed/)
+  })
+
+  test('shared Session snapshots and projections reuse immutable cuts and only process growth', async t => {
+    const ctx = await harness.open(t), history = ensureSessionLog(ctx)
+    const session = ctx.sessions.create(SessionId('shared-projections'))
+    session.append('turn/start', { turn: 1 })
+    const firstEvent = session.append('user/message', message('first'), { surfaceOp: 'append' })
+    session.append('user/message', message('second'), { surfaceOp: 'append' })
+    const snapshots = t.mock.method(session, 'snapshotEvents'), reads = t.mock.method(session, 'eventAt')
+    const derives = t.mock.method(session, 'deriveEventMessage')
+    using old = history.live(session); using same = history.live(session)
+    assert.equal(old.events, same.events)
+    assert.equal(old.events, old.events)
+    assert.equal(snapshots.mock.callCount(), 1, 'one full snapshot is shared by consumers at this cut')
+    const key = {}, historicKey = {}; let work = 0, historicWork = 0
+    const project = (entry: { event: { seq: number }; turnId: string }) => { work++; return [{ seq: entry.event.seq, turnId: entry.turnId }] }
+    const initial = history.projectSurface(session, key, project)
+    const values = history.messages(session), origins = history.origins(session)
+    const readCount = reads.mock.callCount(), deriveCount = derives.mock.callCount()
+    assert.equal(history.projectSurface(session, key, project), initial)
+    assert.equal(history.messages(session), values)
+    assert.equal(history.origins(session), origins)
+    assert.equal(reads.mock.callCount(), readCount); assert.equal(derives.mock.callCount(), deriveCount)
+    const oldWork = work
+    session.append('turn/start', { turn: 2 })
+    assert.equal(history.projectSurface(session, key, project), initial, 'log-only growth keeps the surface identity')
+    const tail = session.append('user/message', message('third'), { surfaceOp: 'append' })
+    const grown = history.projectSurface(session, key, project)
+    assert.equal(work, oldWork + 1); assert.equal(grown.at(-1)?.turnId, `${session.id}:turn:2`)
+    assert.equal(initial.length, 2, 'retained arrays cannot grow behind a reader')
+    history.messages(session); history.origins(session)
+    assert.equal(derives.mock.callCount(), deriveCount + 1, 'origins and messages share native derivation')
+    using newer = history.live(session)
+    assert.equal(newer.events.length, session.seq); assert.equal(old.events.length, 3)
+    assert.equal(snapshots.mock.callCount(), 2)
+    const cut = history.projectHistory(session, historicKey, ['user/message'], entry => { historicWork++; return [entry.event.seq] }, firstEvent.seq + 1)
+    const all = history.projectHistory(session, historicKey, ['user/message'], entry => { historicWork++; return [entry.event.seq] })
+    assert.equal(historicWork, 3); assert.equal(cut.length, 1); assert.equal(cut.at(1), undefined)
+    assert.deepEqual(cut.slice(), [firstEvent.seq]); assert.equal(all.at(2), tail.seq)
+    history.projectHistory(session, historicKey, ['user/message'], () => { throw new Error('reprojected old evidence') }, firstEvent.seq + 1)
+    const replacement = session.append('user/message', message('replacement'),
+      { surfaceOp: { op: 'replace', startSeq: firstEvent.seq, endSeq: firstEvent.seq }, sourceEventSeqs: [firstEvent.seq] })
+    const replaced = history.projectSurface(session, key, project)
+    assert.deepEqual(replaced.map(item => item.seq), [2, tail.seq, replacement.seq], 'original blocks stay in chronological order')
+    assert.equal(work, oldWork + 2, 'unaffected raw blocks survive positional replacement')
+    assert.deepEqual(history.messages(session).map(value => value.content), session.deriveMessages().map(value => value.content))
+    assert.deepEqual(initial.map(item => item.seq), [1, 2])
+    const retryKey = {}; let fail = true
+    const retry = (entry: { event: { seq: number } }) => {
+      if (entry.event.seq === tail.seq && fail) { fail = false; throw new Error('projection interrupted') }
+      return [entry.event.seq]
+    }
+    assert.throws(() => history.projectSurface(session, retryKey, retry), /projection interrupted/)
+    assert.deepEqual(history.projectSurface(session, retryKey, retry), [2, tail.seq, replacement.seq])
+    const historyRetryKey = {}; fail = true
+    assert.throws(() => history.projectHistory(session, historyRetryKey, ['user/message'], retry), /projection interrupted/)
+    assert.deepEqual(history.projectHistory(session, historyRetryKey, ['user/message'], retry).slice(), [1, 2, tail.seq, replacement.seq])
+    old[Symbol.dispose]()
+    assert.throws(() => old.events, /session-log-closed/)
+    history.close()
+    assert.throws(() => history.messages(session), /session-log-closed/)
+    assert.throws(() => history.projectHistory(session, historicKey, ['user/message'], () => []), /session-log-closed/)
+  })
+
+  test('request diagnostic views invalidate only for settlements or changed live records', async t => {
+    const ctx = await harness.open(t), session = ctx.sessions.create(SessionId('request-view-cuts'))
+    const cache = createRequestCache({ sessions: ctx.sessions, measureInput: () => ({ textTokens: 0, visualTokens: 0 }) })
+    t.after(() => cache.close())
+    const first = cache.view(String(session.id))
+    assert.equal(cache.view(String(session.id)), first)
+    session.append('user/message', message('not a request settlement'), { surfaceOp: 'append' })
+    assert.equal(cache.view(String(session.id)), first)
+    await cache.put('action-one', String(session.id), 'maintenance', { action: 'prune', phase: 'completed', operationId: 'one' })
+    const changed = cache.view(String(session.id))
+    assert.notEqual(changed, first); assert.equal(changed.length, 1); assert.equal(first.length, 0)
+    assert.equal(cache.view(String(session.id)), changed)
+    const listed = cache.list(String(session.id))
+    listed.pop()
+    assert.equal(cache.view(String(session.id)).length, 1, 'public list owns its array')
+    cache.release(session)
+    assert.equal(cache.view(String(session.id)), changed, 'releasing an empty active map cannot invalidate the view')
   })
 
   test('shared cold Session reads merge concurrent callers isolate cancellation and refresh revisions', async t => {

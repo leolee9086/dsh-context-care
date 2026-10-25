@@ -3,6 +3,8 @@
 declare module '@leolee9086/dsh-rule-engine' {
   import type { z } from 'zod'
   type JsonValue = z.infer<ReturnType<typeof z.json>>
+  export function selectBlocksV2<T extends { id: string; messageId?: string; turnId?: string; view: string; role: string; type: string }>(
+    blocks: readonly T[], select: { view: string; roles: readonly string[]; blockTypes: readonly string[]; depth?: { unit: 'message' | 'turn' | 'block'; limit: number } }): T[]
   export function matchConditionV2(condition: JsonValue, snapshot: JsonValue, freshSeq?: number): { ok: boolean }
   export function normalizeRuleV2(input: {
     schemaVersion: 2

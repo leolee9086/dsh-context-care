@@ -9,8 +9,10 @@ import { createDetectorRegistry } from './detector-registry.js'
 import { createExecutorRegistry, createActionRuns, compactExecutorRef } from './action-runs.js'
 import { originalSessionBlocks as readOriginalBlocks, modelRequestBlocks as readModelBlocks, sessionTurn as readSessionTurn } from './request-blocks.js'
 import { ensureSessionLog } from '../lib/session-log.js'
+import { createWorkbenchWindow } from '../lib/workbench-window.js'
 import { planRequestV2 } from './request-plan.js'
 import { requestImpact } from './request-impact.js'
+import { createRequestPlanCache } from '../lib/request-plan-cache.js'
 import { entryTurn as readEntryTurn, entryPolicy, deliveredEntry, deactivatedEntry } from './entry-lifecycle.js'
 import { releaseResources } from './resource-cleanup.js'
 import { importWorkbench } from './workbench-import.js'
@@ -26,10 +28,16 @@ const dispatchItems = planned => [...new Map([...planned.applied, ...(planned.en
  * @param {import('zod').input<typeof import('./request-host.js').Config>} options */
 export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executors: configuredExecutors = [], maxCascadePasses = 4, maxInjectedChars = 65536, maxInjectedTokens = 65536, maxCacheChangedBytes, maxRequestBytes = 8388608, maxQueued = 128, maxConcurrent = 8, maxDeltaChars = 32768, maxDeltaBlocks = 16, matcher: matcherOptions = {}, requiredStages = [] } = {}) {
   const history = ensureSessionLog(ctx)
+  const displayHistoryKey = {}, windows = new WeakMap()
+  const windowFor = (session, kind) => {
+    let owned = windows.get(session)
+    if (!owned) { owned = { display: createWorkbenchWindow(), output: createWorkbenchWindow() }; windows.set(session, owned) }
+    return owned[kind]
+  }
   const sessionTurn = session => history.withLive(session, log => readSessionTurn(session, log))
   const entryTurn = session => history.withLive(session, log => readEntryTurn(session, log))
-  const originalSessionBlocks = session => history.withLive(session, log => readOriginalBlocks(session, log))
-  const modelRequestBlocks = (session, request, requestId) => history.withLive(session, log => readModelBlocks(session, request, requestId, log))
+  const originalSessionBlocks = session => history.withLive(session, log => readOriginalBlocks(session, log, history))
+  const modelRequestBlocks = (session, request, requestId) => history.withLive(session, log => readModelBlocks(session, request, requestId, log, history))
   const report = error => ctx.logger.warn(`context-care: workbench failed: ${String(error)}`)
   const templates = createTemplates()
   const registrations = new Map(); const observations = new Map(); const admittedSessions = new Map(); let generation = 0; let closed = false; let closing
@@ -74,6 +82,15 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
   function definitions(agent) {
     return documents(agent).flatMap(document => [...document.rules.map(rule => normalizeRuleV2({ ...rule, sourceId: `context-care:document:${document.id}` })),
       ...document.entries.map(entry => entryRule(document, entry))])
+  }
+  function ruleAdmissions(agent, rules, docs = documents(agent), state = record(agent)) {
+    const id = String(agent.session.id), bySource = new Map(docs.map(document => [`context-care:document:${document.id}`, document]))
+    return new Map(rules.map(rule => {
+      const document = bySource.get(rule.sourceId), owner = contributor(id, document)
+      const seq = owner ? (owner.ruleAdmissions?.get(JSON.stringify([rule.id, rule.revision])) ?? owner.admission).get(id) ?? -1
+        : state.runtime.state[`$admission:${document.id}`]?.[JSON.stringify([rule.id, rule.revision])]?.seq ?? -1
+      return [rule, Math.max(seq, controls.sinceSeq(id, rule.sourceId, rule.id))]
+    }))
   }
   function availability(action, agent, rule) {
     if (fileFailure) return { available: false, reason: `rule-file-load-failed: ${fileFailure.message}` }
@@ -212,8 +229,8 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
     })
     report(error)
   }
-  async function plan(agent, request, stage, suppliedBlocks, freshSeq) {
-    try { return await evaluatePlan(agent, request, stage, suppliedBlocks, freshSeq) }
+  async function plan(agent, request, stage, suppliedBlocks, freshSeq, analysis = createRequestPlanCache(requestImpact)) {
+    try { return await evaluatePlan(agent, request, stage, suppliedBlocks, freshSeq, analysis) }
     catch (error) {
       if (!(error instanceof MatcherFailure) || request.signal?.aborted) throw error
       const seqs = freshSeq === undefined ? [] : [freshSeq]
@@ -222,13 +239,13 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
       // Failed optional processing leaves the complete input untouched. No partial patches or actions survive.
       const failedRules = error.diagnostic.rules
       const unchanged = planRequestV2({ request, blocks: [], rules: [], events: [], templates: renderTemplates(agent), snapshot: {}, decision: () => ({ enabled: false }),
-        maxInjectedChars, maxInjectedTokens, maxRequestBytes, estimateMessage: message => ctx.tokenMeter.estimateMessage(message) })
+        maxInjectedChars, maxInjectedTokens, maxRequestBytes, analysis, estimateMessage: message => ctx.tokenMeter.estimateMessage(message) })
       return { ...unchanged, matchStatus: 'failed', failure: error.diagnostic,
         records: failedRules.map(rule => ({ sourceId: rule.sourceId, ruleId: rule.ruleId, status: 'skipped', assessment: 'failed', reason: error.message })),
         token: token(agent), stage, turnId: sessionTurn(agent.session), documents: [], entryTransitions: [], entryPolicies: {}, entryPrevious: {} }
     }
   }
-  async function evaluatePlan(agent, request, stage, suppliedBlocks, freshSeq) {
+  async function evaluatePlan(agent, request, stage, suppliedBlocks, freshSeq, analysis) {
     const captured = token(agent); const docs = documents(agent); const localTemplates = renderTemplates(agent)
     const rules = definitions(agent).filter(rule => rule.on.includes(stage))
     const snapshot = { session: { id: String(agent.session.id), turnId: sessionTurn(agent.session) }, vars: variableSnapshot({ ...record(agent), documents: docs }, sessionTurn(agent.session)),
@@ -239,14 +256,9 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
       ...(views.has('model') ? modelRequestBlocks(agent.session, request, randomUUID()) : []),
     ]
     const id = String(agent.session.id)
-    const admittedRules = freshSeq === undefined ? rules : rules.filter(rule => {
-      const document = docs.find(document => rule.sourceId === `context-care:document:${document.id}`)
-      const owner = contributor(id, document)
-      const seq = owner ? (owner.ruleAdmissions?.get(JSON.stringify([rule.id, rule.revision])) ?? owner.admission).get(id) ?? -1
-        : record(agent).runtime.state[`$admission:${document.id}`]?.[JSON.stringify([rule.id, rule.revision])]?.seq ?? -1
-      // Ineligible historical rules cannot claim an exclusive group before a still-enabled sibling.
-      return freshSeq > Math.max(seq, controls.sinceSeq(id, rule.sourceId, rule.id))
-    })
+    const admissions = freshSeq === undefined ? undefined : ruleAdmissions(agent, rules, docs)
+    // Ineligible historical rules cannot claim an exclusive group before a still-enabled sibling.
+    const admittedRules = admissions ? rules.filter(rule => freshSeq > admissions.get(rule)) : rules
     let enabled = admittedRules.map(rule => ({ ...rule, actions: rule.actions.filter(action => controls.enabled(id, rule.sourceId, rule.id, action.id)) })).filter(rule => rule.actions.length)
     const entries = new Map(docs.flatMap(document => document.entries.filter(entry => entry.target.view === 'model').map(entry =>
       [JSON.stringify([`context-care:document:${document.id}`, `entry:${entry.id}`, entry.revision, 'inject']), entry])))
@@ -287,7 +299,7 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
     }
     const estimateMessage = message => ctx.tokenMeter.estimateMessage(message)
     const planned = planRequestV2({ request, blocks, rules, events, templates: localTemplates, snapshot, decision: decide,
-      maxInjectedChars, maxInjectedTokens, maxCacheChangedBytes, maxRequestBytes, estimateMessage })
+      maxInjectedChars, maxInjectedTokens, maxCacheChangedBytes, maxRequestBytes, estimateMessage, analysis })
     if (stage === 'request.assemble') {
       const visited = new Set(events.map(event => JSON.stringify([event.sourceId, event.ruleId])))
       const cascading = new Set(docs.flatMap(document => document.entries.filter(entry => entry.cascade).map(entry => JSON.stringify([`context-care:document:${document.id}`, `entry:${entry.id}`]))))
@@ -315,14 +327,13 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
         }
         const next = planRequestV2({ request: planned.request, blocks: nextBlocks, rules, events: found, templates: localTemplates, snapshot, decision: decide,
           maxInjectedChars: maxInjectedChars - planned.injectedChars, maxInjectedTokens: maxInjectedTokens - planned.injectionBudget.tokens,
-          maxCacheChangedBytes, impactBaseline: request, maxRequestBytes, estimateMessage })
-        planned.request = next.request; planned.diff.after = next.diff.after; planned.injectedChars += next.injectedChars
+          maxCacheChangedBytes, impactBaseline: request, maxRequestBytes, estimateMessage, analysis })
+        planned.request = next.request; planned.diff.after = next.diff.after; planned.impact = next.impact; planned.injectedChars += next.injectedChars
         planned.injectionBudget.tokens += next.injectionBudget.tokens
         planned.records.push(...next.records.map(record => ({ ...record, cascadePass: pass })))
         planned.applied.push(...next.applied); planned.scheduled.push(...next.scheduled)
       }
     }
-    planned.impact = requestImpact(request, planned.request)
     if (maxCacheChangedBytes !== undefined && planned.impact.changedSuffixBytes > maxCacheChangedBytes) throw new Error('request-cache-change-budget-exceeded')
     if (captured !== token(agent)) throw new Error('workbench-changed-during-planning')
     const transitions = entryTransitions.filter(item => policies[item.key].inactive
@@ -431,13 +442,12 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
       const rules = definitions(agent).filter(rule => rule.on.includes('display.render'))
       const enabled = rules.map(rule => ({ ...rule, actions: rule.actions.filter(action => action.stage === 'display.render' && controls.enabled(id, rule.sourceId, rule.id, action.id)) })).filter(rule => rule.actions.length)
       if (!enabled.length) return { seq, changed: false, before: [], after: [], records: [] }
-      let turnId = `${id}:seed`; const original = []
-      history.withLive(agent.session, log => {
-        for (const prior of log.select(['turn/start', 'assistant/message', 'user/message', 'system/message', 'tool/result'], 0, seq + 1)) {
-          if (prior.type === 'turn/start') turnId = `${id}:turn:${prior.data.turn ?? prior.seq}`
-          else original.push(...extractRawBlocks(prior, { sessionId: id, turnId }))
-        }
-      })
+      const turn = history.withLive(agent.session, log => log.last('turn/start', seq + 1))
+      const turnId = turn ? `${id}:turn:${turn.data.turn ?? turn.seq}` : `${id}:seed`
+      const projected = history.projectHistory(agent.session, displayHistoryKey,
+        ['assistant/message', 'user/message', 'system/message', 'tool/result'],
+        ({ event, turnId }) => extractRawBlocks(event, { sessionId: id, turnId }), seq + 1)
+      const original = windowFor(agent.session, 'display')(projected, enabled)
       const display = original.map(block => ({ ...block, view: 'display' }))
       const snapshot = { session: { id, turnId }, vars: variableSnapshot({ ...record(agent), documents: docs }, turnId), currentSeq: seq }
       let events
@@ -581,20 +591,24 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
       const id = String(agent.session.id)
       if (observations.has(id)) return observations.get(id)
       const operation = (async () => {
-        const lastSeq = Math.max(record(agent).runtime.state['$observed']?.seq ?? -1, admittedSessions.get(id) ?? -1)
-        const rules = definitions(agent)
-        const displayRules = rules.filter(rule => rule.on.includes('display.render') && rule.actions.some(action => controls.enabled(id, rule.sourceId, rule.id, action.id)))
-        const relevant = rules.some(rule => ['output.complete', 'tool.result'].some(stage => rule.on.includes(stage)))
+        const state = record(agent), rules = definitions(agent)
+        const active = rules.filter(rule => rule.actions.some(action => controls.enabled(id, rule.sourceId, rule.id, action.id)))
+        const displayRules = active.filter(rule => rule.on.includes('display.render'))
+        const outputRules = active.filter(rule => ['output.complete', 'tool.result'].some(stage => rule.on.includes(stage)))
+        const relevant = outputRules.length > 0
         if (!displayRules.length && !relevant) return
-        const displaySeq = Math.max(record(agent).runtime.state['$displayObserved']?.seq ?? -1, admittedSessions.get(id) ?? -1)
-        const events = []
+        const admissions = ruleAdmissions(agent, active, undefined, state)
+        const firstAdmission = selected => Math.min(...selected.map(rule => admissions.get(rule)))
+        // Historical detail rendering remains explicit. Automatic processing starts
+        // after at least one active rule's real admission, not at Session creation.
+        const lastSeq = Math.max(state.runtime.state['$observed']?.seq ?? -1, admittedSessions.get(id) ?? -1, firstAdmission(outputRules))
+        const displaySeq = Math.max(state.runtime.state['$displayObserved']?.seq ?? -1, admittedSessions.get(id) ?? -1, firstAdmission(displayRules))
         const through = agent.session.seq
         const start = Math.min(displayRules.length ? displaySeq + 1 : through, relevant ? lastSeq + 1 : through)
-        for (let cursor = start; cursor < through; cursor++) {
-          const event = agent.session.eventAt(cursor)
-          if (!event) throw new Error(`workbench-history-event-missing:${cursor}`)
-          events.push(event)
-        }
+        // Reuse the Host-owned index: do not walk unrelated native events here.
+        const events = history.withLive(agent.session, log => log.select(
+          displayRules.length ? ['assistant/message', 'user/message', 'system/message', 'tool/result']
+            : ['assistant/message', 'tool/result'], start, through))
         if (displayRules.length) {
           for (const event of events.filter(event => event.seq > displaySeq && ['assistant/message', 'user/message', 'system/message', 'tool/result'].includes(event.type))) {
             let assessment = 'completed'
@@ -615,10 +629,15 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
         const fresh = events.filter(event => event.seq > lastSeq && (event.type === 'assistant/message' && !event.data.interrupted || event.type === 'tool/result'))
         if (!fresh.length) return
         const all = originalSessionBlocks(agent.session)
+        const request = { messages: history.messages(agent.session), purpose: 'preview', signal }
+        const analysis = createRequestPlanCache(requestImpact)
+        const indexed = { length: all.length, at: index => all[index], slice: (from, end) => all.slice(from, end) }
+        const generation = agent.session.surface.replaceGeneration
         for (const event of fresh) {
-          // Later committed messages cannot influence this output's depth window or captures.
-          const selected = all.filter(block => block.seq <= event.seq)
-          const planned = await plan(agent, { messages: agent.session.deriveMessages(), purpose: 'preview', signal }, event.type === 'tool/result' ? 'tool.result' : 'output.complete', selected, event.seq)
+          // Query the declared history window, not a new full-prefix copy per output.
+          const stage = event.type === 'tool/result' ? 'tool.result' : 'output.complete'
+          const selected = windowFor(agent.session, 'output')(indexed, rules.filter(rule => rule.on.includes(stage)), event.seq, generation)
+          const planned = await plan(agent, request, stage, selected, event.seq, analysis)
           await jobs.enqueue(id, planned.scheduled, planned.token)
           await store.runtime(id, runtime => {
             // This is an attempted watermark. A failed assessment is explicitly retained as failed.

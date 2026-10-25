@@ -48,9 +48,13 @@ export function planRequestV2(input) {
 }
 
 function planRequest({ request, blocks, rules, events, templates, snapshot, decision, maxInjectedChars = 65536, maxRequestBytes = 8388608,
-  maxInjectedTokens, impactBaseline = request, estimateMessage }) {
-  const next = ownedRequest(request)
+  maxInjectedTokens, impactBaseline = request, estimateMessage, analysis }) {
+  let next = request
+  // Notifications and scheduled jobs do not mutate request payloads. Copy only
+  // at the first actual patch, preserving native signal and prepared-call handles.
+  const writable = () => { if (next === request) next = ownedRequest(request); return next }
   const writableBlocks = blocks.filter(block => block.view === 'model')
+  const writableById = new Map(writableBlocks.map(block => [block.id, block]))
   const patches = []; const filters = new Set(); const insertions = []; const records = []; const applied = []; const scheduled = []
   const injectedEntries = new Set(); const argumentPatches = new Map()
   const byRule = new Map(rules.map(rule => [JSON.stringify([rule.sourceId, rule.id]), rule]))
@@ -84,7 +88,7 @@ function planRequest({ request, blocks, rules, events, templates, snapshot, deci
       const text = action.template === undefined || deferred ? undefined
         : Object.hasOwn(snapshot.materializations ?? {}, key) ? snapshot.materializations[key] : templates.render(action.template, context)
       if (text !== undefined && text.length > (action.maxChars ?? maxInjectedChars)) throw new Error('action-output-budget-exceeded')
-      const block = writableBlocks.find(value => value.id === event.blockId)
+      const block = writableById.get(event.blockId)
       if (action.kind === 'replace' && event.block.text !== undefined && block?.text !== event.block.text) throw new Error('replacement-projection-range-unavailable')
       if (action.kind === 'replace') {
         if (!block) throw new Error('replacement-cross-block-requires-explicit-patches')
@@ -98,7 +102,7 @@ function planRequest({ request, blocks, rules, events, templates, snapshot, deci
           const currentArgs = changes.at(-1)?.value ?? block.arguments
           const value = patchArguments(currentArgs, action.patch.path, bindInputs(action.patch.value, context))
           changes.push({ path: action.patch.path, value }); argumentPatches.set(block.id, changes)
-          setRequestBlock(next, block, { ...block.raw, arguments: JSON.stringify(value) })
+          setRequestBlock(writable(), block, { ...block.raw, arguments: JSON.stringify(value) })
           record.before = JSON.stringify(currentArgs); record.after = JSON.stringify(value)
         } else {
           if ((event.field ?? 'block.text') !== 'block.text') throw new Error('replacement-evidence-is-not-block-text')
@@ -159,14 +163,15 @@ function planRequest({ request, blocks, rules, events, templates, snapshot, deci
     }
   }
   const patched = applyBlockPatchesV2(writableBlocks, patches)
-  for (const block of patched.blocks) if (block !== writableBlocks.find(value => value.id === block.id) && !filters.has(block.id)) setRequestBlock(next, block, block.raw)
+  for (const block of patched.blocks) if (block !== writableById.get(block.id) && !filters.has(block.id)) setRequestBlock(writable(), block, block.raw)
   // Deletions run deepest and rightmost first so they never shift an outstanding path.
   for (const block of writableBlocks.filter(block => filters.has(block.id)).sort((a, b) => b.messageIndex - a.messageIndex || b.path.localeCompare(a.path, undefined, { numeric: true }))) {
-    if (block.path === '$result') { next.messages[block.messageIndex].content = []; continue }
+    if (block.path === '$result') { writable().messages[block.messageIndex].content = []; continue }
     if (blocks.some(parent => filters.has(parent.id) && parent.path !== '$result' && block.path.startsWith(parent.path + '.') && parent.messageIndex === block.messageIndex)) continue
-    if (next.messages[block.messageIndex]?.content.length || block.messageIndex === -1) setRequestBlock(next, block, undefined)
+    if (next.messages[block.messageIndex]?.content.length || block.messageIndex === -1) setRequestBlock(writable(), block, undefined)
   }
   for (const insertion of [...insertions].sort((a, b) => b.at - a.at || a.priority - b.priority || b.key.localeCompare(a.key))) {
+    writable()
     if (insertion.role === 'system') {
       next.system = insertion.at === 0 ? insertion.text + '\n' + (next.system ?? '') : (next.system ?? '') + '\n' + insertion.text
     } else {
@@ -177,10 +182,12 @@ function planRequest({ request, blocks, rules, events, templates, snapshot, deci
         source: { kind: 'plugin:dsh-context-care:workbench', contextCareWorkbench: { sourceId: insertion.event.sourceId, ruleId: insertion.event.ruleId, actionId: insertion.action.id } } })
     }
   }
-  next.messages = next.messages.filter(message => message.content.length > 0)
-  const beforePairs = pairedIds(request); const afterPairs = pairedIds(next)
-  for (const id of beforePairs.calls) if (beforePairs.results.has(id) && afterPairs.calls.has(id) !== afterPairs.results.has(id)) throw new Error('tool-call-result-pair-broken')
-  const impact = requestImpact(impactBaseline, next)
+  if (next !== request || (analysis ? analysis.read(request).hasEmptyMessages : request.messages.some(message => !message.content.length))) {
+    writable().messages = next.messages.filter(message => message.content.length > 0)
+    const beforePairs = pairedIds(request); const afterPairs = pairedIds(next)
+    for (const id of beforePairs.calls) if (beforePairs.results.has(id) && afterPairs.calls.has(id) !== afterPairs.results.has(id)) throw new Error('tool-call-result-pair-broken')
+  }
+  const impact = analysis ? analysis.impact(impactBaseline, next) : requestImpact(impactBaseline, next)
   if (impact.afterBytes > maxRequestBytes) throw new Error('request-byte-budget-exceeded')
   return { request: next, records: [...records, ...patched.results], applied, scheduled, injectedChars,
     injectionBudget: { kind: injectedTokens === null ? 'unknown' : 'estimate', tokens: injectedTokens, limit: maxInjectedTokens ?? null }, impact,

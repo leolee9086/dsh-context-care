@@ -32,6 +32,7 @@ import { registerDenialLifetimeHostCases } from './reminder-denial-lifetime-host
 import { registerSiyuanWindowHostCases } from './reminder-siyuan-window-host-cases.ts'
 import { registerHistoryPerformanceCases } from './reminder-history-performance-host-cases.ts'
 import { registerSessionLogCases } from './session-log-host-cases.ts'
+import { registerWorkbenchPerformanceCases } from './workbench-performance-host-cases.ts'
 import { preV4State } from './fixtures/reminder-upgrade.ts'
 import { registerScopeHostCases } from './reminder-scope-host-cases.ts'
 import { registerDeliveryReplayCases } from './reminder-delivery-replay-cases.ts'
@@ -626,6 +627,36 @@ registerSessionLogCases({ async open(t) {
   await ctx.loader.await()
   for (const entry of ctx.loader.entries()) if (entry.options.name === '@deepseek-ai/dsh-session-persistence-jsonl') await entry.fiber.await()
   return ctx
+} })
+
+registerWorkbenchPerformanceCases({ async open(t) {
+  const owned = await fixture(t, false), ctx = await owned.open(), service = ctx.contextCareWorkbench
+  const agent = await ctx.agentLoop.create('workbench-performance', { provider: 'care-test', model: 'care-test' })
+  const displayCalls = t.mock.method(service, 'display')
+  const { base, cookie } = await controlCookie(ctx)
+  ctx.llm.registerAdapter(['care-test'], new CompletionAdapter([{ blocks: [{ type: 'text', text: 'Independent workbench probe completed.' }] }]))
+  return { session: agent.session,
+    configure: () => service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: {
+      schemaVersion: 2, id: 'workbench-performance', revision: 1, title: 'Performance', rules: [
+        { schemaVersion: 2, id: 'display', revision: 1, on: ['display.render'],
+          select: { view: 'display', roles: ['assistant'], blockTypes: ['text'], depth: { unit: 'message', limit: 2 } },
+          match: { kind: 'regex', pattern: '^HIST' }, actions: [{ id: 'patch', kind: 'replace', template: 'VIEW', stage: 'display.render', enabledDefault: true }] },
+        { schemaVersion: 2, id: 'output', revision: 1, on: ['output.complete'],
+          select: { view: 'original', roles: ['assistant'], blockTypes: ['text'], depth: { unit: 'message', limit: 2 } },
+          match: { kind: 'regex', pattern: '^CURRENT_END' }, actions: [{ id: 'notice', kind: 'notify', template: 'Matched current output', stage: 'output.complete', enabledDefault: true }] },
+      ] } }).then(() => undefined),
+    display: seq => service.display(agent, seq), reconcile: () => service.reconcile(agent),
+    http: async () => {
+      const response = await fetch(base + '/context-care/rules?sessionId=' + encodeURIComponent(agent.id), { headers: { cookie } })
+      assert.equal(response.status, 200); await response.json()
+    },
+    probe: async () => {
+      const other = await ctx.agentLoop.create('workbench-other-agent', { provider: 'care-test', model: 'care-test' })
+      await completionTurn(ctx, other, 'Answer independently of the workbench query.')
+      assert.ok(other.session.deriveMessages().some(message => message.role === 'assistant'
+        && message.content.some(block => block.type === 'text' && block.text === 'Independent workbench probe completed.')))
+    }, runs: () => service.store.read(agent.id).runtime.runs.length, displayCalls: () => displayCalls.mock.callCount(),
+  }
 } })
 
 registerHistoryPerformanceCases({ async open(t) {

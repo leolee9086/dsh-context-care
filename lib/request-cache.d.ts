@@ -33,6 +33,8 @@ export declare function createRequestCache({ sessions, measureInput, now, change
     put(key: string, sessionId: string, kind: CacheRecord["kind"], input: Record<string, unknown>): Promise<void>;
     /** The durability checkpoint belongs to Session, not to a second writer. */
     flush(sessionId?: string): Promise<void>;
+    /** A stable read-only cut for diagnostic projections; list() still returns its own array. */
+    view(sessionId: string): readonly CacheRecord[];
     /** Read actual settlements plus bounded live diagnostics for loaded sessions. */
     list(sessionId?: string): CacheRecord[];
     /** Read a previous dispatched route without trusting a persisted context-care table. */

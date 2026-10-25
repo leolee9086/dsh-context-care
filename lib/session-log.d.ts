@@ -1,6 +1,20 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { Session, SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session';
 type Kind = SessionEvent['type'];
+type Message = ReturnType<Session['deriveMessages']>[number];
+export interface SurfaceEntry {
+    event: SessionEvent;
+    turnId: string;
+}
+export interface MessageOrigin extends SurfaceEntry {
+    message: Message;
+}
+/** A fixed cut over append-only derived values, without copying its prefix. */
+export interface IndexedProjection<T> {
+    readonly length: number;
+    at(index: number): T | undefined;
+    slice(from?: number, to?: number): readonly T[];
+}
 /** One immutable log cut. Range readers never materialize the complete event array. */
 export interface SessionLogRead extends Disposable {
     readonly header: SessionHeader;
@@ -20,6 +34,19 @@ export interface SessionLogRead extends Disposable {
 export interface SessionLog {
     read(id: SessionId, signal?: AbortSignal): Promise<SessionLogRead>;
     live(session: Session): SessionLogRead;
+    /**
+     * Borrow cached readonly values. Each key owns one projection and result type.
+     * Raw values follow event order; projected values follow native surface order
+     * and invalidate on contentGeneration. Consumers must not mutate returned data.
+     */
+    projectSurface<T>(session: Session, key: object, project: (entry: SurfaceEntry) => readonly T[], projected?: boolean): readonly T[];
+    /** Project selected immutable events once; older cuts reuse the indexed prefix. */
+    projectHistory<T>(session: Session, key: object, types: readonly Kind[], project: (entry: SurfaceEntry) => readonly T[], beforeSeq?: number): IndexedProjection<T>;
+    messages(session: Session): readonly Message[];
+    origins(session: Session): {
+        byId: ReadonlyMap<string, MessageOrigin>;
+        system?: MessageOrigin;
+    };
     withLive<T>(session: Session, reader: (log: SessionLogRead) => T): T;
     listSessions(signal?: AbortSignal): Promise<readonly {
         header: SessionHeader;
