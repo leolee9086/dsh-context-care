@@ -1,5 +1,19 @@
 # 诊断查询与数据推送验收
 
+## v0.14.6：请求规划的工具组与删除祖先索引（2026-10-26）
+
+第35轮从request-blocks到实际workbench plan发现：每个工具过滤action都blocks.filter完整块列表，多个子块命中同call还会重复校验/添加整组；每个删除块blocks.some重扫全表寻找已删祖先。现TypeScript纯索引按输入顺序保留模型块、ID和跨view工具组；既有createRequestPlanCache将不可变数组索引纳入Host统一SessionCache，在同操作及预算重规划复用，finally close同时释放分析和块索引。相同call只校验/加入一次，仍保留每个命中的动作记录；删除祖先以同messageIndex和完整路径组件查询，排除$result包装，不改变深层/从右到左顺序。
+
+实际变更请求仍独立可写，clone/byte比较/匹配/初始模型块投影仍有成本。曾尝试只复制受改消息但读到既有独立可写结果测试后立即撤回，未把共享可写消息作为优化；请求规划取消、工具配对、签名/opaque拒绝、注入/缓存预算和完整diff语义保留。没有另建模块全局缓存/业务账本或改Harness。
+
+定向strict/104JS和13项规划/预算单元通过。4000块读一次后20次复用不再读callId，close无索引残留；500同调用子块的生产过滤读取有线性计数上限，配对/嵌套/signed拒绝及独立副本均过。真实Host的长工具过滤使用完整workbench.preview和真实Session，500事件、1000请求消息、500命中子块，删除250完整工具组而保留250组；再预览结果相同、零新增native reads、snapshotEvents和deriveMessages均0、所有规划缓存已释放。外部服务/原生Session不mock。
+
+定向Host：工具过滤895.72ms，鉴权HTTP96.42ms/另一Agent105.49ms；含两次预览的CPU1765/93ms、event-loop max536.35ms，nativeReads500。长工作台2012事件display351.58/4.14ms、reconcile593.92/2.94ms，HTTP31.98ms/另一Agent40.38ms、reconcile HTTP4.04ms，CPU1000/250ms、loop41.09ms。2项实质用例通过（命名筛选额外5个空suite wrapper不计实质数）。桌面0.2.1-rc.3 ASAR隔离20/20实质/0skip、stderr空、exit0，含新工具过滤/工作台/共享原生读取/诊断/提醒/改写；工具过滤753.73ms、HTTP73.28ms/另一Agent81.74ms、CPU1250/187ms、loop388.50ms。完整发布首次单元detectors优先级用例报matcher-work-timeout（exit1），不计通过；原阈值独立detectors13/13已过，但不能凭同时桌面运行就断言失败根因。未改任何超时/取消/断言，随后完整release:check通过：strict/104JS/62事件目录、单元499/499（18269.96ms）及Host/Client构建；完整源码Host214/214（241260.73ms）、Client3文件24/24（4.30s）退出0，全部为最后代码；新独立消费者普通离线安装通过，公开入口/Client factory/嵌套改写/原始块/真实Worker和已安装块索引跨view配对/不变复用/close无残留通过，src/lib共213个JS及d.ts逐字一致。最终文档包另用唯一final2路径与全新消费者复核，哈希与commit/tag/远端结果写持久记录，避免同路径pnpm缓存冒充新包。
+
+最终完整Host214/214同次性能：工具过滤862.06ms、HTTP46.50ms/另一Agent55.30ms、两次预览CPU1453/94ms、loop526.12ms；2012事件工作台display418.02/2.99ms、reconcile539.09/2.86ms、HTTP51.12ms/另一Agent60.39ms、reconcile HTTP3.23ms、CPU1078/203ms、loop40.04ms；7001诊断cold140.35/warm2.47/追加2.36ms、20阶段82.24ms、阶段HTTP24.97ms/另一Agent38.50ms、CPU485/16ms、loop149.68ms；4002提醒collect4.94/0.20ms、historyReads0、HTTP25.83ms/另一Agent35.89ms、CPU47/0ms、loop23.97ms。同次改写无索引20新增101.11ms/HTTP98.10ms/另一Agent108.72ms、CPU219/0ms、loop74.32ms，wire1020；fresh外部索引185.23ms/HTTP183.74ms/另一Agent195.13ms、CPU297/0ms、loop103.74ms，wire1540；当前工具命中34.21ms/HTTP3.43ms/CPU94/0ms/loop11.23ms。所有stream仍21帧、每delta1条、阶段零新增原生日志读取。这些是生成原生事件的隔离观测；工具规划仍有约半秒的最大事件循环延迟，不能仅以低于宽回归上限称作完全解决。
+
+本轮只对定位到的两处嵌套扫描交付，不宣称初始模型块构造、实际请求变更或所有未知路径已清完；同GUI实际加载/CPU/loop/鉴权HTTP/其它Agent与14规则仍需哥哥安装后现场验收，不能用生成原生事件或401替代。
+
 ## v0.14.5：wire缓存归属与外部修订复用（2026-10-26）
 
 第34轮核查实际旧服务dsh-better-session-query的lib/index.js:769-784和lib/store.js:484-516：属性put/list/remove没有revision或变更通知；块索引generation不是属性修订；list默认返回最新500条。因此不能安全以Session版本或块generation跳过属性读取，不修改提供者、不假定外部不再更新或撤销。

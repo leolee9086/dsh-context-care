@@ -4,6 +4,7 @@ import { normalizeRuleV2, detectRulesV2 } from '@leolee9086/dsh-rule-engine'
 import { planRequestV2 } from '../src/request-plan.js'
 import { requestImpact } from '../src/request-impact.js'
 import { createTemplates } from '../src/templates.js'
+import { modelRequestBlocks } from '../src/request-blocks.js'
 
 const request = { provider: 'test', model: 'test', system: '固定说明', temperature: 0,
   tools: [{ name: 'inspect', description: '检查', parameters: { type: 'object', properties: { path: { type: 'string' } } } }],
@@ -19,6 +20,51 @@ function plan(rules, options = {}) {
   const events = detectRulesV2({ rules, blocks, stage: 'request.assemble' })
   return planRequestV2({ request, blocks, rules, events, templates: createTemplates(), snapshot: {}, decision: () => ({ enabled: true }), estimateMessage: price, ...options })
 }
+
+test('tool filters remove one complete paired group including nested results and keep owned requests isolated', () => {
+  const request = { messages: [{ id: 'assistant', role: 'assistant', content: [
+    { type: 'text', text: 'Keep answer' }, { type: 'tool-call', id: 'one', name: 'inspect', arguments: '{}' },
+    { type: 'tool-call', id: 'two', name: 'inspect', arguments: '{}' },
+  ] }, { id: 'result-one', role: 'tool', toolCallId: 'one', content: [
+    { type: 'text', text: 'Remove first' }, { type: 'tool-result', callId: 'one', content: [{ type: 'text', text: 'Remove nested' }] },
+  ] }, { id: 'result-two', role: 'tool', toolCallId: 'two', content: [{ type: 'text', text: 'Keep second' }] }] }
+  const before = structuredClone(request)
+  const blocks = modelRequestBlocks('one-session', request, 'request', { byId: new Map() }, 'turn')
+  const rule = normalizeRuleV2({ schemaVersion: 2, sourceId: 'producer', id: 'filter', revision: 1, title: 'Filter',
+    on: ['request.assemble'], select: { view: 'model', roles: ['tool'], blockTypes: ['text'] },
+    match: { kind: 'regex', pattern: '^Remove' }, actions: [{ id: 'remove', kind: 'filter', stage: 'request.assemble', enabledDefault: true }] })
+  const events = detectRulesV2({ rules: [rule], blocks, stage: 'request.assemble' })
+  const plan = () => planRequestV2({ request, blocks, rules: [rule], events, templates: createTemplates(), snapshot: {}, decision: () => ({ enabled: true }) })
+  const planned = plan()
+  assert.equal(planned.applied.length, 2)
+  assert.deepEqual(planned.request.messages.map(message => message.id), ['assistant', 'result-two'])
+  assert.deepEqual(planned.request.messages[0].content.map(block => block.type === 'tool-call' ? block.id : block.text), ['Keep answer', 'two'])
+  assert.deepEqual(request, before)
+  planned.request.messages[1].content[0].text = 'Owned change'
+  assert.equal(request.messages[2].content[0].text, 'Keep second')
+  blocks.find(block => block.callId === 'one' && block.type === 'tool-call').signed = true
+  assert.throws(plan, /filter-opaque-provider-state-denied/)
+})
+
+test('many matching tool children group once instead of scanning all blocks per filter action', () => {
+  const request = { messages: [{ id: 'call-message', role: 'assistant', content: [{ type: 'tool-call', id: 'one', name: 'inspect', arguments: '{}' }] },
+    { id: 'result-message', role: 'tool', toolCallId: 'one', content: Array.from({ length: 500 }, (_, index) => ({ type: 'text', text: `Remove ${index}` })) }] }
+  const blocks = modelRequestBlocks('many-children', request, 'request', { byId: new Map() }, 'turn')
+  const rule = normalizeRuleV2({ schemaVersion: 2, sourceId: 'producer', id: 'filter-many', revision: 1, title: 'Filter',
+    on: ['request.assemble'], select: { view: 'model', roles: ['tool'], blockTypes: ['text'] }, match: { kind: 'regex', pattern: '^Remove' },
+    actions: [{ id: 'remove', kind: 'filter', stage: 'request.assemble', enabledDefault: true }] })
+  const events = detectRulesV2({ rules: [rule], blocks, stage: 'request.assemble' })
+  let callReads = 0
+  for (const block of blocks) {
+    const callId = block.callId
+    Object.defineProperty(block, 'callId', { get() { callReads++; return callId } })
+  }
+  const planned = planRequestV2({ request, blocks, rules: [rule], events, templates: createTemplates(), snapshot: {}, decision: () => ({ enabled: true }) })
+  assert.equal(events.length, 500); assert.equal(planned.applied.length, 500)
+  assert.deepEqual(planned.request.messages, [])
+  assert.ok(callReads <= blocks.length + events.length * 4, `call id reads ${callReads} must be linear, not one full block scan per action`)
+  assert.equal(request.messages[1].content.length, 500)
+})
 
 test('token budget keeps higher priority whole injections and excludes skipped parents and dependent jobs', () => {
   const low = rule('low', 0, [injection('inject', 'LOW'), { id: 'notice', kind: 'notify', stage: 'request.assemble', template: 'NEVER', enabledDefault: true, dependsOn: ['inject'] }])

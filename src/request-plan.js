@@ -2,6 +2,7 @@ import { applyBlockPatchesV2, bindInputs } from '@leolee9086/dsh-rule-engine'
 import { createHash } from 'node:crypto'
 import { setRequestBlock } from './request-blocks.js'
 import { estimateInjection, requestImpact } from './request-impact.js'
+import { indexRequestBlocks, filteredAncestor } from '../lib/request-block-index.js'
 
 function ownedRequest(request) {
   // Cancellation and prepared-call handles stay native. Clone only the JSON request payload.
@@ -53,9 +54,9 @@ function planRequest({ request, blocks, rules, events, templates, snapshot, deci
   // Notifications and scheduled jobs do not mutate request payloads. Copy only
   // at the first actual patch, preserving native signal and prepared-call handles.
   const writable = () => { if (next === request) next = ownedRequest(request); return next }
-  const writableBlocks = blocks.filter(block => block.view === 'model')
-  const writableById = new Map(writableBlocks.map(block => [block.id, block]))
-  const patches = []; const filters = new Set(); const insertions = []; const records = []; const applied = []; const scheduled = []
+  const indexed = analysis ? analysis.blockIndex(blocks) : indexRequestBlocks(blocks)
+  const writableBlocks = indexed.model, writableById = indexed.byId
+  const patches = []; const filters = new Set(); const filteredCalls = new Set(); const insertions = []; const records = []; const applied = []; const scheduled = []
   const injectedEntries = new Set(); const argumentPatches = new Map()
   const byRule = new Map(rules.map(rule => [JSON.stringify([rule.sourceId, rule.id]), rule]))
   const stateKey = (event, action) => JSON.stringify([event.sourceId, event.ruleId, event.ruleRevision, action.id])
@@ -117,9 +118,12 @@ function planRequest({ request, blocks, rules, events, templates, snapshot, deci
         if (!block) throw new Error('filter-cross-block-requires-explicit-targets')
         if (block.signed || block.source?.replayState !== undefined) throw new Error('filter-opaque-provider-state-denied')
         if (block.callId) {
-          const group = blocks.filter(value => value.callId === block.callId)
-          if (group.some(candidate => candidate.signed || candidate.source?.replayState !== undefined)) throw new Error('filter-opaque-provider-state-denied')
-          for (const candidate of group) filters.add(candidate.id)
+          if (!filteredCalls.has(block.callId)) {
+            const group = indexed.byCall.get(block.callId)
+            if (group.some(candidate => candidate.signed || candidate.source?.replayState !== undefined)) throw new Error('filter-opaque-provider-state-denied')
+            for (const candidate of group) filters.add(candidate.id)
+            filteredCalls.add(block.callId)
+          }
           record.reason = 'tool-call-result-group'
         } else filters.add(block.id)
       } else if (['inject', 'guidance'].includes(action.kind) && event.stage === 'request.assemble') {
@@ -164,10 +168,15 @@ function planRequest({ request, blocks, rules, events, templates, snapshot, deci
   }
   const patched = applyBlockPatchesV2(writableBlocks, patches)
   for (const block of patched.blocks) if (block !== writableById.get(block.id) && !filters.has(block.id)) setRequestBlock(writable(), block, block.raw)
+  // Match parent paths only in the same message, excluding synthetic result wrappers.
+  const removedPaths = new Set()
+  if (filters.size) for (const block of blocks) if (filters.has(block.id) && block.path !== '$result') {
+    removedPaths.add(JSON.stringify([block.messageIndex, block.path]))
+  }
   // Deletions run deepest and rightmost first so they never shift an outstanding path.
   for (const block of writableBlocks.filter(block => filters.has(block.id)).sort((a, b) => b.messageIndex - a.messageIndex || b.path.localeCompare(a.path, undefined, { numeric: true }))) {
     if (block.path === '$result') { writable().messages[block.messageIndex].content = []; continue }
-    if (blocks.some(parent => filters.has(parent.id) && parent.path !== '$result' && block.path.startsWith(parent.path + '.') && parent.messageIndex === block.messageIndex)) continue
+    if (filteredAncestor(block, removedPaths)) continue
     if (next.messages[block.messageIndex]?.content.length || block.messageIndex === -1) setRequestBlock(writable(), block, undefined)
   }
   for (const insertion of [...insertions].sort((a, b) => b.at - a.at || a.priority - b.priority || b.key.localeCompare(a.key))) {

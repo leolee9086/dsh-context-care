@@ -3,15 +3,51 @@ import assert from 'node:assert/strict'
 import { performance, monitorEventLoopDelay } from 'node:perf_hooks'
 import { setImmediate as yieldToHost } from 'node:timers/promises'
 import type { Session } from '@deepseek-ai/dsh-session'
-import { createMessage } from '@deepseek-ai/dsh-llm'
+import { createMessage, createToolResultMessage, ToolCallId, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 
 interface Harness {
-  open(t: test.TestContext): Promise<{ session: Session; configure(): Promise<void>; display(seq: number): Promise<unknown>;
+  open(t: test.TestContext): Promise<{ session: Session; configure(filters?: boolean): Promise<void>; display(seq: number): Promise<unknown>;
+    preview(request: GenerateOptions): Promise<{ request: GenerateOptions; applied: unknown[] }>; cacheNames(): string[];
     reconcile(): Promise<void>; http(): Promise<void>; probe(): Promise<void>; runs(): number; displayCalls(): number }>
 }
 
 /** Run in the real Loader composition; spy methods delegate to native Session. */
 export function registerWorkbenchPerformanceCases(harness: Harness): void {
+  test('long paired tool filtering uses native workbench planning without retaining lookup caches', { timeout: 120000 }, async t => {
+    const fixture = await harness.open(t), { session } = fixture
+    const request: GenerateOptions = { provider: 'care-test', model: 'care-test', messages: [] }
+    for (let index = 0; index < 500; index++) {
+      const callId = ToolCallId(`plan-call-${index}`), text = `${index % 2 ? 'KEEP' : 'REMOVE'} ${index} ` + 'x'.repeat(512)
+      session.append('assistant/message', { turn: 1, step: 1, stream: [], usage: { inputTokens: 1, outputTokens: 1 },
+        message: createMessage({ role: 'assistant', source: { kind: 'model', provider: 'care-test', model: 'care-test' },
+          content: [{ type: 'text', text: `HIST ${index}` }] }) }, { surfaceOp: 'append' })
+      request.messages.push(createMessage({ role: 'assistant', source: { kind: 'model', provider: 'care-test', model: 'care-test' },
+        content: [{ type: 'tool-call', id: callId, name: 'inspect', arguments: '{}' }] }),
+      createToolResultMessage({ callId, isError: false, content: [{ type: 'text', text }, { type: 'text', text }] }))
+    }
+    await fixture.configure(true)
+    const before = structuredClone(request), reads = t.mock.method(session, 'eventAt')
+    const snapshots = t.mock.method(session, 'snapshotEvents'), fullMessages = t.mock.method(session, 'deriveMessages')
+    const loop = monitorEventLoopDelay({ resolution: 10 }); loop.enable(); t.after(() => loop.disable())
+    const cpuStart = process.cpuUsage(); await yieldToHost()
+    const timed = async (run: () => Promise<unknown>) => { const start = performance.now(); const value = await run(); return { ms: performance.now() - start, value } }
+    const [planned, http, other] = await Promise.all([timed(() => fixture.preview(request)), timed(fixture.http), timed(fixture.probe)])
+    const result = planned.value as Awaited<ReturnType<typeof fixture.preview>>
+    assert.equal(result.applied.length, 500, 'both matching child occurrences retain their action records')
+    assert.equal(result.request.messages.length, 500, 'only the 250 complete KEEP tool pairs remain')
+    assert.equal(result.request.messages.filter(message => message.role === 'tool').length, 250)
+    assert.ok(result.request.messages.filter(message => message.role === 'tool').every(message => message.content.every(block => block.type === 'text' && block.text.startsWith('KEEP'))))
+    assert.deepEqual(request, before, 'planned result cannot mutate the source request')
+    const beforeWarm = reads.mock.callCount(), again = await fixture.preview(request)
+    assert.deepEqual(again.request, result.request)
+    assert.equal(reads.mock.callCount(), beforeWarm, 'repeat preview borrows the existing native cut')
+    assert.equal(snapshots.mock.callCount(), 0); assert.equal(fullMessages.mock.callCount(), 0)
+    assert.ok(!fixture.cacheNames().some(name => name === 'request-plan-analysis' || name === 'request-plan-block-index'))
+    await yieldToHost(); loop.disable(); const cpu = process.cpuUsage(cpuStart)
+    t.diagnostic(`workbench-tool-filter ${JSON.stringify({ events: session.seq, messages: request.messages.length, matchedChildren: 500, planMs: planned.ms, httpMs: http.ms, otherAgentMs: other.ms, cpuUserMs: cpu.user / 1000, cpuSystemMs: cpu.system / 1000, loopMaxMs: loop.max / 1e6, nativeReads: reads.mock.callCount() })}`)
+    assert.ok(planned.ms < 5000 && http.ms < 1000 && other.ms < 1500 && loop.max / 1e6 < 1000)
+  })
+
   test('long workbench history shares reads and keeps authenticated HTTP and another Agent responsive', { timeout: 120000 }, async t => {
     const fixture = await harness.open(t), { session } = fixture
     const append = (text: string) => session.append('assistant/message', { turn: 1, step: 1, stream: [],

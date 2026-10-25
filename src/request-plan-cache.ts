@@ -1,4 +1,5 @@
 import type { SessionCache, CacheKey } from './session-cache.js'
+import { indexRequestBlocks, type RequestBlock } from './request-block-index.js'
 
 interface Payload { messages: readonly { content: readonly unknown[] }[] }
 interface Analysis<T> { hasEmptyMessages: boolean; impact: T }
@@ -17,7 +18,12 @@ export function createRequestPlanCache<R extends Payload, I>(measure: (before: R
       cache.worked(key)
       return value
     })
+  const blocksKey = cache.define<readonly RequestBlock[], ReturnType<typeof indexRequestBlocks>>('request-plan-block-index',
+    'Immutable block array within one planning operation; groups retain original block identities and order.', blocks => {
+      cache.worked(blocksKey, blocks.length)
+      return indexRequestBlocks(blocks)
+    })
   const read = (request: R): Analysis<I> => cache.use(request, key)
-  return { read, impact: (before: R, after: R): I => before === after ? read(before).impact : measure(before, after),
-    close: () => cache.clear(key) }
+  return { read, blockIndex: (blocks: readonly RequestBlock[]) => cache.use(blocks, blocksKey), impact: (before: R, after: R): I => before === after ? read(before).impact : measure(before, after),
+    close: () => { cache.clear(key); cache.clear(blocksKey) } }
 }

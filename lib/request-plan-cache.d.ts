@@ -1,4 +1,5 @@
 import type { SessionCache } from './session-cache.js';
+import { type RequestBlock } from './request-block-index.js';
 interface Payload {
     messages: readonly {
         content: readonly unknown[];
@@ -17,6 +18,11 @@ interface Analysis<T> {
  */
 export declare function createRequestPlanCache<R extends Payload, I>(measure: (before: R, after: R) => I, cache: SessionCache): {
     read: (request: R) => Analysis<I>;
+    blockIndex: (blocks: readonly RequestBlock[]) => {
+        model: RequestBlock[];
+        byId: Map<string, RequestBlock>;
+        byCall: Map<string, RequestBlock[]>;
+    };
     impact: (before: R, after: R) => I;
     close: () => void;
 };

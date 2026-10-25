@@ -715,8 +715,13 @@ registerWorkbenchPerformanceCases({ async open(t) {
   const { base, cookie } = await controlCookie(ctx)
   ctx.llm.registerAdapter(['care-test'], new CompletionAdapter([{ blocks: [{ type: 'text', text: 'Independent workbench probe completed.' }] }]))
   return { session: agent.session,
-    configure: () => service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: {
-      schemaVersion: 2, id: 'workbench-performance', revision: 1, title: 'Performance', rules: [
+    preview: request => service.preview(agent, request), cacheNames: () => ensureSessionLog(ctx).cache.report().map(row => row.name),
+    configure: filters => service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: {
+      schemaVersion: 2, id: 'workbench-performance', revision: 1, title: 'Performance', rules: filters ? [
+        { schemaVersion: 2, id: 'filter-pairs', revision: 1, on: ['request.assemble'],
+          select: { view: 'model', roles: ['tool'], blockTypes: ['text'] }, match: { kind: 'regex', pattern: '^REMOVE' },
+          actions: [{ id: 'filter', kind: 'filter', stage: 'request.assemble', enabledDefault: true }] },
+      ] : [
         { schemaVersion: 2, id: 'display', revision: 1, on: ['display.render'],
           select: { view: 'display', roles: ['assistant'], blockTypes: ['text'], depth: { unit: 'message', limit: 2 } },
           match: { kind: 'regex', pattern: '^HIST' }, actions: [{ id: 'patch', kind: 'replace', template: 'VIEW', stage: 'display.render', enabledDefault: true }] },
