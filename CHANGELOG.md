@@ -1,5 +1,15 @@
 # 更新记录
 
+## v0.14.10
+
+**2026-10-26：冷模型消息投影一次复制自有内容树。**
+
+- 第39轮沿已采样projectRequestMessage局部热点清除父raw与各层子raw重复structuredClone整棵子树。新增TS ownRequestMessageBody一次复制content/source，自有树交给原生walker，父子raw共享这份树，由统一request-model-projection冻结后发布。无第二缓存、跨preview可变身份复用；原始请求不冻结、不借用。
+- 参数仍由原生parseToolArguments独立克隆或解析，保留错误、签名/opaque/replayState、原生来源/path/callId/$result语义。真正改写的完整ownedRequest独立可写副本、按写入消息失效/旧切面、显式retry/close、token策略和Worker边界均不变。
+- 新增3单元：冷嵌套1内容树+1结构化参数共2clone，父子raw同identity且冻结、参数独立、source可写、changed后旧cut不变；独立projection不借可变message；实际DataCloneError不发布且可修正后显式retry。新增1真实Host用例32消息各8层嵌套，冷preview每消息1内容复制、32范围改写，下一preview重新own/源与旧结果不变，第三changed输入31动作，原生读取与统一缓存释放保持。
+- 定向原生Host5实质通过（另5空suite不计实质），原1000消息/500工具证据catalog3/record14/token5/native500，工具498.13ms/HTTP62.30ms/另一Agent75.26ms/loop122.29ms。后CPU单实质plan556.27ms/HTTP108.16ms/另一Agent125.61ms/loop104.33ms，projectRequestMessage约40.51ms inclusive（上轮61.72ms），modelRequestBlocks109.62ms/自有树copy31.51ms/ownedRequest14.94ms，重叠inclusive不能相加。整体未证明显著提速，不编加速比；逐层重复复制已由次数和identity证据消除，必要冷复制/冻结/包络/完整byte比较/Worker传输与无revision外部比较仍有成本。
+- 最终release:check strict/104JS/62事件目录、519/519单元（20388.07ms）和Host/Client构建通过，完整源码Host218/218（252499.21ms）、Client3文件24/24（3.96s）。同次工具482.23ms/HTTP44.90ms/另一Agent54.13ms/loop104.33ms、catalog3/record14/token5/native500。桌面ASAR24/24实质/0skip、空stderr/exit0（21609.20ms）含八层嵌套回归，工具297.51ms/loop66.68ms。独立包结果见验收记录。未改Harness/原生block工具库、Worker计时取消/输入阈值，无脚本批改/Git回滚，未代装/启用/重启，整体目标active，旧标签保留。
+
 ## v0.14.9
 
 **2026-10-26：同步规划批次内按真实依赖复用精确策略token比较。**

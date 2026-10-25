@@ -61,6 +61,61 @@ test('cached nested tools retain signatures parsed arguments and writable native
   assert.equal(first[2].source.replayState.token, 'state'); assert.equal(message.source.replayState.token, 'native writable')
 })
 
+test('cold nested model projection copies one content tree and shares only frozen owned raw descendants', t => {
+  const cache = createSessionCache(); t.after(() => cache.close())
+  const projection = createRequestModelProjection(cache, projectRequestMessage); t.after(() => projection.close())
+  const message = { role: 'tool', toolCallId: 'outer', source: { replayState: { token: 'opaque' } }, content: [
+    { type: 'tool-result', callId: 'inner', content: [
+      { type: 'text', text: 'BODY' },
+      { type: 'tool-call', id: 'structured', arguments: { input: { value: 1 } } },
+      { type: 'tool-call', id: 'json', arguments: '{"input":{"value":2}}' },
+      { type: 'reasoning', text: 'SECRET', opaque: { state: ['sealed'] } },
+    ] },
+  ] }
+  const clone = t.mock.method(globalThis, 'structuredClone')
+  const first = projection.read(message)
+  assert.equal(clone.mock.callCount(), 2, 'one owned content/source tree plus separately parsed structured arguments')
+  assert.equal(first[0].raw.content[0], first[1].raw)
+  for (let index = 2; index < first.length; index++) assert.equal(first[1].raw.content[index - 2], first[index].raw)
+  assert.notEqual(first[0].raw.content, message.content); assert.notEqual(first[2].raw, message.content[0].content[0])
+  assert.notEqual(first[3].arguments, first[3].raw.arguments, 'parsed arguments retain their existing independent ownership')
+  assert.deepEqual(first[3].arguments, { input: { value: 1 } }); assert.deepEqual(first[4].arguments, { input: { value: 2 } })
+  assert.equal(first[5].signed, true); assert.equal(first[0].source, first[5].source)
+  assert.throws(() => { first[2].raw.text = 'FORBIDDEN' }, TypeError)
+  assert.throws(() => { first[3].arguments.input.value = 3 }, TypeError)
+  assert.equal(projection.read(message), first); assert.equal(clone.mock.callCount(), 2)
+  message.content[0].content[0].text = 'SOURCE WRITE'; message.source.replayState.token = 'new'
+  assert.equal(first[2].raw.text, 'BODY'); assert.equal(first[5].source.replayState.token, 'opaque')
+  projection.changed(message)
+  const second = projection.read(message)
+  assert.equal(clone.mock.callCount(), 4); assert.equal(second[2].raw.text, 'SOURCE WRITE')
+  assert.equal(first[2].raw.text, 'BODY'); assert.notEqual(second[1].raw, first[1].raw)
+})
+
+test('independent model projections never reuse a mutable message body across planning operations', t => {
+  const cache = createSessionCache(); t.after(() => cache.close())
+  const message = { role: 'user', content: [{ type: 'text', text: 'FIRST' }] }
+  const one = createRequestModelProjection(cache, projectRequestMessage), two = createRequestModelProjection(cache, projectRequestMessage)
+  t.after(() => one.close()); t.after(() => two.close())
+  const first = one.read(message); message.content[0].text = 'NEXT'
+  const second = two.read(message)
+  assert.equal(first[0].text, 'FIRST'); assert.equal(second[0].text, 'NEXT'); assert.notEqual(first[0].raw, second[0].raw)
+})
+
+test('failed owned content cloning publishes no body and explicit retry can replace non-JSON source', t => {
+  const cache = createSessionCache(); t.after(() => cache.close())
+  const projection = createRequestModelProjection(cache, projectRequestMessage); t.after(() => projection.close())
+  const source: { bad?: () => void; replayState?: string } = { bad() {} }
+  const message = { role: 'user', source, content: [{ type: 'text', text: 'RETRY' }] }
+  assert.throws(() => projection.read(message), { name: 'DataCloneError' })
+  assert.equal(cache.report().find(row => row.name === 'request-model-projection')?.work, 0)
+  delete source.bad; source.replayState = 'fixed'
+  const blocks = projection.read(message)
+  assert.equal(blocks[0].raw.text, 'RETRY'); assert.equal(blocks[0].source.replayState, 'fixed')
+  assert.equal(projection.read(message), blocks); assert.equal(cache.report().find(row => row.name === 'request-model-projection')?.work, 1)
+  message.content[0].text = 'STILL WRITABLE'; assert.equal(blocks[0].raw.text, 'RETRY')
+})
+
 test('failed message projection is not published and retries cannot resurrect a closed cache', t => {
   const cache = createSessionCache(); t.after(() => cache.close())
   let fail = true, attempts = 0

@@ -11,5 +11,5 @@
     "sourceMap": true,
     "types": ["node"]
   },
-  "include": ["src/reminder-runtime/**/*.ts", "src/matcher/**/*.ts", "src/request-history.ts", "src/request-cache.ts", "src/session-completions.ts", "src/summary-proposal-history.ts", "src/session-output-feedback.ts", "src/care-changes.ts", "src/change-route.ts", "src/client-changes.ts", "src/workbench-window.ts", "src/request-plan-cache.ts", "src/request-block-index.ts", "src/request-model-projection.ts", "src/planning-token.ts", "src/diagnostic-pages.ts", "src/rewrite-feed.ts"]
+  "include": ["src/reminder-runtime/**/*.ts", "src/matcher/**/*.ts", "src/request-history.ts", "src/request-cache.ts", "src/session-completions.ts", "src/summary-proposal-history.ts", "src/session-output-feedback.ts", "src/care-changes.ts", "src/change-route.ts", "src/client-changes.ts", "src/workbench-window.ts", "src/request-plan-cache.ts", "src/request-block-index.ts", "src/request-model-projection.ts", "src/request-message-body.ts", "src/planning-token.ts", "src/diagnostic-pages.ts", "src/rewrite-feed.ts"]
 }

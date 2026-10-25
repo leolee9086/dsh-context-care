@@ -3237,6 +3237,43 @@ test('Workbench v2 edits request copies, renders strict entry templates, logs th
   await cold.close()
 })
 
+test('Workbench cold nested model bodies copy once per message and preserve independent writable plans', async t => {
+  const owned = await fixture(t, false), ctx = await owned.open(), service = ctx.contextCareWorkbench
+  const agent = await ctx.agentLoop.create('nested-body-ownership', { provider: 'care-test', model: 'care-test' })
+  await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'nested', revision: 1, title: 'Nested',
+    rules: [{ schemaVersion: 2, id: 'replace', revision: 1, on: ['request.assemble'],
+      select: { view: 'model', roles: ['tool'], blockTypes: ['text'] }, match: { kind: 'regex', pattern: '^NESTED' },
+      actions: [{ id: 'replace', kind: 'replace', stage: 'request.assemble', enabledDefault: true, template: 'PATCHED' }] }],
+  } })
+  const messages = []
+  for (let index = 0; index < 32; index++) {
+    let content = [{ type: 'text', text: `NESTED ${index} ` + 'x'.repeat(512) }]
+    for (let depth = 0; depth < 8; depth++) content = [{ type: 'tool-result', callId: `inner-${index}-${depth}`, content }]
+    const message = createToolResultMessage({ callId: `outer-${index}`, content, isError: false })
+    agent.session.append('tool/result', { turn: 1, step: 1, message }, { surfaceOp: 'append' }); messages.push(message)
+  }
+  const request = { provider: 'care-test', model: 'care-test', messages }, before = structuredClone(request)
+  const payloads = new Set(messages.map(message => message.content)), copies = t.mock.method(globalThis, 'structuredClone')
+  const ownedCopies = () => copies.mock.calls.filter(call => payloads.has(call.arguments[0]?.content)
+    && Object.keys(call.arguments[0]).length === 2 && Object.hasOwn(call.arguments[0], 'source')).length
+  const native = t.mock.method(agent.session, 'eventAt'), snapshots = t.mock.method(agent.session, 'snapshotEvents')
+  const readText = message => { let content = message.content; for (let depth = 0; depth < 8; depth++) content = content[0].content; return content[0] }
+  const first = await service.preview(agent, request)
+  assert.equal(first.applied.length, 32); assert.equal(ownedCopies(), 32, 'eight nested ancestors never copy the child subtree again')
+  for (let index = 0; index < messages.length; index++) assert.equal(readText(first.request.messages[index]).text, `PATCHED ${index} ` + 'x'.repeat(512))
+  assert.deepEqual(request, before); const nativeReads = native.mock.callCount()
+  readText(first.request.messages[0]).text = 'OUTPUT WRITE'
+  const second = await service.preview(agent, request)
+  assert.equal(second.applied.length, 32); assert.equal(ownedCopies(), 64, 'an independent preview owns a fresh tree, never a mutable-request identity cache')
+  assert.match(readText(second.request.messages[0]).text, /^PATCHED 0 /); assert.match(readText(messages[0]).text, /^NESTED 0 /)
+  const changed = structuredClone(request); readText(changed.messages[0]).text = 'CHANGED'
+  const third = await service.preview(agent, changed)
+  assert.equal(third.applied.length, 31); assert.equal(readText(third.request.messages[0]).text, 'CHANGED')
+  assert.equal(readText(first.request.messages[0]).text, 'OUTPUT WRITE'); assert.match(readText(second.request.messages[0]).text, /^PATCHED 0 /)
+  assert.equal(native.mock.callCount(), nativeReads); assert.equal(snapshots.mock.callCount(), 0); assert.deepEqual(request, before)
+  assert.ok(!ensureSessionLog(ctx).cache.report().some(row => row.name === 'request-model-projection' || row.name.startsWith('request-plan-')))
+})
+
 test('Workbench v2 records all-token-skipped request decisions in the real dispatch log without spending successful state', async t => {
   const owned = await fixture(t, false); const ctx = await owned.open()
   const previous = [...ctx.loader.entries()].find(entry => entry.options.name === 'dsh-context-care/requests')

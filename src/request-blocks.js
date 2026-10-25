@@ -1,4 +1,5 @@
 import { extractRawBlocks, walkContentBlocks, parseToolArguments } from '@leolee9086/dsh-session-blocks'
+import { ownRequestMessageBody } from '../lib/request-message-body.js'
 
 /** Durable turn identities come from turn/start events, including inherited events after forks. */
 export function sessionTurn(session, log) {
@@ -12,16 +13,16 @@ export function originalSessionBlocks(session, history) {
 }
 /** Copy only message-owned JSON; ids, positions and native origins are added per view. */
 export function projectRequestMessage(message) {
-  const blocks = [], source = message.source ? structuredClone(message.source) : undefined
+  const blocks = [], { content, source } = ownRequestMessageBody(message)
   const appendBlock = (raw, ref) => {
     const text = ['text', 'reasoning'].includes(ref.type) && typeof raw.text === 'string' ? raw.text : undefined
-    blocks.push({ ...ref, text, raw: structuredClone(raw),
+    blocks.push({ ...ref, text, raw,
       ...(ref.type === 'tool-call' ? parseToolArguments(raw.arguments) : {}),
       signed: ref.type === 'reasoning' && (raw.signature !== undefined || raw.opaque !== undefined || raw.encrypted !== undefined || source?.replayState !== undefined), source })
   }
-  if (message.role === 'tool') appendBlock({ type: 'tool-result', callId: message.toolCallId, content: message.content, isError: message.isError },
+  if (message.role === 'tool') appendBlock({ type: 'tool-result', callId: message.toolCallId, content, isError: message.isError },
     { path: '$result', parentPath: null, type: 'tool-result', callId: message.toolCallId })
-  walkContentBlocks(message.content, appendBlock, '', message.toolCallId)
+  walkContentBlocks(content, appendBlock, '', message.toolCallId)
   return blocks
 }
 /** Traverse request data using indexed origins; cached owned bodies never contain request ids or positions. */
