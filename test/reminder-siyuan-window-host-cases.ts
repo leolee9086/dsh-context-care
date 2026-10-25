@@ -24,20 +24,25 @@ const time = (day: number, hour: number, minute: number, second = 0, millisecond
 
 /** Validate the copied declaration against a real Loader, Session and Worker. */
 export function registerSiyuanWindowHostCases(harness: Harness): void {
-  test('historical rule snapshots restore delivery facts without current rule validation', async t => {
+  for (const clockLayout of ['event', 'flat'] as const) test(
+    `historical rule snapshots restore delivery facts without current rule validation (${clockLayout} clock)`, async t => {
     const { ctx, session } = await harness.open(t)
     const at = time(25, 11, 41), sourceId = 'historical-rules'
+    // 两种布局都由原生消息保存；恢复不能把旧版平铺时钟当成缺失。
+    const evidence = clockLayout === 'event' ? { event: { clock: { at } } } : { clock: { at } }
     const windowKey = JSON.stringify([sourceId, 'window', 'model', '2026-10-25'])
     // 旧版原生消息的规则布局不同于当前 UserMessage 类型；保留原始数据，不升级它。
     const windowMessage = { id: 'historical-window-message', role: 'user',
       content: [{ type: 'text', text: 'Recorded window notice' }],
       source: { kind: 'plugin:dsh-context-care:reminder', summary: 'Recorded window',
-        reminder: { key: windowKey, candidateId: 'historical-window', sessionId: String(session.id) },
+        reminder: { key: windowKey, candidateId: 'historical-window',
+          ...(clockLayout === 'event' ? { sessionId: String(session.id) } : {}) },
         contextCareTrace: { sourceId, ruleId: 'window', callId: 'old-window-request',
-          rule: { format: 'reminder/v3', id: 'window', on: 'request.before', priority: 0,
+          // 现场 seq 32571、53383 的 v2 窗口记录没有 sessionId，时钟为平铺字段。
+          rule: { format: clockLayout === 'flat' ? 'reminder/v2' : 'reminder/v3', id: 'window', on: 'request.before', priority: 0,
             text: 'Recorded window notice', when: { timeWindow: { start: '11:40', end: '11:50', timeZone: 'local' } },
             deliver: { model: { once: 'window', shared: { reset: 'window', limit: 1 } } } },
-          evidence: { event: { clock: { at } } } } } } as unknown as UserMessage
+          evidence } } } as unknown as UserMessage
     const stickyMessage = { id: 'historical-sticky-message', role: 'user',
       content: [{ type: 'text', text: 'Recorded sticky notice' }],
       source: { kind: 'plugin:dsh-context-care:reminder', summary: 'Recorded sticky',
@@ -48,7 +53,7 @@ export function registerSiyuanWindowHostCases(harness: Harness): void {
             text: 'Recorded sticky notice', when: {}, deliver: { model: { once: 'none',
               sticky: { clock: 'main-request', lifetime: 3, cooldown: 1 },
               shared: { reset: 'lifetime', lifetime: 'recorded-campaign', limit: 1 } } } },
-          evidence: { event: { clock: { at } } } } } } as unknown as UserMessage
+          evidence } } } as unknown as UserMessage
     session.append('user/message', windowMessage, { surfaceOp: 'append' })
     session.append('user/message', stickyMessage, { surfaceOp: 'append' })
     // 冷恢复直接读取真实 Session，不能靠当前规则重新匹配这些消息。
