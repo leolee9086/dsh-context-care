@@ -24,11 +24,12 @@ export function requestCareInstructions(request) {
  * Source excerpts are bounded and explicitly marked; prompt bodies remain exact.
  * @param records durable journal records filtered to this session
  * @param session loaded session, including log-only history
+ * @param {import('../lib/session-log.js').SessionLogRead} [log] shared immutable log cut
  * @returns newest-first prompt records with stable identity and request/source references
  */
-export function contextCarePrompts(records, session) {
-  const events = session?.snapshotEvents() ?? []
-  const bySeq = new Map(events.map(event => [event.seq, event]))
+export function contextCarePrompts(records, session, log) {
+  const events = log?.select(['user/message', 'system/message', 'request/header']) ?? session?.snapshotEvents() ?? []
+  const bySeq = log ? { get: seq => log.at(seq) } : new Map(events.map(event => [event.seq, event]))
   const calls = records.filter(record => record.kind === 'request')
   const actions = records.filter(record => record.kind === 'maintenance')
   const ownedTransactions = new Set(actions.flatMap(({ data }) => [data.compactionId, ...(data.summaryTransactions ?? [])]).filter(Boolean))

@@ -45,7 +45,7 @@ const stickySource = (clock: 'main-request' | 'human-turn'): ReminderSource => (
 
 /** The fixture owns actual Loader, Worker, Agent and Session implementations. */
 export function registerDeliveryReplayCases(harness: Harness) {
-  test('Session-only idle collection discovers a cold history once and avoids repeated reads and empty writes', async t => {
+  test('Session-only idle collection ignores historical triggers and avoids query reads and empty writes', async t => {
     const source: ReminderSource = { sourceId: 'idle-source', plugin: 'test', revision: 1, rules: [{
       format: 'reminder/v4', id: 'idle', on: 'tool.succeeded', text: 'IDLE_NOTICE',
       when: { tool: 'replay_probe' }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
@@ -58,7 +58,7 @@ export function registerDeliveryReplayCases(harness: Harness) {
     await disabled.setModelEnabled(false)
     const coldReads = cold.historyReadCount(), coldWrites = cold.stateWriteCount()
     assert.equal(await cold.collectOnly(), 0)
-    assert.equal(cold.historyReadCount(), coldReads + 1, 'the cold native scan establishes that no missed tool result exists')
+    assert.equal(cold.historyReadCount(), coldReads, 'the attached Session supplies native input facts without a duplicate query')
     assert.equal(cold.stateWriteCount(), coldWrites, 'empty discovery does not write side state')
     for (const host of [hot, cold, foreign, disabled]) {
       const reads = host.historyReadCount(), writes = host.stateWriteCount()
@@ -153,7 +153,7 @@ export function registerDeliveryReplayCases(harness: Harness) {
     }] }
     const hot = await harness.open(t, source), before = hot.historyReadCount()
     assert.deepEqual(await Promise.all([hot.humanTurn(), hot.humanTurn()]), ['initial', 'initial'])
-    assert.equal(hot.historyReadCount() - before, 1, 'concurrent cold reads must share one native query')
+    assert.equal(hot.historyReadCount() - before, 0, 'concurrent readers reuse the attached native Session')
     await hot.turn()
     const reads = hot.historyReadCount(), first = await hot.humanTurn()
     assert.notEqual(first, 'initial')
@@ -166,7 +166,7 @@ export function registerDeliveryReplayCases(harness: Harness) {
     }
     const cold = await harness.open(t, source, await hot.seed()), coldReads = cold.historyReadCount()
     assert.deepEqual(await Promise.all([cold.humanTurn(), cold.humanTurn()]), [first, first])
-    assert.equal(cold.historyReadCount() - coldReads, 1)
+    assert.equal(cold.historyReadCount() - coldReads, 0, 'a replayed but attached Session needs no duplicate query')
     await cold.turn()
     const nextReads = cold.historyReadCount()
     assert.notEqual(await cold.humanTurn(), first)

@@ -7,7 +7,7 @@ import { isDeepStrictEqual } from 'node:util'
  * @param before selected sources, complete surface/messages/header and log revision
  * @returns rebased contiguous selected sequences, or null without valid progress
  */
-export function rebaseSummaryRepair(session, before) {
+export function rebaseSummaryRepair(session, before, log) {
   const selected = new Set(before.seqs)
   const from = before.surface.indexOf(before.seqs[0])
   const to = before.surface.indexOf(before.seqs.at(-1))
@@ -19,7 +19,7 @@ export function rebaseSummaryRepair(session, before) {
     || !isDeepStrictEqual(suffix.length === 0 ? [] : current.slice(-suffix.length), suffix)) return null
   const rebased = current.slice(prefix.length, current.length - suffix.length)
   if (rebased.length === 0) return null
-  const events = new Map(session.snapshotEvents().map(event => [event.seq, event]))
+  const events = new Map([...(log ? log.range(before.revision) : session.snapshotEvents(before.revision))].map(event => [event.seq, event]))
   function leaves(seq, visiting = new Set()) {
     if (selected.has(seq)) return [seq]
     const event = events.get(seq)

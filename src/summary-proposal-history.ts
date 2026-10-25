@@ -13,7 +13,8 @@ interface Projection {
   rejected: Set<string>
 }
 interface History {
-  readSession(id: Session['id']): Promise<{ events: readonly SessionEvent[]; inheritedEventCount: number }>
+  readSession(id: Session['id']): Promise<{ events: readonly SessionEvent[]; inheritedEventCount: number; length?: number;
+    select?(types: readonly SessionEvent['type'][], fromSeq?: number): readonly SessionEvent[]; [Symbol.dispose]?(): void }>
 }
 
 /**
@@ -82,9 +83,12 @@ export function createSummaryProposalHistory(history: History) {
         const queued: SessionEvent[] = []
         const task = (async () => {
           const log = await history.readSession(session.id)
+          using lease = { [Symbol.dispose]: () => log[Symbol.dispose]?.() }
           if (closed) throw new Error('context-care: summary proposal history closed')
-          const state = initial(log.inheritedEventCount)
-          for (const event of log.events) apply(state, event)
+          const state = cached ?? initial(log.inheritedEventCount)
+          const events = log.select?.(['compaction/start', 'compaction/end'], state.cursor) ?? log.events
+          for (const event of events) apply(state, event)
+          state.cursor = log.length ?? log.events.length
           for (const event of queued) apply(state, event)
           states.set(session, state)
           // Publish and leave restore mode in one synchronous cut. Commits queued

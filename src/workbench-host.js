@@ -7,10 +7,11 @@ import { createTemplates } from './templates.js'
 import { createBoundedMatcher, MatcherFailure } from './bounded-matcher.js'
 import { createDetectorRegistry } from './detector-registry.js'
 import { createExecutorRegistry, createActionRuns, compactExecutorRef } from './action-runs.js'
-import { originalSessionBlocks, modelRequestBlocks, sessionTurn } from './request-blocks.js'
+import { originalSessionBlocks as readOriginalBlocks, modelRequestBlocks as readModelBlocks, sessionTurn as readSessionTurn } from './request-blocks.js'
+import { ensureSessionLog } from '../lib/session-log.js'
 import { planRequestV2 } from './request-plan.js'
 import { requestImpact } from './request-impact.js'
-import { entryTurn, entryPolicy, deliveredEntry, deactivatedEntry } from './entry-lifecycle.js'
+import { entryTurn as readEntryTurn, entryPolicy, deliveredEntry, deactivatedEntry } from './entry-lifecycle.js'
 import { releaseResources } from './resource-cleanup.js'
 import { importWorkbench } from './workbench-import.js'
 import { createDeltaProjection } from './delta-projection.js'
@@ -24,6 +25,11 @@ const dispatchItems = planned => [...new Map([...planned.applied, ...(planned.en
  * @param {Awaited<ReturnType<import('./rule-controls.js').openRuleControls>>} controls
  * @param {import('zod').input<typeof import('./request-host.js').Config>} options */
 export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executors: configuredExecutors = [], maxCascadePasses = 4, maxInjectedChars = 65536, maxInjectedTokens = 65536, maxCacheChangedBytes, maxRequestBytes = 8388608, maxQueued = 128, maxConcurrent = 8, maxDeltaChars = 32768, maxDeltaBlocks = 16, matcher: matcherOptions = {}, requiredStages = [] } = {}) {
+  const history = ensureSessionLog(ctx)
+  const sessionTurn = session => history.withLive(session, log => readSessionTurn(session, log))
+  const entryTurn = session => history.withLive(session, log => readEntryTurn(session, log))
+  const originalSessionBlocks = session => history.withLive(session, log => readOriginalBlocks(session, log))
+  const modelRequestBlocks = (session, request, requestId) => history.withLive(session, log => readModelBlocks(session, request, requestId, log))
   const report = error => ctx.logger.warn(`context-care: workbench failed: ${String(error)}`)
   const templates = createTemplates()
   const registrations = new Map(); const observations = new Map(); const admittedSessions = new Map(); let generation = 0; let closed = false; let closing
@@ -419,18 +425,19 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
       if (closed || !store.available(String(agent.session.id))) throw new Error('workbench-storage-unavailable')
       if (fileFailure) throw new Error(`rule-file-load-failed: ${fileFailure.message}`)
       if (!Number.isSafeInteger(seq) || seq < 0) throw new Error('display-invalid-sequence')
-      const event = agent.session.snapshotEvents().find(event => event.seq === seq)
+      const event = history.withLive(agent.session, log => log.at(seq))
       if (!event || !['assistant/message', 'user/message', 'system/message', 'tool/result'].includes(event.type)) throw new Error('display-message-unavailable')
       const captured = token(agent); const id = String(agent.session.id); const docs = documents(agent)
       const rules = definitions(agent).filter(rule => rule.on.includes('display.render'))
       const enabled = rules.map(rule => ({ ...rule, actions: rule.actions.filter(action => action.stage === 'display.render' && controls.enabled(id, rule.sourceId, rule.id, action.id)) })).filter(rule => rule.actions.length)
       if (!enabled.length) return { seq, changed: false, before: [], after: [], records: [] }
       let turnId = `${id}:seed`; const original = []
-      for (const prior of agent.session.snapshotEvents()) {
-        if (prior.seq > seq) break
-        if (prior.type === 'turn/start') turnId = `${id}:turn:${prior.data.turn ?? prior.seq}`
-        if (['assistant/message', 'user/message', 'system/message', 'tool/result'].includes(prior.type)) original.push(...extractRawBlocks(prior, { sessionId: id, turnId }))
-      }
+      history.withLive(agent.session, log => {
+        for (const prior of log.select(['turn/start', 'assistant/message', 'user/message', 'system/message', 'tool/result'], 0, seq + 1)) {
+          if (prior.type === 'turn/start') turnId = `${id}:turn:${prior.data.turn ?? prior.seq}`
+          else original.push(...extractRawBlocks(prior, { sessionId: id, turnId }))
+        }
+      })
       const display = original.map(block => ({ ...block, view: 'display' }))
       const snapshot = { session: { id, turnId }, vars: variableSnapshot({ ...record(agent), documents: docs }, turnId), currentSeq: seq }
       let events

@@ -16,7 +16,13 @@ import { CHECKPOINT_KIND } from './producer-source.js'
  */
 
 /** 会话当前的边界状态，全部由日志推出，不依赖任何 compaction 服务。 */
-export function inspectSession(session) {
+export function inspectSession(session, log) {
+  if (log) {
+    const turn = log.last('turn/start'), turnEnd = log.last('turn/end')
+    const compact = log.last('compaction/start'), compactEnd = log.last('compaction/end')
+    return { openTurn: turn && (!turnEnd || turn.seq > turnEnd.seq) ? turn.data.turn : null,
+      unmatchedCompactionStart: compact && (!compactEnd || compact.seq > compactEnd.seq) ? compact.seq : undefined }
+  }
   let openTurn = null
   let unmatchedCompactionStart
   const events = session.snapshotEvents()
@@ -54,8 +60,8 @@ function checkpointSource(compactionId) {
  * @param pricing - 本次维护固定的输入计价，省略时由 meter 独立捕获。
  * @returns 本次事务的 compactionId 与被清掉的 token 数。
  */
-export function clearRange(session, meter, range, text, pricing) {
-  const { openTurn, unmatchedCompactionStart } = inspectSession(session)
+export function clearRange(session, meter, range, text, pricing, log) {
+  const { openTurn, unmatchedCompactionStart } = inspectSession(session, log)
   if (unmatchedCompactionStart !== undefined) {
     throw new Error('context-care: another compaction is already open on this session')
   }

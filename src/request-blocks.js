@@ -1,33 +1,38 @@
 import { extractRawBlocks, walkContentBlocks, parseToolArguments } from '@leolee9086/dsh-session-blocks'
 
 /** Durable turn identities come from turn/start events, including inherited events after forks. */
-export function sessionTurn(session) {
-  const event = session.snapshotEvents().findLast(event => event.type === 'turn/start')
+export function sessionTurn(session, log) {
+  const event = log ? log.last('turn/start') : session.snapshotEvents().findLast(event => event.type === 'turn/start')
   return event ? `${session.id}:turn:${event.data.turn ?? event.seq}` : `${session.id}:seed`
 }
-export function originalSessionBlocks(session) {
-  const events = session.snapshotEvents()
-  const active = new Set(session.surface.nodes)
+function surfaceEvents(session, log) {
+  if (!log) {
+    const active = new Set(session.surface.nodes)
+    return session.snapshotEvents().filter(event => event.type === 'turn/start' || active.has(event.seq))
+  }
+  return [...log.select(['turn/start']), ...session.surface.nodes.map(seq => log.at(seq))]
+    .sort((a, b) => a.seq - b.seq)
+}
+export function originalSessionBlocks(session, log) {
   let turnId = `${session.id}:seed`
   const blocks = []
-  for (const event of events) {
-    if (event.type === 'turn/start') turnId = `${session.id}:turn:${event.data.turn ?? event.seq}`
-    if (active.has(event.seq)) blocks.push(...extractRawBlocks(event, { sessionId: String(session.id), turnId }))
+  for (const event of surfaceEvents(session, log)) {
+    if (event.type === 'turn/start') { turnId = `${session.id}:turn:${event.data.turn ?? event.seq}`; continue }
+    blocks.push(...extractRawBlocks(event, { sessionId: String(session.id), turnId }))
   }
   return blocks
 }
 /** Associate model messages by their public message id; transient request-only input never receives an invented committed seq. */
-export function modelRequestBlocks(session, request, requestId) {
+export function modelRequestBlocks(session, request, requestId, log) {
   const origins = new Map()
   let turnId = `${session.id}:seed`
-  for (const event of session.snapshotEvents()) {
-    if (event.type === 'turn/start') turnId = `${session.id}:turn:${event.data.turn ?? event.seq}`
-    if (!session.surface.nodes.includes(event.seq)) continue
+  for (const event of surfaceEvents(session, log)) {
+    if (event.type === 'turn/start') { turnId = `${session.id}:turn:${event.data.turn ?? event.seq}`; continue }
     const message = session.deriveEventMessage(event)
     if (message) origins.set(message.id, { event, turnId, message })
   }
   const blocks = []
-  const currentTurn = sessionTurn(session)
+  const currentTurn = sessionTurn(session, log)
   function append(message, messageIndex, origin) {
     const appendBlock = (raw, ref) => {
       const text = ['text', 'reasoning'].includes(ref.type) && typeof raw.text === 'string' ? raw.text : undefined

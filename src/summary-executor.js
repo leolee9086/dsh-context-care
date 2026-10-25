@@ -47,8 +47,9 @@ async function collectSummary(stream, signal) {
  * @param deps injected services, validated policy and optional explicit settings
  * @returns async compact(service, range, agent, signal, operation, request?) executor
  */
-export function createSummaryExecutor({ meter, llm, requests, spec, recover = () => false, eligible = () => true }) {
+export function createSummaryExecutor({ meter, llm, requests, spec, history, recover = () => false, eligible = () => true }) {
   const active = new WeakMap()
+  const read = (session, consume) => history ? history.withLive(session, consume) : consume(undefined)
   async function run(service, range, agent, signal, operation, envelope, audit = {}) {
     const session = agent.session
     const assertEligible = () => {
@@ -57,10 +58,10 @@ export function createSummaryExecutor({ meter, llm, requests, spec, recover = ()
     assertEligible()
     const recordAction = data => requests.recordAction(session, { ...audit, ...data })
     const config = summaryConfig(service, agent, spec.summary)
-    if (config === undefined) return runMaintenance({ requests, session, pricing: operation, action: 'summary', reason: audit.reason,
+    if (config === undefined) return runMaintenance({ requests, session, history, pricing: operation, action: 'summary', reason: audit.reason,
       operationId: audit.operationId, details: audit, run: () => { assertEligible(); return service.compactRegion(range.start, range.end, agent, signal) } })
     signal.throwIfAborted()
-    const { openTurn, unmatchedCompactionStart } = inspectSession(session)
+    const { openTurn, unmatchedCompactionStart } = read(session, log => inspectSession(session, log))
     if (unmatchedCompactionStart !== undefined) throw failure('context-care: another compaction is already open', 'COMPACTION_BUSY')
     let surface = [...session.surface.nodes]
     let messages = structuredClone(session.deriveMessages())
@@ -136,7 +137,7 @@ export function createSummaryExecutor({ meter, llm, requests, spec, recover = ()
           }
           if (recovered) {
             signal.throwIfAborted()
-            const rebased = rebaseSummaryRepair(session, repairSnapshot)
+            const rebased = read(session, log => rebaseSummaryRepair(session, repairSnapshot, log))
             if (rebased === null) throw error
             const repaired = buildSummaryRequest(session, rebased, prepared.config, signal)
             if (auxiliary.pricing.priceRequest(repaired) >= selectedPrice) throw error
@@ -190,7 +191,7 @@ export function createSummaryExecutor({ meter, llm, requests, spec, recover = ()
         const end = session.append('compaction/end', { compactionId, turn: openTurn })
         closed = true
         await recordAction({ action: 'summary', phase: 'committed', compactionId, summarySeq: summaryEvent.seq,
-          endSeq: end.seq, checkpointSeq: checkpoint.seq, coverage: checkpointCoverage(session, checkpoint.seq),
+          endSeq: end.seq, checkpointSeq: checkpoint.seq, coverage: read(session, log => checkpointCoverage(session, checkpoint.seq, log)),
           shadowedSeqs: seqs, beforeInput: before, afterInput: after })
         return { compactionId, startSeq: start.seq, summarySeq: summaryEvent.seq, endSeq: end.seq,
           summary: result.summary, shadowedRange, shadowedSeqs: seqs, shadowedTokenCount, beforeInput: before, afterInput: after }

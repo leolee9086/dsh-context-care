@@ -18,7 +18,7 @@ test('native output recovery reads only the live suffix and public anchors canno
   session.eventAt = seq => { eventReads++; return eventAt(seq) }
   session.snapshotEvents = () => { throw new Error('output discovery must not copy native history') }
   const history = {
-    sessions: { get: () => session, prepare: () => { throw new Error('output replay needs no detached Session or surface') } },
+    sessions: { messageProjections: [], get: () => session, prepare: () => { throw new Error('output replay needs no detached Session or surface') } },
     readSession: async () => {
       historyReads++
       assert.equal(allowHistory, true, 'a fully observed live Session needs no full native read')

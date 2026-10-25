@@ -22,17 +22,17 @@ export declare function createSessionDeliveries(ctx: Context, now?: () => number
         events: readonly SessionEvent[];
         inheritedEventCount?: number;
     }): void;
-    /** Read uncommitted queued handoffs from an already observed native scan. */
+    /** Read accepted inputs, including quota-blocked claims no longer in the inbox. */
     queued(sessionId: string): UserMessage[];
     observe(session: Session, event: SessionEvent): void;
     /** Cache-only read for the final synchronous cancel/steer check. */
     currentHumanTurn(sessionId: string): string | undefined;
     /** Native handoff evidence survives cancellation, compaction and an empty runtime cache. */
-    wasHanded(sessionId: string, eventId: string, rule?: HandoffRule): Promise<boolean>;
+    wasHanded(sessionId: string, eventId: string, rule?: HandoffRule, fromSeq?: number): Promise<boolean>;
     /** One cold read serves every sample in the caller's ordered recovery scan. */
     handoffs(sessionId: string): Promise<(eventId: string, rule?: HandoffRule) => boolean>;
     /** Last local human arrival; a delayed commit does not create a new interrupt budget. */
     humanTurn(sessionId: string): Promise<string>;
-    read(sessionId: string, currentHumanId: string): Promise<DeliveryState>;
+    read(sessionId: string, currentHumanId: string, fromSeq?: number): Promise<DeliveryState>;
     close(): void;
 };

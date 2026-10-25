@@ -6,10 +6,13 @@ interface Submission {
     event: EventValue;
 }
 export interface NativeHistory {
-    sessions: Pick<Context['sessions'], 'get' | 'prepare'>;
+    sessions: Pick<Context['sessions'], 'get' | 'prepare' | 'messageProjections'>;
     readSession: (id: Session['id']) => Promise<{
         events: readonly SessionEvent[];
         inheritedEventCount?: number;
+        at?(seq: number): SessionEvent | undefined;
+        range?(fromSeq: number): Iterable<SessionEvent>;
+        [Symbol.dispose]?(): void;
     }>;
 }
 interface Config {

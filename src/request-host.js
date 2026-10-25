@@ -24,6 +24,7 @@ import { MatcherFailure } from './bounded-matcher.js'
 import { ensureReminderService, ReminderConfig } from './reminder-runtime/index.js'
 import { createSummaryProposalHistory } from '../lib/summary-proposal-history.js'
 import { createCareChanges } from '../lib/care-changes.js'
+import { ensureSessionLog } from '../lib/session-log.js'
 import { producerOf, producedUnder, isCheckpointSource } from './producer-source.js'
 
 export const name = 'context-care-requests'
@@ -134,7 +135,8 @@ export async function openRequestHost(ctx, config = {}) {
   ctx.provide('contextCareWorkbench', workbench)
   ctx.effect(() => () => workbench.close())
   await ensureReminderService(ctx, Config.parse(config).reminders, controls)
-  const proposals = createSummaryProposalHistory({ readSession: id => ctx.sessionQuery.readSession(id) })
+  const history = ensureSessionLog(ctx)
+  const proposals = createSummaryProposalHistory({ readSession: id => history.read(id) })
   ctx.on('session/event', (session, event) => proposals.observe(session, event))
   ctx.effect(() => () => proposals.close())
   let dispatchOrder = 0

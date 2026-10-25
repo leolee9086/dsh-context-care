@@ -6,6 +6,7 @@ import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
 import type {} from '@deepseek-ai/dsh-session-projection'
 import { localWindow } from './request-context.js'
+import { ensureSessionLog } from '../session-log.js'
 import { quotaFor, type ClaimBookValue, type SharedQuota } from './claims.js'
 
 // 只读取历史中已经使用过的额度参数，规则版本不参与恢复。
@@ -35,6 +36,7 @@ const Owner = z.object({ source: z.object({ kind: z.string() }) })
  * @returns serialized quota transitions and synchronous committed-event observation
  */
 export function createSessionClaims(ctx: Context, now: () => number = Date.now) {
+  const history = ensureSessionLog(ctx)
   let book: ClaimBookValue = { buckets: [] }
   let ready: Promise<void> | undefined
   let lane: Promise<unknown> = Promise.resolve()
@@ -43,6 +45,7 @@ export function createSessionClaims(ctx: Context, now: () => number = Date.now) 
   const dirty = new Set<SessionId>()
   const chargedActivations = new Set<string>()
   const accepted = new Map<string, Set<string>>()
+  const liveCursors = new WeakMap<Session, number>()
 
   function record(sessionId: string, value: unknown, status: 'reserved' | 'consumed') {
     if (Owner.safeParse(value).data?.source.kind !== 'plugin:dsh-context-care:reminder') return
@@ -92,13 +95,13 @@ export function createSessionClaims(ctx: Context, now: () => number = Date.now) 
   }
 
   async function readSession(id: SessionId) {
-    const query = ctx.get('sessionQuery'), projections = ctx.get('sessionProjections')
-    if (!query || !projections) throw new Error('reminder-shared-session-history-unavailable')
-    const log = await query.readSession(id)
+    using log = await history.read(id)
     if (closed) throw new Error('reminder-claims-closed')
     let inboxChanged = false
     let processed = 0
-    for (const event of log.events) {
+    const live = ctx.sessions.get(id)
+    const fromSeq = live ? liveCursors.get(live) ?? 0 : 0
+    for (const event of log.select(['user/message', 'agent/inbox/spliced'], fromSeq)) {
       if (event.type === 'user/message') record(String(id), event.data, 'consumed')
       else if (event.type === 'agent/inbox/spliced' && event.data.inserted.some(message =>
         message.source.kind === 'plugin:dsh-context-care:reminder' && message.source.reminder.shared !== null)) inboxChanged = true
@@ -108,21 +111,14 @@ export function createSessionClaims(ctx: Context, now: () => number = Date.now) 
     }
     // Use the live inbox when available. A dormant log with no reminder insertion
     // cannot own a pending reservation and needs no detached full Session replay.
-    const live = ctx.sessions.get(id)
-    if (live) readInbox(live, String(id))
-    else if (inboxChanged) {
-      const replay = ctx.sessions.prepare(id, { seed: log.events, meta: log.session,
-        inheritedEventCount: log.inheritedEventCount, eventState: 'detached' })
-      readInbox(replay, String(id))
-    }
+    if (live) { readInbox(live, String(id)); liveCursors.set(live, log.length) }
+    else if (inboxChanged) readInbox(log.prepare(), String(id))
   }
 
   async function initialize() {
-    const query = ctx.get('sessionQuery')
-    if (!query) throw new Error('reminder-shared-session-history-unavailable')
     // Lifetime quotas need the logical corpus, including dormant sessions; reading
     // only sessions.get/list would silently reset another session's consumption.
-    for (const { header } of await query.listSessions()) {
+    for (const { header } of await history.listSessions()) {
       dirty.delete(header.id)
       await readSession(header.id)
     }

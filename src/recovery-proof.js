@@ -1,9 +1,9 @@
 /** Durable replacement coverage and frozen-price progress for one failed request. */
-export function recoveryProof(session, failed, priceMessages) {
+export function recoveryProof(session, failed, priceMessages, log) {
   const failedSources = new Set(failed.sourceSeqs)
   const current = new Set(session.surface.nodes)
-  const events = session.snapshotEvents()
-  const bySeq = new Map(events.map(event => [event.seq, event]))
+  const events = log ? [...log.range(failed.logRevision)] : session.snapshotEvents()
+  const bySeq = log ? { get: seq => log.at(seq) } : new Map(events.map(event => [event.seq, event]))
   function coversFailedSource(event) {
     const pending = [...(event.sourceEventSeqs ?? [])]
     const visited = new Set()

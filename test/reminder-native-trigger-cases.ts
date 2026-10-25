@@ -23,6 +23,16 @@ interface Harness {
   }>
 }
 
+/** Explicit retries retain their canonical input; collection itself never discovers it. */
+async function submitNative(runtime: ReminderService, seed: NativeSeed, phase: 'tool-result' | 'tool-call' | 'session-event' = 'tool-result') {
+  const event = seed.events.find(event => phase === 'tool-call'
+    ? event.type === 'tool/call' && String(event.data.callId) === 'native-prefix-call'
+    : event.type === 'tool/result' && String(event.data.message.toolCallId) === 'native-prefix-call')
+  assert.ok(event)
+  await runtime.submit({ sessionId: String(seed.header.id), callId: 'caller-copy', rootCallId: 'caller-copy',
+    native: { type: phase, seq: event.seq } })
+}
+
 /** A new real Host reads only the prior Host's native JSONL Session. */
 export function registerNativeTriggerCases(harness: Harness) {
   test('native cancellation result alone cannot prove whether a pre-execute match completed', async t => {
@@ -39,7 +49,7 @@ export function registerNativeTriggerCases(harness: Harness) {
     }
     assert.deepEqual(terminal(after), terminal(before), 'the real native outcome does not record which side of pre-execute was cancelled')
   })
-  test('a custom event alias replays the bound native Session event without side state', async t => {
+  test('a custom event alias explicitly resolves its native anchor without discovering history', async t => {
     const descriptor: CustomEventDescriptor = { name: 'care/native-tool-result', nativeEvent: 'tool/result' }
     const root = await mkdtemp(join(tmpdir(), 'care-native-alias-worker-'))
     const tracePath = join(root, 'actual-alias-judge.jsonl')
@@ -83,6 +93,8 @@ export function registerNativeTriggerCases(harness: Harness) {
     assert.equal(observations[0].event.callId, trace.callId)
     const empty = await harness.open(t, seed)
     empty.runtime.registerCustomEvents([descriptor]); empty.runtime.registerDetector(detector); empty.runtime.registerSource(source)
+    assert.deepEqual(await empty.runtime.collect(input), [], 'registering an alias never discovers old triggers')
+    await empty.runtime.publishCustomEvent({ sessionId: input.sessionId, name: descriptor.name, native: { type: 'session-event', seq: native.seq } })
     const rebuilt = await empty.runtime.collect(input)
     assert.deepEqual(rebuilt.map(message => message.content[0].text), ['CUSTOM_NATIVE_RESULT'])
     assert.equal((await readFile(tracePath, 'utf8')).trim().split('\n').length, 2, 'empty-cache replay invokes its actual Worker from the same native input')
@@ -93,6 +105,8 @@ export function registerNativeTriggerCases(harness: Harness) {
     dispose()
     t.after(cold.runtime.registerCustomEvents([{ ...descriptor, nativeEvent: 'tool/call' }]))
     assert.deepEqual(await cold.runtime.filterMessages(input.sessionId, [], messages), [], 'rebinding invalidates a reserved body even with the same source token')
+    assert.deepEqual(await cold.runtime.collect(input), [], 'rebinding does not submit the old call')
+    await cold.runtime.publishCustomEvent({ sessionId: input.sessionId, name: descriptor.name, native: { type: 'session-event', seq: call.seq } })
     const rebound = await cold.runtime.collect(input)
     assert.equal(rebound.length, 1)
     assert.equal(rebound[0].source.contextCareTrace.native?.seq, call.seq)
@@ -115,7 +129,8 @@ export function registerNativeTriggerCases(harness: Harness) {
       effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
     }] }
     const seed = await harness.captureAlias(t, descriptor, source, detector, late)
-    const native = seed.events.find(event => event.type === 'user/message' && event.data.source.kind === 'user')
+    const native = late ? [...seed.events].reverse().find(event => event.type === 'user/message' && event.data.source.kind === 'user')
+      : seed.events.find(event => event.type === 'user/message' && event.data.source.kind === 'user')
     assert.ok(native)
     const observations = (await readFile(tracePath, 'utf8')).trim().split('\n').map(line => NativeAliasObservation.parse(JSON.parse(line)))
     assert.equal(observations.length, 1)
@@ -146,6 +161,8 @@ export function registerNativeTriggerCases(harness: Harness) {
       effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
     }] })
     const input = { sessionId: String(seed.header.id), visible: [] }
+    assert.deepEqual(await cold.runtime.collect(input), [], 'legacy seen data cannot create pending trigger work')
+    await submitNative(cold.runtime, seed)
     const messages = await cold.runtime.collect(input)
     assert.deepEqual(messages.map(message => message.content[0].text), ['AFTER original.ts'])
     await cold.runtime.collect(input)
@@ -173,6 +190,8 @@ export function registerNativeTriggerCases(harness: Harness) {
     }
     configure(first.runtime)
     const input = { sessionId: String(seed.header.id), visible: [] }
+    assert.deepEqual(await first.runtime.collect(input), [])
+    await submitNative(first.runtime, seed)
     assert.deepEqual((await first.runtime.collect(input)).map(message => message.content[0].text), ['NATIVE original.ts'])
     const original = first.runtime.snapshot(input.sessionId).candidates[0]
     assert.ok(original?.native, 'the original candidate came from an actual Worker and native trigger')
@@ -186,6 +205,8 @@ export function registerNativeTriggerCases(harness: Harness) {
     // has no receipt for this reservation and remains byte-for-byte unchanged.
     const cold = await harness.open(t, seed, [], [obsolete])
     configure(cold.runtime)
+    assert.deepEqual(await cold.runtime.collect(input), [], 'obsolete reservations never become work')
+    await submitNative(cold.runtime, seed)
     const restored = await cold.runtime.collect(input)
     assert.deepEqual(restored.map(message => message.content[0].text), ['NATIVE original.ts'])
     assert.equal(cold.runtime.snapshot(input.sessionId).candidates.some(candidate => candidate.id === obsolete.id), false)
@@ -219,6 +240,8 @@ export function registerNativeTriggerCases(harness: Harness) {
     cold.runtime.registerDetector(detector)
     cold.runtime.registerSource(source)
     const input = { sessionId: String(seed.header.id), visible: [] }
+    assert.deepEqual(await cold.runtime.collect(input), [], 'unhanded historical winners are not automatically recovered')
+    await submitNative(cold.runtime, seed)
     const messages = await cold.runtime.collect(input)
     assert.deepEqual(messages.map(message => message.content[0].text), partial ? ['second original.ts'] : [])
     const observed = (await readFile(tracePath, 'utf8')).trim().split('\n').map(line => NativeObservation.parse(JSON.parse(line)))
@@ -246,6 +269,8 @@ export function registerNativeTriggerCases(harness: Harness) {
     }, { format: 'reminder/v4', id: 'failure', on: 'tool.failed', when: { tool: 'native_prefix_probe', error: { code: 'UNKNOWN_TOOL' } },
       text: 'FAILED {{event.arguments.file_path}}', effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
     }] })
+    assert.deepEqual(await cold.runtime.collect({ sessionId, visible: [] }), [])
+    await submitNative(cold.runtime, seed)
     const messages = await cold.runtime.collect({ sessionId, visible: [] })
     assert.deepEqual(messages.map(message => message.content[0].text), ['FAILED original.ts'])
     await assert.rejects(cold.runtime.submit({ type: 'tool.before-execute', sessionId, callId: 'forged', rootCallId: 'forged',
@@ -292,6 +317,9 @@ export function registerNativeTriggerCases(harness: Harness) {
       text: 'AFTER {{event.arguments.file_path}}', judge: { ref: 'native-after', revision: 1, params: { tracePath } },
       effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
     }] })
+    assert.deepEqual(await runtime.collect({ sessionId: String(seed.header.id), visible: [] }), [])
+    await submitNative(runtime, seed, 'tool-call')
+    await submitNative(runtime, seed)
     const messages = await runtime.collect({ sessionId: String(seed.header.id), visible: [] })
     assert.deepEqual(messages.map(message => message.content[0].text), ['AFTER original.ts'])
     const observations = (await readFile(tracePath, 'utf8')).trim().split('\n').map(line => NativeObservation.parse(JSON.parse(line)))
@@ -318,6 +346,9 @@ export function registerNativeTriggerCases(harness: Harness) {
       text: 'AFTER {{event.arguments.file_path}}', judge: { ref: 'native-after', revision: 1, params: { tracePath } },
       effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
     }] })
+    assert.deepEqual(await runtime.collect({ sessionId: String(seed.header.id), visible: [] }), [])
+    await submitNative(runtime, seed, 'tool-call')
+    await submitNative(runtime, seed)
     const messages = await runtime.collect({ sessionId: String(seed.header.id), visible: [] })
     assert.deepEqual(messages.map(message => message.content[0].text).sort(), ['AFTER original.ts', 'BEFORE original.ts'])
     await runtime.submit({ type: 'tool.before-execute', sessionId: String(seed.header.id), callId: 'forged', rootCallId: 'forged',
@@ -347,6 +378,8 @@ export function registerNativeTriggerCases(harness: Harness) {
       judge: { ref: 'native-session-event', revision: 1, params: { tracePath } },
       effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
     }] })
+    assert.deepEqual(await runtime.collect({ sessionId: String(seed.header.id), visible: [] }), [])
+    await submitNative(runtime, seed, 'session-event')
     const messages = await runtime.collect({ sessionId: String(seed.header.id), visible: [] })
     assert.equal(messages.length, 1, JSON.stringify(runtime.snapshot(String(seed.header.id))))
     assert.deepEqual(messages[0].content, [{ type: 'text', text: 'SESSION native-prefix-call' }])
@@ -370,7 +403,7 @@ export function registerNativeTriggerCases(harness: Harness) {
     await assert.rejects(runtime.submit({ sessionId: String(seed.header.id), callId: 'invalid', rootCallId: 'invalid',
       native: { type: 'session-event', seq: seed.events.length } }), /native-session-event-not-found/)
   })
-  for (const automatic of [false, true]) test(`native tool trigger cold replay ${automatic ? 'automatically discovers' : 'explicitly restores'} historical inputs from a dormant JSONL Session`, async t => {
+  for (const automatic of [false, true]) test(`native tool trigger cold replay ${automatic ? 'does not automatically discover' : 'explicitly restores'} historical inputs from a dormant JSONL Session`, async t => {
     const seed = await harness.capture(t), cold = await harness.open(t, seed)
     const terminal = seed.events.find(event => event.type === 'tool/result'
       && String(event.data.message.toolCallId) === 'native-prefix-call')
@@ -393,6 +426,12 @@ export function registerNativeTriggerCases(harness: Harness) {
     if (!automatic) await runtime.submit(copied)
     const collect = () => runtime.collect({ sessionId: String(seed.header.id), visible: [] })
     const messages = automatic ? (await Promise.all([collect(), collect()])).flat() : await collect()
+    if (automatic) {
+      assert.deepEqual(messages, [], 'ordinary collection never submits historical outcomes')
+      await assert.rejects(readFile(tracePath, 'utf8'), /ENOENT/, 'no historical Worker judge runs')
+      assert.equal(cold.liveCount(), 0); assert.equal(cold.sideWriteCount(), 0)
+      return
+    }
     assert.equal(messages.length, 1, JSON.stringify(runtime.snapshot(String(seed.header.id))))
     assert.equal(messages[0].content[0].text, 'CANONICAL original.ts')
     assert.deepEqual(messages[0].source.contextCareTrace.native, { type: 'tool-result', seq: terminal.seq })

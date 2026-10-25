@@ -1,11 +1,13 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+import { setImmediate as yieldToHost } from 'node:timers/promises'
 import type {} from '@deepseek-ai/dsh-tools'
 import { Event, type EventValue, type NativeRecoverySelection } from './state.js'
 import { nativeSessionEvent, resolveNativeSessionEvent } from './native-session-events.js'
 import { requestContext, type MessageView } from './request-context.js'
 import type { OutputConfig } from './output-stream.js'
 import { nativeOutputSamples } from './native-output-events.js'
+import { sessionMessageTail } from '../session-log.js'
 
 interface Call {
   nativeSeq?: number
@@ -15,8 +17,9 @@ interface Call {
 }
 interface Submission { event: EventValue }
 export interface NativeHistory {
-  sessions: Pick<Context['sessions'], 'get' | 'prepare'>
-  readSession: (id: Session['id']) => Promise<{ events: readonly SessionEvent[]; inheritedEventCount?: number }>
+  sessions: Pick<Context['sessions'], 'get' | 'prepare' | 'messageProjections'>
+  readSession: (id: Session['id']) => Promise<{ events: readonly SessionEvent[]; inheritedEventCount?: number;
+    at?(seq: number): SessionEvent | undefined; range?(fromSeq: number): Iterable<SessionEvent>; [Symbol.dispose]?(): void }>
 }
 interface Config {
   maxContextChars: number
@@ -54,7 +57,7 @@ function collapsedCall(event: SessionEvent, name: string): boolean {
 }
 
 /** Exclude earlier PTC rejection and cancellations with no proof of a hook observation. */
-function unobservedBeforeCalls(events: readonly SessionEvent[]): ReadonlySet<string> {
+function unobservedBeforeCalls(events: Iterable<SessionEvent>): ReadonlySet<string> {
   const skipped = new Set<string>(), names = new Map<string, string>()
   for (const event of events) {
     if (event.type === 'tool/call') names.set(String(event.data.callId), event.data.name)
@@ -125,8 +128,62 @@ export function createToolEvents(config: Config, history?: NativeHistory) {
     }
     return submission
   }
-  /** Interpret one native prefix; both explicit resolution and discovery use this path. */
-  function fromLog(sessionId: string, position: number, events: readonly SessionEvent[]): Submission {
+  /** One ordered recovery uses the native surface fold; each historical event enters it once. */
+  function historicalPrefix(events: readonly SessionEvent[], signal: AbortSignal) {
+    if (!history) throw new Error('reminder-native-tool-history-unavailable')
+    const prefix: SessionEvent[] = [], nodes: SessionEvent['seq'][] = []
+    // Only interpret already validated native observations. Keep position metadata here;
+    // message content and plugin-owned rewrites remain owned by the native interpreters.
+    let native: Session | undefined
+    const definitions = history.sessions.messageProjections
+    const used = new Set<(typeof definitions)[number]>()
+    const projected = new Map<SessionEvent['seq'], NonNullable<ReturnType<Session['deriveEventMessage']>>>()
+    const assertDefinitions = () => {
+      for (const definition of used) if (!definitions.includes(definition)) {
+        throw new Error(`reminder-native-message-projection-unloaded: ${definition.type}`)
+      }
+    }
+    const pending = new Map<string, Extract<SessionEvent, { type: 'tool/call' }>>()
+    return async (terminal: SessionEvent): Promise<{ messages: MessageView[]; call?: Call }> => {
+      while (prefix.length < terminal.seq) {
+        signal.throwIfAborted()
+        const event = events[prefix.length]
+        assertDefinitions()
+        const definition = definitions.find(item => item.type === event.type)
+        if (definition) {
+          const updates = definition.project(event, { nodes, events: prefix,
+            baseSeq: 0 as Session['inheritedEventCount'], messages: projected })
+          for (const [seq, message] of updates) projected.set(seq, message)
+          used.add(definition)
+        } else if (event.surfaceOp === 'append') nodes.push(event.seq)
+        else if (event.surfaceOp && typeof event.surfaceOp === 'object' && 'op' in event.surfaceOp && event.surfaceOp.op === 'replace') {
+          const start = nodes.indexOf(event.surfaceOp.startSeq), end = nodes.indexOf(event.surfaceOp.endSeq)
+          if (start < 0 || end < start) throw new Error('reminder-native-surface-range-missing')
+          nodes.splice(start, end - start + 1, event.seq)
+        }
+        prefix.push(event)
+        // Match the original reverse lookup: each result uses the nearest preceding call,
+        // including histories with more than one recorded result for that call.
+        if (event.type === 'tool/call') pending.set(String(event.data.callId), event)
+        if (prefix.length % 2048 === 0) { await yieldToHost(); signal.throwIfAborted() }
+      }
+      assertDefinitions()
+      const messages: MessageView[] = []
+      // One extra message preserves requestContext's truncation flag without deriving the whole surface.
+      for (let index = nodes.length - 1; index >= 0 && messages.length <= config.maxContextMessages; index--) {
+        native ??= history.sessions.prepare()
+        const seq = nodes[index], message = projected.get(seq) ?? native.deriveEventMessage(prefix[seq])
+        if (message) messages.unshift(message)
+      }
+      if (terminal.type !== 'tool/result') return { messages }
+      const called = pending.get(String(terminal.data.message.toolCallId))
+      return { messages, ...(called ? { call: { name: called.data.name,
+        arguments: argumentsOf(called.data.arguments), rootCallId: String(called.data.callId) } } : {}) }
+    }
+  }
+  /** Interpret one native result against its original prefix, never the current surface. */
+  function fromLog(sessionId: string, position: number, events: readonly SessionEvent[],
+    prefix?: { messages: MessageView[]; call?: Call }): Submission {
     if (!history) throw new Error('reminder-native-tool-history-unavailable')
     const terminal = events[position]
     if (!terminal || terminal.seq !== position
@@ -137,22 +194,15 @@ export function createToolEvents(config: Config, history?: NativeHistory) {
     if (code === 'ABORTED_BEFORE_DISPATCH') throw new Error('reminder-native-tool-result-not-dispatched')
     // Native interpretation preserves replacements and content projections at
     // this boundary. A later surface cannot substitute for the historical input.
-    const prefix = history.sessions.prepare(undefined, { seed: events.slice(0, terminal.seq) })
-    const messages = prefix.deriveMessages()
+    if (!prefix) throw new Error('reminder-native-tool-prefix-missing')
+    const messages = prefix.messages
     if (terminal.type === 'tool/ptc-dispatch') {
       const data = terminal.data
       return result(config, sessionId, terminal, String(data.subCallId), { name: data.name,
         arguments: data.arguments, rootCallId: String(data.rootCallId) }, data.isError, code, messages)
     }
     const { message } = terminal.data, id = String(message.toolCallId)
-    let call: Call | undefined
-    for (let index = terminal.seq - 1; index >= 0; index--) {
-      const previous = events[index]
-      if (previous.type === 'tool/call' && String(previous.data.callId) === id) {
-        call = { name: previous.data.name, arguments: argumentsOf(previous.data.arguments), rootCallId: id }
-        break
-      }
-    }
+    const call = prefix.call
     if (!call) throw new Error('reminder-native-tool-call-not-found')
     return result(config, sessionId, terminal, id, call, message.isError === true, code, messages)
   }
@@ -204,7 +254,7 @@ export function createToolEvents(config: Config, history?: NativeHistory) {
           // Mid-call installation remains on the unpaired tools/result path.
           if (call && error?.code !== 'ABORTED_BEFORE_DISPATCH') {
             return remember(session, result(config, String(session.id), event, id, call,
-              message.isError === true, error?.code, session.deriveMessages(), String(message.id)))
+              message.isError === true, error?.code, sessionMessageTail(session, config.maxContextMessages, String(message.id))))
           }
         } else {
           const data = event.data, id = String(data.subCallId), call = take(session, id)
@@ -214,7 +264,7 @@ export function createToolEvents(config: Config, history?: NativeHistory) {
           if (data.error?.code !== 'ABORTED_BEFORE_DISPATCH') {
             return remember(session, result(config, String(session.id), event, id, { name: data.name,
               arguments: data.arguments, rootCallId: String(data.rootCallId) }, data.isError,
-            data.error?.code, session.deriveMessages()))
+            data.error?.code, sessionMessageTail(session, config.maxContextMessages)))
           }
         }
       }
@@ -236,9 +286,10 @@ export function createToolEvents(config: Config, history?: NativeHistory) {
         return remember(session, { event: await resolveNativeSessionEvent(event, history, signal) }).event
       }
       const log = await history.readSession(event.sessionId as Session['id'])
+      using lease = { [Symbol.dispose]: () => log[Symbol.dispose]?.() }
       signal?.throwIfAborted()
       if (event.native.type === 'assistant-output') {
-        const native = log.events[event.native.seq]
+        const native = log.at ? log.at(event.native.seq) : log.events[event.native.seq]
         const inherited = log.inheritedEventCount ?? session?.inheritedEventCount
         if (!native || native.seq !== event.native.seq || inherited === undefined || native.seq < inherited
           || (native.type !== 'assistant/message' && native.type !== 'assistant/attempt')) throw new Error('reminder-native-output-not-found')
@@ -249,16 +300,23 @@ export function createToolEvents(config: Config, history?: NativeHistory) {
         throw new Error('reminder-native-output-sample-not-found')
       }
       if (event.native.type === 'tool-call') {
-        const native = log.events[event.native.seq]
+        const native = log.at ? log.at(event.native.seq) : log.events[event.native.seq]
         const inherited = log.inheritedEventCount ?? session?.inheritedEventCount
         if (!native || native.seq !== event.native.seq || inherited === undefined || native.seq < inherited) {
           throw new Error('reminder-native-tool-call-not-found')
         }
         const canonical = beforeCall(event.sessionId, native)
-        if (unobservedBeforeCalls(log.events).has(canonical.callId)) throw new Error('reminder-native-tool-call-not-dispatched')
+        if (unobservedBeforeCalls(log.range ? log.range(event.native.seq) : log.events.slice(event.native.seq)).has(canonical.callId)) throw new Error('reminder-native-tool-call-not-dispatched')
         return remember(session, { event: canonical }).event
       }
-      return remember(session, fromLog(event.sessionId, event.native.seq, log.events)).event
+      const terminal = log.events[event.native.seq]
+      if (!terminal || terminal.seq !== event.native.seq
+        || (terminal.type !== 'tool/result' && terminal.type !== 'tool/ptc-dispatch')) {
+        throw new Error('reminder-native-tool-result-not-found')
+      }
+      if (terminal.data.error?.code === 'ABORTED_BEFORE_DISPATCH') throw new Error('reminder-native-tool-result-not-dispatched')
+      const prefix = await historicalPrefix(log.events, signal ?? new AbortController().signal)(terminal)
+      return remember(session, fromLog(event.sessionId, event.native.seq, log.events, prefix)).event
     },
     /** Discover selected local native facts in their original order from one log read. */
     async recover(sessionId: string, accept: (event: EventValue) => Promise<void>, signal: AbortSignal,
@@ -276,6 +334,8 @@ export function createToolEvents(config: Config, history?: NativeHistory) {
       const outputCursor = session && outputThrough.get(session)
       if (commonObserved && (!selection.outputs || (session && outputCursor !== undefined && outputCursor >= session.seq))) return
       let fullEvents: readonly SessionEvent[] | undefined
+      let log: Awaited<ReturnType<NativeHistory['readSession']>> | undefined
+      using lease = { [Symbol.dispose]: () => log?.[Symbol.dispose]?.() }
       let events: Iterable<SessionEvent>, through: number, inherited: number | undefined
       if (session && commonObserved) {
         // Tool/raw events already have their live observer. Only new committed
@@ -291,7 +351,7 @@ export function createToolEvents(config: Config, history?: NativeHistory) {
           }
         } }
       } else {
-        const log = await history.readSession(sessionId as Session['id'])
+        log = await history.readSession(sessionId as Session['id'])
         signal.throwIfAborted()
         fullEvents = log.events; events = fullEvents; through = fullEvents.length
         inherited = log.inheritedEventCount ?? session?.inheritedEventCount
@@ -300,7 +360,11 @@ export function createToolEvents(config: Config, history?: NativeHistory) {
       const outputStart = outputCursor ?? inherited
       const skipped = selection.beforeTools && fullEvents ? unobservedBeforeCalls(fullEvents) : new Set<string>()
       let outputView: Pick<Session, 'id' | 'seq' | 'eventAt'> | undefined = session
+      const prefix = !commonObserved && fullEvents && selection.tools ? historicalPrefix(fullEvents, signal) : undefined
       for (const terminal of events) {
+        // Admission can be costlier than projection; yield between bounded groups
+        // even when no tool context needs to advance (before/raw/output selections).
+        if (terminal.seq % 128 === 0) await yieldToHost()
         signal.throwIfAborted()
         // A child inherits readable history, not its parent's local triggers.
         if (terminal.seq < inherited) continue
@@ -326,7 +390,7 @@ export function createToolEvents(config: Config, history?: NativeHistory) {
         // Match live publication order: tool outcome first, then its raw Session event.
         if (!commonObserved && fullEvents && selection.tools && (terminal.type === 'tool/result' || terminal.type === 'tool/ptc-dispatch')
           && terminal.data.error?.code !== 'ABORTED_BEFORE_DISPATCH') {
-          await accept(remember(session, fromLog(sessionId, terminal.seq, fullEvents)).event)
+          await accept(remember(session, fromLog(sessionId, terminal.seq, fullEvents, await prefix?.(terminal))).event)
         }
         if (!commonObserved && names.has(terminal.type) && !(selection.beforeTools
           && (terminal.type === 'tool/call' || terminal.type === 'tool/ptc-dispatch-start'))) {

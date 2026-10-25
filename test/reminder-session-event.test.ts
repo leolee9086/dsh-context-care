@@ -115,7 +115,7 @@ test('声明过的自定义事件能按名匹配，重复发布被幂等键挡�
 })
 
 test('native custom declarations validate atomically and keep independent owners', t => {
-  const runtime = createReminderRuntime({ recoverEvents: async () => {} })
+  const runtime = createReminderRuntime({ sessionAuthoritative: true })
   t.after(() => runtime.close())
   assert.throws(() => runtime.registerCustomEvents([{ name: 'care/unlogged' }]), /需要 nativeEvent/)
   assert.throws(() => runtime.registerCustomEvents([{ name: 'care/bad-shape', nativeEvent: 'tool/result', shape: 'any' }]), /载荷结构必须与原生事件/)

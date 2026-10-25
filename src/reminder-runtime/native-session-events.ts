@@ -29,8 +29,9 @@ export async function resolveNativeSessionEvent(event: EventValue, history: Nati
   if (event.native?.type !== 'session-event') return event
   signal?.throwIfAborted()
   const log = await history.readSession(event.sessionId as Session['id'])
+  using lease = { [Symbol.dispose]: () => log[Symbol.dispose]?.() }
   signal?.throwIfAborted()
-  const native = log.events[event.native.seq]
+  const native = log.at ? log.at(event.native.seq) : log.events[event.native.seq]
   const inherited = log.inheritedEventCount ?? history.sessions.get(event.sessionId as Session['id'])?.inheritedEventCount
   if (!native || native.seq !== event.native.seq || inherited === undefined || native.seq < inherited) {
     throw new Error('reminder-native-session-event-not-found')

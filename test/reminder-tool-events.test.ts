@@ -14,7 +14,7 @@ test('native anchored trigger reconstructs its historical prefix after cache los
   const session = Session.create(SessionId('native-tool-prefix')), events: SessionEvent[] = []
   let reads = 0, preparations = 0
   const history: NonNullable<Parameters<typeof createToolEvents>[1]> = {
-    sessions: { get: id => id === session.id ? session : undefined,
+    sessions: { messageProjections: [], get: id => id === session.id ? session : undefined,
       prepare: (id, options) => {
         preparations++
         return Session.create(id ?? SessionId('detached-prefix'), options?.seed)
@@ -119,7 +119,7 @@ test('native PTC result keeps the subcall root and derives the same trigger with
     content: [{ type: 'text', text: 'Later than the nested result.' }] }), { surfaceOp: 'append' })
   let preparations = 0
   const recovered = createToolEvents(config, {
-    sessions: { get: () => undefined, prepare: (id, options) => {
+    sessions: { messageProjections: [], get: () => undefined, prepare: (id, options) => {
       preparations++
       return Session.create(id ?? SessionId('detached-ptc-prefix'), options?.seed)
     } }, readSession: async () => ({ events: [start, end, later], inheritedEventCount: 0 }),
@@ -134,12 +134,12 @@ test('native PTC result keeps the subcall root and derives the same trigger with
   assert.equal(before.clock?.at, start.time)
   assert.equal(before.context, undefined)
   assert.equal(before.error, undefined)
-  assert.equal(preparations, 1, 'reconstructing a before-execution event needs no model-context prefix')
+  assert.equal(preparations, 0, 'empty historical context and before-execution facts need no prepared Session')
 })
 
-test('runtime collection discovers a tool committed after an earlier empty dormant scan', async t => {
+test('runtime collection ignores old tool outcomes and handles explicitly observed current results', async t => {
   const session = Session.create(SessionId('native-runtime-growth'))
-  const source = createToolEvents(config, { sessions: { get: () => undefined,
+  const source = createToolEvents(config, { sessions: { messageProjections: [], get: () => undefined,
     prepare: (id, options) => Session.create(id ?? SessionId('runtime-growth-prefix'), options?.seed) },
     readSession: async () => ({ events: session.snapshotEvents(), inheritedEventCount: 0 }),
   })
@@ -147,7 +147,6 @@ test('runtime collection discovers a tool committed after an earlier empty dorma
   const runtime = createReminderRuntime({ config: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 }, templates: createTemplates(),
     execute: (input, signal, timing) => matcher.detect(input, signal, timing),
     resolveEvent: (event, signal) => source.resolve(event, signal),
-    recoverEvents: (id, accept, signal) => source.recover(id, accept, signal),
   })
   t.after(async () => { await runtime.close(); await matcher.close(); source.close() })
   runtime.registerSource({ sourceId: 'native-growth', plugin: 'test', revision: 1, rules: [{
@@ -158,11 +157,16 @@ test('runtime collection discovers a tool committed after an earlier empty dorma
   assert.deepEqual(await collect(), [])
   const callId = ToolCallId('committed-after-empty-scan')
   const call = session.append('tool/call', { turn: 0, step: 0, callId, name: 'probe', arguments: '{"file_path":"late.ts"}' })
-  session.append('tool/result', { turn: 0, step: 0,
+  source.observe(session, call)
+  const terminal = session.append('tool/result', { turn: 0, step: 0,
     message: createToolResultMessage({ callId, isError: false, content: [{ type: 'text', text: 'REAL_LATER_RESULT' }] }),
   }, { surfaceOp: 'append', sourceEventSeqs: [call.seq] })
+  assert.deepEqual(await collect(), [], 'past outcomes alone do not constitute pending reminders')
+  const observed = source.observe(session, terminal)
+  assert.ok(observed)
+  await runtime.submit(observed.event)
   const messages = await collect()
-  assert.equal(messages.length, 1, 'an earlier empty scan cannot prove a dormant log remained empty')
+  assert.equal(messages.length, 1, 'a current native subscription still evaluates and delivers')
   assert.deepEqual(messages[0].content, [{ type: 'text', text: 'RECOVERED late.ts' }])
 })
 
@@ -172,7 +176,7 @@ test('native recovery follows Session replacement dormant growth and calls pendi
   const call = session.append('tool/call', { turn: 0, step: 0, callId, name: 'probe', arguments: '{"historical":true}' })
   let live: Session | undefined = session, reads = 0
   const source = createToolEvents(config, {
-    sessions: { get: () => live,
+    sessions: { messageProjections: [], get: () => live,
       prepare: (id, options) => Session.create(id ?? SessionId('changing-history-prefix'), options?.seed) },
     readSession: async () => { reads++; return { events: session.snapshotEvents(), inheritedEventCount: 0 } },
   })
@@ -224,7 +228,7 @@ test('cold discovery selects local dispatched tools and leaves inherited and can
   }, { surfaceOp: 'append', sourceEventSeqs: [call.seq] }))
   let reads = 0
   const source = createToolEvents(config, {
-    sessions: { get: () => undefined, prepare: (id, options) => Session.create(id ?? SessionId('discovery-prefix'), options?.seed) },
+    sessions: { messageProjections: [], get: () => undefined, prepare: (id, options) => Session.create(id ?? SessionId('discovery-prefix'), options?.seed) },
     readSession: async () => { reads++; return { events, inheritedEventCount: inherited } },
   })
   const found: Awaited<ReturnType<typeof source.resolve>>[] = []
@@ -237,7 +241,7 @@ test('cold discovery selects local dispatched tools and leaves inherited and can
   await assert.rejects(source.recover(String(session.id), async () => assert.fail('cancelled replay submitted work'), cancelled.signal), /discovery cancelled/)
   assert.equal(reads, 1)
   const hot = Session.create(SessionId('observed-from-creation'))
-  const live = createToolEvents(config, { sessions: { get: () => hot,
+  const live = createToolEvents(config, { sessions: { messageProjections: [], get: () => hot,
     prepare: () => { throw new Error('live prefix must not be prepared') } },
     readSession: async () => { throw new Error('live history must not be read') } })
   live.created(hot)
@@ -246,7 +250,7 @@ test('cold discovery selects local dispatched tools and leaves inherited and can
 
 test('abandoned native calls cannot recover a before-execution trigger from live or cold caches', async () => {
   const session = Session.create(SessionId('native-skipped-before'))
-  const source = createToolEvents(config, { sessions: { get: () => session,
+  const source = createToolEvents(config, { sessions: { messageProjections: [], get: () => session,
     prepare: () => { throw new Error('abandoned call needs no historical context') } },
     readSession: async () => ({ events: session.snapshotEvents(), inheritedEventCount: 0 }),
   })
@@ -270,7 +274,7 @@ test('abandoned native calls cannot recover a before-execution trigger from live
 
 test('PTC collapsed route excludes only its before trigger while an ordinary unknown name keeps it', async () => {
   const session = Session.create(SessionId('native-collapsed-before'))
-  const history = { sessions: { get: () => session,
+  const history = { sessions: { messageProjections: [], get: () => session,
     prepare: (id: Parameters<typeof Session.create>[0], options?: { seed?: SessionEvent[] }) => Session.create(id ?? SessionId('collapsed-prefix'), options?.seed) },
   readSession: async () => ({ events: session.snapshotEvents(), inheritedEventCount: 0 }) }
   const source = createToolEvents(config, history)

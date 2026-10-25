@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { ensureSessionLog } from '../lib/session-log.js'
 import { snoozeOutput, snoozeResult } from '../lib/reminder-runtime/snooze.js'
 import { createUserMessage } from './message.js'
 import { producedBy, producerKind } from './producer-source.js'
@@ -160,13 +161,9 @@ function finiteOrNull(value) {
 }
 
 /** 最后一个已开始的轮号;一个都没有时给 null。 */
-function lastTurnNumber(session) {
-  if (typeof session?.snapshotEvents !== 'function') return null
-  let last
-  for (const event of session.snapshotEvents()) {
-    if (event?.type === 'turn/start' && Number.isFinite(event.data?.turn)) last = event.data.turn
-  }
-  return last ?? null
+function lastTurnNumber(log) {
+  const event = log.last('turn/start')
+  return event?.type === 'turn/start' && Number.isFinite(event.data.turn) ? event.data.turn : null
 }
 
 /**
@@ -179,10 +176,10 @@ function lastTurnNumber(session) {
  * "规则写错或调用方漏填"而抛错,连累同一批里别的规则。
  *
  * @param {object|undefined} current sample() 的结果。
- * @param {object} session 会话,用来数轮次。
+ * @param {import('../lib/session-log.js').SessionLogRead} log 当前日志视图,只读取最近轮次。
  * @returns {object} 指标名 → 有限数或 null。
  */
-function careFacts(current, session) {
+function careFacts(current, log) {
   const state = current?.state ?? {}
   const measurement = current?.measurement
   return {
@@ -192,7 +189,7 @@ function careFacts(current, session) {
     surfaceTokens: finiteOrNull(measurement?.surfaceTokens),
     // 轮次跟时间无关,所以「聊了 N 轮还没记东西」这类判据在从没记过的会话上也成立 ——
     // 这正是 idle 那条规则漏掉的情况。
-    turns: finiteOrNull(lastTurnNumber(session)),
+    turns: finiteOrNull(lastTurnNumber(log)),
   }
 }
 export function installContextCare(ctx, raw, compactionSource) {
@@ -204,7 +201,8 @@ export function installContextCare(ctx, raw, compactionSource) {
     (ruleId, actionId) => enabled(agent.session.id, ruleId, actionId), explicit)
   const operations = createMaintenanceOperations()
   ctx.effect(() => () => operations.dispose())
-  const compactSummary = createSummaryExecutor({ meter: ctx.tokenMeter, llm: ctx.llm, requests: ctx.contextCareRequests, spec,
+  const history = ensureSessionLog(ctx)
+  const compactSummary = createSummaryExecutor({ meter: ctx.tokenMeter, llm: ctx.llm, requests: ctx.contextCareRequests, spec, history,
     eligible: (agent, reason) => reason === 'requested' || enabled(agent.session.id, reason === 'overflow' ? 'overflow' : 'maintenance', 'summary'),
     recover: payload => ctx.waterfall('compaction/summary-error', payload, () => false)
       || repairSummaryImages(ctx.sessions, payload) })
@@ -217,7 +215,7 @@ export function installContextCare(ctx, raw, compactionSource) {
       ? 0 : Math.max(0, current.loadTokens - current.budget.releaseTarget), rangeStrategy: spec.rangeStrategy,
     expectedCheckpointTokens: spec.expectedCheckpointTokens, allowFallback,
   })
-  const maintain = (session, pricing, action, reason, run) => runMaintenance({ requests: ctx.contextCareRequests, session, pricing, action, reason, run })
+  const maintain = (session, pricing, action, reason, run) => runMaintenance({ requests: ctx.contextCareRequests, session, pricing, action, reason, run, history })
   const prune = (agent, pricing, reason) => {
     const pruner = resolvePruner(agent)
     return pruner === undefined ? undefined : { pruneSession: session => maintain(session, pricing, 'prune', reason, () => {
@@ -280,7 +278,7 @@ export function installContextCare(ctx, raw, compactionSource) {
   const recordHit = (layer, record, where) => transformLog.record({ ...record, ...where, layer })
 
   const noticeRules = installNoticeRules(ctx, {
-    plugin: name,
+    plugin: name, history,
     rulesFor: (sessionId, evidence) => controlledEngineRules(controls, String(sessionId), 'notify', evidence),
     onHit: (record, where) => recordHit('notice', record, where),
   })
@@ -709,7 +707,7 @@ export function installContextCare(ctx, raw, compactionSource) {
         ctx.logger.warn(`context-care: overflow maintenance failed: ${error instanceof Error ? error.message : String(error)}`)
       }
       signal.throwIfAborted()
-      const proof = recoveryProof(session, failed, failed.dispatchPricing.priceMessages)
+      const proof = history.withLive(session, log => recoveryProof(session, failed, failed.dispatchPricing.priceMessages, log))
       if (!proof.progressed) return delegated
       // Keep the exact dispatched one-shot system/tools and replace the
       // logged history, including its system head, just as the Agent does.
@@ -746,7 +744,8 @@ export function installContextCare(ctx, raw, compactionSource) {
       catch (error) { if (signal.aborted) throw error; ctx.logger.warn(`context-care: 规则提醒收集失败: ${error.message}`) }
     }
     try {
-      messages.push(...noticeRules.collect({ agent, messages: accepted, facts: careFacts(current, agent.session) }))
+      const facts = ensureSessionLog(ctx).withLive(agent.session, log => careFacts(current, log))
+      messages.push(...noticeRules.collect({ agent, messages: accepted, facts }))
     } catch (error) {
       ctx.logger.warn(`context-care: 提示规则没有跑起来: ${error instanceof Error ? error.message : String(error)}`)
     }
@@ -854,7 +853,7 @@ export function installContextCare(ctx, raw, compactionSource) {
             outcome = '没有执行——系统提示词之外没有可清空的内容'
           } else {
             const text = restRequest.content.filter(block => block.type === 'text').map(block => block.text).join('\n')
-            await maintain(agent.session, operation, 'deep-rest', 'requested', () => clearRange(agent.session, ctx.tokenMeter, range, text, operation))
+            await maintain(agent.session, operation, 'deep-rest', 'requested', () => history.withLive(agent.session, log => clearRange(agent.session, ctx.tokenMeter, range, text, operation, log)))
             deepCompleted = true
             outcome = '历史已用交接和找回路径替换'
             current = await sample(agent, signal, messages.filter(message => message !== restRequest), true, operation)

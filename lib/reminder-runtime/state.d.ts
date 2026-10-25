@@ -1601,18 +1601,14 @@ export interface RuntimeOptions {
     resolveIdentity?: (sessionId: string, signal?: AbortSignal) => RecipientFacts | Promise<RecipientFacts>;
     /** Reconstruct an anchored trigger from native facts before admission or evaluation. */
     resolveEvent?: (event: EventValue, signal?: AbortSignal) => Promise<EventValue>;
-    /** Discover canonical native facts once per collection; admission still checks parsing, bytes, scope and Worker capacity. */
-    recoverEvents?: (sessionId: string, accept: (event: EventValue) => Promise<void>, signal: AbortSignal, selection: NativeRecoverySelection) => Promise<void>;
     /** Native triggers preceding an explicit policy reset cannot activate that rule again. */
     sinceSeq?: (sessionId: string, sourceId: string, ruleId: string) => number;
     updateClaims?: (change: (book: ClaimBookValue) => ClaimBookValue) => Promise<ClaimBookValue>;
     /** Committed windows and sticky clocks reconstructed from the owning Session. */
-    readDeliveries?: (sessionId: string, humanId: string) => Promise<import('./session-deliveries.js').DeliveryState>;
+    readDeliveries?: (sessionId: string, humanId: string, fromSeq?: number) => Promise<import('./session-deliveries.js').DeliveryState>;
     /** Whether native inbox/message evidence accepted this rule's trigger or exclusive choice. */
-    wasHanded?: (sessionId: string, triggerId: string, rule?: HandoffRule) => Promise<boolean>;
-    /** Read once for an ordered native scan; live commits may advance this same projection. */
-    readHandoffs?: (sessionId: string) => Promise<HandoffLookup>;
-    /** Frozen queued matches from the completed native discovery scan; never performs another history read. */
+    wasHanded?: (sessionId: string, triggerId: string, rule?: HandoffRule, fromSeq?: number) => Promise<boolean>;
+    /** Accepted but uncommitted native inbox messages; never evaluates historical triggers. */
     readQueued?: (sessionId: string) => readonly MessageView[];
     /** Store an otherwise unlogged match as ordinary pending context without waking the Agent. */
     handoffPending?: (sessionId: string, candidateIds: readonly string[]) => Promise<void>;

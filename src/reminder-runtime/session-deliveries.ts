@@ -3,6 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId, Session, SessionEvent, UserMessage } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
 import { localWindow } from './request-context.js'
+import { ensureSessionLog } from '../session-log.js'
 import { readSnoozeResult, SNOOZE_TOOL } from './snooze.js'
 import { triggerKey, type HandoffRule, type OutputHandoffRule, type StateValue, type StickyStateValue } from './state.js'
 
@@ -273,7 +274,11 @@ function apply(projection: Projection, sessionId: string, event: SessionEvent) {
  * commits advance the same fold. No rule, judge or template runs while restoring.
  */
 export function createSessionDeliveries(ctx: Context, now: () => number = Date.now) {
+  const history = ensureSessionLog(ctx)
   const states = new Map<string, Projection>()
+  // Accepted but uncommitted inbox messages are protocol state, not old trigger
+  // work. Keep this lightweight fold separate from sticky clocks and tool replay.
+  const queuedStates = new WeakMap<Session, Pick<Projection, 'cursor' | 'inheritedEnd' | 'inbox' | 'queued'>>()
   const pending = new Map<string, SessionEvent[]>()
   const restoring = new Map<string, Promise<Projection>>()
   let closed = false
@@ -287,16 +292,16 @@ export function createSessionDeliveries(ctx: Context, now: () => number = Date.n
     if (session && state?.cursor === session.seq) return state
     const active = restoring.get(sessionId)
     if (active) return active
-    const query = ctx.get('sessionQuery')
-    if (!query) throw new Error('reminder-delivery-session-history-unavailable')
     const task = (async () => {
       const queued: SessionEvent[] = []
       pending.set(sessionId, queued)
       try {
-        const log = await query.readSession(nativeId)
+        using log = await history.read(nativeId)
         if (closed) throw new Error('reminder-deliveries-closed')
         const next = emptyProjection(log.inheritedEventCount)
-        for (const event of log.events) apply(next, sessionId, event)
+        for (const event of log.select(['user/message', 'agent/inbox/spliced', 'step/start', 'step/end',
+          'turn/start', 'turn/end', 'tool/call', 'tool/result', 'tool/ptc-dispatch'])) apply(next, sessionId, event)
+        next.cursor = log.length
         for (const event of queued) apply(next, sessionId, event)
         states.set(sessionId, next)
         return next
@@ -319,10 +324,42 @@ export function createSessionDeliveries(ctx: Context, now: () => number = Date.n
       for (const event of log.events) apply(next, sessionId, event)
       states.set(sessionId, next)
     },
-    /** Read uncommitted queued handoffs from an already observed native scan. */
+    /** Read accepted inputs, including quota-blocked claims no longer in the inbox. */
     queued(sessionId: string) {
-      const state = states.get(sessionId)
-      return state ? structuredClone([...state.queued.values()]) : []
+      if (closed) throw new Error('reminder-deliveries-closed')
+      const session = ctx.sessions.get(sessionId as SessionId)
+      const full = states.get(sessionId)
+      let accepted = full?.queued
+      if (session && full?.cursor !== session.seq) {
+        let state = queuedStates.get(session)
+        if (!state) {
+          state = { cursor: 0, inheritedEnd: session.inheritedEventCount, inbox: { 'next-turn': [], 'next-step': [] }, queued: new Map() }
+          queuedStates.set(session, state)
+        }
+        using log = history.live(session)
+        // No rule matching, rendering or judges run here. Only native acceptance,
+        // commit and cancellation can change the frozen outstanding input set.
+        for (const event of log.select(['agent/inbox/spliced', 'user/message'], state.cursor)) {
+          if (event.type === 'agent/inbox/spliced') {
+            const splice = event.data
+            const removed = state.inbox[splice.target].splice(splice.start, splice.removedCount ?? 0, ...splice.inserted)
+            if (splice.outcome === 'canceled') for (const message of removed) state.queued.delete(String(message.id))
+            if (event.seq >= state.inheritedEnd) for (const message of splice.inserted) {
+              if (message.source.kind === KIND && message.source.reminder.handoff?.queued
+                && message.source.reminder.sessionId === sessionId) state.queued.set(String(message.id), message)
+            }
+          } else if (event.type === 'user/message') state.queued.delete(String(event.data.id))
+        }
+        state.cursor = log.length
+        accepted = state.queued
+      }
+      const messages = new Map(accepted)
+      const agent = ctx.get('agents')?.get(sessionId as SessionId)
+      for (const message of [...(agent?.inbox.nextTurn ?? []), ...(agent?.inbox.nextStep ?? [])]) {
+        if (message.source.kind === KIND && message.source.reminder.handoff?.queued
+          && message.source.reminder.sessionId === sessionId) messages.set(String(message.id), message)
+      }
+      return structuredClone([...messages.values()])
     },
     observe(session: Session, event: SessionEvent) {
       if (closed) return
@@ -341,8 +378,25 @@ export function createSessionDeliveries(ctx: Context, now: () => number = Date.n
       return state.humanArrival || state.humanCommit || 'initial'
     },
     /** Native handoff evidence survives cancellation, compaction and an empty runtime cache. */
-    async wasHanded(sessionId: string, eventId: string, rule?: HandoffRule): Promise<boolean> {
-      return handed(await restore(sessionId), sessionId, eventId, rule)
+    async wasHanded(sessionId: string, eventId: string, rule?: HandoffRule, fromSeq?: number): Promise<boolean> {
+      if (closed) throw new Error('reminder-deliveries-closed')
+      if (fromSeq === undefined) return handed(await restore(sessionId), sessionId, eventId, rule)
+      const session = ctx.sessions.get(sessionId as SessionId)
+      const cached = states.get(sessionId)
+      if (session && cached?.cursor === session.seq) return handed(cached, sessionId, eventId, rule)
+      // Only a receipt at or after this exact trigger can acknowledge it. Do not
+      // restore clocks, tool history or unrelated rules to answer this question.
+      const receipts = emptyProjection(session?.inheritedEventCount ?? 0)
+      const inspect = (event: SessionEvent) => {
+        receipts.cursor = event.seq + 1
+        if (event.type === 'user/message') rememberTrigger(receipts, sessionId, event.data)
+        else if (event.type === 'agent/inbox/spliced') {
+          for (const message of event.data.inserted) rememberTrigger(receipts, sessionId, message)
+        }
+      }
+      using log = await history.read(sessionId as SessionId)
+      for (const event of log.select(['user/message', 'agent/inbox/spliced'], Math.max(fromSeq, log.inheritedEventCount))) inspect(event)
+      return handed(receipts, sessionId, eventId, rule)
     },
     /** One cold read serves every sample in the caller's ordered recovery scan. */
     async handoffs(sessionId: string) {
@@ -354,7 +408,15 @@ export function createSessionDeliveries(ctx: Context, now: () => number = Date.n
       const state = await restore(sessionId)
       return state.humanArrival || state.humanCommit || 'initial'
     },
-    async read(sessionId: string, currentHumanId: string): Promise<DeliveryState> {
+    async read(sessionId: string, currentHumanId: string, fromSeq?: number): Promise<DeliveryState> {
+      if (closed) throw new Error('reminder-deliveries-closed')
+      if (fromSeq !== undefined) {
+        const committedIds = new Set<string>()
+        const inspect = (event: SessionEvent) => { if (event.type === 'user/message') committedIds.add(String(event.data.id)) }
+        using log = await history.read(sessionId as SessionId)
+        for (const event of log.select(['user/message'], Math.max(fromSeq, log.inheritedEventCount))) inspect(event)
+        return { windows: [], stickies: [], ticked: new Set(), committedIds, humanId: currentHumanId, queued: [] }
+      }
       const state = await restore(sessionId)
       // Compaction can remove the last human message from visibility, not from the
       // real turn clock. Only a new accepted human input prospectively advances it.

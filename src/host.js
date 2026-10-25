@@ -15,6 +15,7 @@ import { installWorkbenchRoute } from './workbench-route.js'
 import { installDisplayRoute } from './display-route.js'
 import { installChangeRoute } from '../lib/change-route.js'
 import { createCareViewReader } from './care-view-data.js'
+import { ensureSessionLog } from '../lib/session-log.js'
 
 // 通用入口:挂在 profile 层一次,对所有会话生效。
 //
@@ -85,8 +86,12 @@ export function apply(ctx, config = {}) {
       const session = ctx.sessions.get(sessionId)
       if (collection === 'prompts' && !session) { res.writeHead(404); res.end(JSON.stringify({ error: 'session-unavailable' })); return }
       const records = ctx.contextCareRequests.list(sessionId)
-      const actions = collection === 'actions' ? contextCareActions(records, session) : undefined
-      const items = actions?.actions ?? contextCarePrompts(records, session)
+      /** @param {import('../lib/session-log.js').SessionLogRead | undefined} log */
+      const project = log => {
+        const actions = collection === 'actions' ? contextCareActions(records, session, log) : undefined
+        return { actions, items: actions?.actions ?? contextCarePrompts(records, session, log) }
+      }
+      const { actions, items } = session ? ensureSessionLog(ctx).withLive(session, project) : project(undefined)
       const selectedSeq = query.has('seq') ? Number(query.get('seq')) : undefined
       if (selectedSeq !== undefined && (!Number.isSafeInteger(selectedSeq) || selectedSeq < 0)) { res.writeHead(400); res.end(JSON.stringify({ error: 'invalid-sequence' })); return }
       const selectedIndex = selectedSeq === undefined ? -1 : items.findIndex(item => item.seq === selectedSeq)

@@ -9,7 +9,7 @@ import { recordSecondaryFailure } from './secondary-failure.js'
  * @param options operationId joins the caller's planning record; details retains its rule and comparisons.
  * The journal owns persistent ACKs; this wrapper owns only measurement and operation settlement.
  */
-export async function runMaintenance({ requests, session, pricing, action, reason, run, operationId = randomUUID(), details = {} }) {
+export async function runMaintenance({ requests, session, pricing, action, reason, run, history, operationId = randomUUID(), details = {} }) {
   const beforeInput = pricing.measure().inputTokens
   const beforeSeq = session.seq
   const sourceSeqs = [...session.surface.nodes]
@@ -17,7 +17,7 @@ export async function runMaintenance({ requests, session, pricing, action, reaso
   const beforeHeuristic = pricing.measure().nodes.reduce((sum, node) => sum + node.heuristicTokens, 0)
   const facts = () => {
     const measured = pricing.measure()
-    const events = session.snapshotEvents().filter(event => event.seq >= beforeSeq)
+    const events = history ? history.withLive(session, log => [...log.range(beforeSeq)]) : session.snapshotEvents(beforeSeq)
     const replacements = events.filter(event => event.surfaceOp?.op === 'replace').map(event => ({
       newSeq: event.seq, oldStartSeq: event.surfaceOp.startSeq, oldEndSeq: event.surfaceOp.endSeq, sourceSeqs: event.sourceEventSeqs ?? [],
     }))

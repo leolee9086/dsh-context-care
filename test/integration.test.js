@@ -30,6 +30,8 @@ import { registerRecoveryHostCases } from './reminder-recovery-cases.ts'
 import { registerShutdownHostCases } from './reminder-shutdown-host-cases.ts'
 import { registerDenialLifetimeHostCases } from './reminder-denial-lifetime-host-cases.ts'
 import { registerSiyuanWindowHostCases } from './reminder-siyuan-window-host-cases.ts'
+import { registerHistoryPerformanceCases } from './reminder-history-performance-host-cases.ts'
+import { registerSessionLogCases } from './session-log-host-cases.ts'
 import { preV4State } from './fixtures/reminder-upgrade.ts'
 import { registerScopeHostCases } from './reminder-scope-host-cases.ts'
 import { registerDeliveryReplayCases } from './reminder-delivery-replay-cases.ts'
@@ -57,7 +59,7 @@ const load = async (path, packageName) => {
   return import(pathToFileURL(target).href)
 }
 const { Context } = await load('vendor/cordis/lib/index.js', '@deepseek-ai/cordis')
-const { LlmAdapter, createUserMessage, createMessage } = await load('packages/llm/llm/lib/index.js', '@deepseek-ai/dsh-llm')
+const { LlmAdapter, createUserMessage, createMessage, createToolResultMessage, ToolCallId } = await load('packages/llm/llm/lib/index.js', '@deepseek-ai/dsh-llm')
 const { Session, buildForkSeed } = await load('packages/core/session/lib/index.js', '@deepseek-ai/dsh-session')
 const { default: Loader } = await load('vendor/loader/lib/index.js', '@deepseek-ai/cordis-plugin-loader')
 const { default: Include } = await load('vendor/include/lib/index.js', '@deepseek-ai/cordis-plugin-include')
@@ -419,8 +421,9 @@ registerNativeTriggerCases({
     if (late) {
       install()
       const messages = await runtime.collect({ sessionId: String(agent.id), visible: agent.session.deriveMessages() })
-      assert.equal(messages.length, 1, 'late alias registration cannot inherit an unrelated live-observation scan')
-      for (const message of messages) agent.inject(message)
+      assert.deepEqual(messages, [], 'late registration does not turn an old human message into a new event')
+      await completionTurn(ctx, agent, 'A new human input after alias registration.')
+      await runtime.settle(String(agent.id))
     } else assert.equal(runtime.snapshot(String(agent.id)).candidates.filter(candidate => candidate.status === 'pending').length, 1,
       'the actual live observer matched the committed human input without cold discovery')
     agent.followup(createUserMessage({ source: { kind: 'plugin:dsh-context-care:test-continuation' },
@@ -614,6 +617,58 @@ registerDenialLifetimeHostCases({ async open(t, ruleTimeoutMs) {
     await completionTurn(ctx, agent)
     return agent.session.snapshotEvents()
   } }
+} })
+
+registerSessionLogCases({ async open(t) {
+  const owned = await fixture(t, false), ctx = await owned.open()
+  await ctx.loader.create({ name: '@deepseek-ai/dsh-session-persistence-jsonl',
+    config: { root: resolve(owned.root, 'shared-log-tests'), compression: 'none' } })
+  await ctx.loader.await()
+  for (const entry of ctx.loader.entries()) if (entry.options.name === '@deepseek-ai/dsh-session-persistence-jsonl') await entry.fiber.await()
+  return ctx
+} })
+
+registerHistoryPerformanceCases({ async open(t) {
+  const owned = await fixture(t, false), ctx = await owned.open()
+  const { base, cookie } = await controlCookie(ctx)
+  const runtime = ctx.get('reminderRules')
+  ctx.effect(() => runtime.registerSource({ sourceId: 'history-performance', plugin: 'test', revision: 1, rules: [{
+    format: 'reminder/v4', id: 'probe', on: 'tool.succeeded', when: { tool: 'history_performance_probe' },
+    text: 'HISTORY_PERFORMANCE_NOTICE', effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
+  }] }).dispose)
+  ctx.llm.registerAdapter(['care-test'], new CompletionAdapter([{ blocks: [{ type: 'text', text: 'Concurrent Host turn completed.' }] }]))
+  const collect = async session => runtime.collect({ sessionId: String(session.id), visible: session.deriveMessages() })
+  const probe = async () => {
+    const agent = await ctx.agentLoop.create('history-concurrent-agent', { provider: 'care-test', model: 'care-test' })
+    await completionTurn(ctx, agent, 'Process a separate request during history recovery.')
+    assert.ok(agent.session.deriveMessages().some(message => message.role === 'assistant'
+      && message.content.some(block => block.type === 'text' && block.text === 'Concurrent Host turn completed.')))
+  }
+  const match = async session => {
+    const callId = ToolCallId('history-current-hit')
+    const call = session.append('tool/call', { turn: 1, step: 2001, callId,
+      name: 'history_performance_probe', arguments: JSON.stringify({ index: 'current' }) })
+    session.append('tool/result', { turn: 1, step: 2001,
+      message: createToolResultMessage({ callId, isError: false, content: [{ type: 'text', text: 'CURRENT_RESULT' }] })
+    }, { surfaceOp: 'append', sourceEventSeqs: [call.seq] })
+    await runtime.settle(String(session.id))
+    const messages = await collect(session)
+    assert.equal(messages.length, 1)
+    assert.equal(messages[0].content[0].text, 'HISTORY_PERFORMANCE_NOTICE')
+    session.append('user/message', messages[0], { surfaceOp: 'append' })
+    assert.deepEqual(await collect(session), [], 'the native receipt suppresses repeat delivery')
+  }
+  const nativeLog = process.env.DSH_NATIVE_RECOVERY_LOG
+  if (!nativeLog) return { ctx, base, cookie, collect, probe, match, session: ctx.sessions.create('history-performance'), nativeLog: false }
+  // The explicit native sample is read by the official decoder; no original events are rewritten.
+  const { readDecodedJsonlSource } = await import(pathToFileURL(resolve(checkout, 'packages/session/session-persistence-jsonl/src/generation.ts')).href)
+  const { sessionFormatCatalog } = await import(pathToFileURL(resolve(checkout, 'packages/session/session-format-catalog/src/index.ts')).href)
+  const { artifact } = await readDecodedJsonlSource(nativeLog, 4, 'zstd', {
+    createRestore: header => sessionFormatCatalog.createRestore(header, { recovery: 'strict', validation: 'transformed' }),
+  })
+  const session = ctx.sessions.create(artifact.header.id, { seed: artifact.events, meta: artifact.header,
+    inheritedEventCount: artifact.inheritedEventCount, eventState: 'detached' })
+  return { ctx, base, cookie, collect, probe, match, session, nativeLog: true }
 } })
 
 registerSiyuanWindowHostCases({ async open(t) {
@@ -1649,7 +1704,7 @@ registerDeliveryReplayCases({ async open(t, source, seed, fork = false, detector
     : await ctx.agentLoop.create('delivery-replay', options)
   const log = () => ctx.sessionQuery.readSession(agent.id)
   // Observe the real methods without replacing their behavior.
-  const reads = t.mock.method(ctx.sessionQuery, 'readSession')
+  const reads = t.mock.method(ctx.sessionQuery, 'observeSession')
   let stateWrites = 0
   ctx.on('domain/changed', change => { if (change.domain === 'context_care_reminders') stateWrites++ })
   const clock = createSessionDeliveries(ctx)
@@ -1798,7 +1853,7 @@ registerReminderHostCases({ async create(t, stream, maxInterrupts = 1) {
   }
 } })
 
-for (const outcome of ['completed', 'failed', 'cancelled', 'legacy', 'partial']) test(`native output replay reproduces live ${outcome} samples without side state`, async t => {
+for (const outcome of ['completed', 'failed', 'cancelled', 'legacy', 'partial']) test(`explicit native output retries reproduce live ${outcome} samples without automatic discovery`, async t => {
   const config = { maxStreamChars: 16, maxStreamBlocks: 4, streamEveryChars: 4, streamFlushMs: 5 }
   const owned = await fixture(t, false, {}, {}, { reminders: { ...config, ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
   const ctx = await owned.open(), runtime = ctx.get('reminderRules')
@@ -1942,6 +1997,15 @@ for (const outcome of ['completed', 'failed', 'cancelled', 'legacy', 'partial'])
     })), 'only the explicitly migrated attempt identity differs; all recorded evidence remains equal')
   } else assert.deepEqual(replayed, initialLive, 'identity, timestamps, prefix/complete phases and full-output evidence all come from the same native stream')
   const input = { sessionId: String(header.id), visible: [] }
+  const submitOutput = async target => {
+    for (const terminal of doc.events) if (terminal.type === 'assistant/message' || terminal.type === 'assistant/attempt') {
+      for (const event of replayNativeOutput(config, detached, terminal, error => { throw error })) {
+        await target.get('reminderRules').submit({ ...event, native: { type: 'assistant-output', seq: terminal.seq } })
+      }
+    }
+  }
+  assert.deepEqual(await cold.get('reminderRules').collect(input), [], 'ordinary collection never reconstructs old output triggers')
+  await submitOutput(cold)
   const recovered = await cold.get('reminderRules').collect(input)
   assert.deepEqual(recovered.map(message => message.content[0].text), expected, 'a fresh Host reconstructs unhanded matches and the same ordered exclusive choices using actual Workers')
   assert.ok(readCount() <= 8, `ordered output recovery shares native history and recipient snapshots across samples (${readCount()} reads)`)
@@ -1953,6 +2017,8 @@ for (const outcome of ['completed', 'failed', 'cancelled', 'legacy', 'partial'])
   assert.equal(cold.sessions.list().length, 0)
   assert.equal(cold.agents.list().length, 0)
   const { cold: delivered, readCount: handedReads } = await openNative(handedSeed)
+  assert.deepEqual(await delivered.get('reminderRules').collect(input), [], 'unhanded historical output is not pending work')
+  await submitOutput(delivered)
   assert.deepEqual((await delivered.get('reminderRules').collect(input)).map(message => message.content[0].text),
     outcome === 'partial' ? ['OUTPUT_0', 'OUTPUT_1', 'OUTPUT_3'] : [], 'native handoffs suppress only recorded deliveries and preserve later unhanded exclusive winners')
   assert.ok(handedReads() <= (outcome === 'partial' ? 8 : 4), `handed output discovery does not reread history for each prefix or rule (${handedReads()} reads)`)

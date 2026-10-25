@@ -517,7 +517,7 @@ declare module '@deepseek-ai/dsh-llm' {
 /** One runtime owns source snapshots, evaluation lifetimes and disposable candidates.
  * Standalone callers may supply a legacy writer; production recovery belongs to Session.
  * No Cordis or live session objects enter the scheduler. */
-export declare function createReminderRuntime({ config: input, entries, sessionAuthoritative, templates, save, execute, capacity, saveCapacity, changed, dispatches, resolvePreset, resolveIdentity, resolveEvent, recoverEvents, sinceSeq, updateClaims, readDeliveries, wasHanded, readHandoffs, readQueued, handoffPending, wallNow, now, eligible, epoch, report }?: RuntimeOptions): {
+export declare function createReminderRuntime({ config: input, entries, sessionAuthoritative, templates, save, execute, capacity, saveCapacity, changed, dispatches, resolvePreset, resolveIdentity, resolveEvent, sinceSeq, updateClaims, readDeliveries, wasHanded, readQueued, handoffPending, wallNow, now, eligible, epoch, report }?: RuntimeOptions): {
     capacitySnapshot: () => {
         registeredRules: number;
         rejections: {

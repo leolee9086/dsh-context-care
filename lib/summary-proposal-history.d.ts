@@ -3,6 +3,9 @@ interface History {
     readSession(id: Session['id']): Promise<{
         events: readonly SessionEvent[];
         inheritedEventCount: number;
+        length?: number;
+        select?(types: readonly SessionEvent['type'][], fromSeq?: number): readonly SessionEvent[];
+        [Symbol.dispose]?(): void;
     }>;
 }
 /**

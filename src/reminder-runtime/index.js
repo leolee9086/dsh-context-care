@@ -19,6 +19,7 @@ import { createSessionDeliveries } from '../../lib/reminder-runtime/session-deli
 import { createToolEvents } from '../../lib/reminder-runtime/tool-events.js'
 import { nativeOutputAttempt } from '../../lib/reminder-runtime/native-output-events.js'
 import { createTemplates } from '../templates.js'
+import { ensureSessionLog, sessionMessageTail } from '../../lib/session-log.js'
 export { createReminderRuntime, ReminderConfig, REMINDER_SERVICE }
 // Legacy schema is exported for standalone callers; the production Host never opens it.
 export { REMINDER_DOMAIN } from '../../lib/reminder-runtime/runtime.js'
@@ -102,14 +103,9 @@ async function startReminderService(ctx, input, controls, facility) {
       maxIdle: threads, maxBytes: config.maxBytes })
     resources.unshift(['reminder-worker', () => matcher.close()])
     await matcher.warmup()
+    const history = ensureSessionLog(ctx)
     const toolEvents = createToolEvents({ ...config, output: config }, { sessions: ctx.sessions,
-      readSession: async id => {
-        const query = ctx.get('sessionQuery')
-        if (!query) throw new Error('reminder-native-tool-history-unavailable')
-        const log = await query.readSession(id)
-        deliveries.observeLog(String(id), log)
-        return log
-      } })
+      readSession: id => history.read(id) })
     resources.unshift(['reminder-tool-cache', () => toolEvents.close()])
     ctx.on('session/created', session => toolEvents.created(session))
     const runtime = createReminderRuntime({ config, sessionAuthoritative: true, templates: createTemplates(),
@@ -117,12 +113,10 @@ async function startReminderService(ctx, input, controls, facility) {
       changed: id => ctx.get('contextCareChanges')?.changed(id, ['controls', 'runtime']),
       resolveIdentity: createSessionIdentityResolver(ctx),
       resolveEvent: (event, signal) => toolEvents.resolve(event, signal),
-      recoverEvents: (id, accept, signal, selection) => toolEvents.recover(id, accept, signal, selection),
       sinceSeq: (id, source, rule) => controls.sinceSeq(id, source, rule),
       updateClaims: change => sharedClaims.update(change),
-      readDeliveries: (id, humanId) => deliveries.read(id, humanId),
-      wasHanded: (id, eventId, outputRule) => deliveries.wasHanded(id, eventId, outputRule),
-      readHandoffs: id => deliveries.handoffs(id),
+      readDeliveries: (id, humanId, fromSeq) => deliveries.read(id, humanId, fromSeq),
+      wasHanded: (id, eventId, outputRule, fromSeq) => deliveries.wasHanded(id, eventId, outputRule, fromSeq),
       readQueued: id => deliveries.queued(id),
       handoffPending: async (id, ids) => { await handoffPending(ctx, runtime, id, ids) },
       dispatches: true, execute: (input, signal, timing) => matcher.detect(input, signal, timing), report: error => ctx.logger.warn('reminder:', error),
@@ -177,7 +171,7 @@ async function startReminderService(ctx, input, controls, facility) {
     ctx.on('tools/result', (exec, result) => {
       if (!exec.agent) return
       if (toolEvents.waitForCommit(exec.agent.session, String(exec.callId))) return
-      const visible = exec.agent.session.deriveMessages()
+      const visible = sessionMessageTail(exec.agent.session, config.maxContextMessages)
       let chars = config.maxContextChars
       const messages = []
       for (const message of (config.maxContextMessages ? visible.slice(-config.maxContextMessages) : []).reverse()) {

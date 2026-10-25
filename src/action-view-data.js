@@ -12,7 +12,7 @@ const settled = new Set(['committed', 'completed', 'failed', 'no-useful-range'])
  * @param session optional loaded session containing replacement and summary facts
  * @returns ordered actions and latest conversation admission, without unrelated request text
  */
-export function contextCareActions(records, session) {
+export function contextCareActions(records, session, log) {
   const groups = new Map()
   const transactionOwners = new Map()
   for (const { kind, data } of records) {
@@ -40,7 +40,7 @@ export function contextCareActions(records, session) {
       auditKeys: [...previous.auditKeys, record.key], phases: [...previous.phases, data.phase] })
   }
   if (session) {
-    const events = session.snapshotEvents()
+    const events = log?.select(['compaction/summary', 'user/message']) ?? session.snapshotEvents()
     const summaries = new Map(events.filter(event => event.type === 'compaction/summary').map(event => [event.data.compactionId, event]))
     for (const event of events) {
       if (event.type !== 'user/message' || !isCheckpointSource(event.data.source) || event.surfaceOp?.op !== 'replace') continue

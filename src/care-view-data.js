@@ -3,6 +3,7 @@ import { contextCareActions } from './action-view-data.js'
 import { contextCarePrompts } from './prompt-view-data.js'
 import { runtimePage } from './rule-runtime-data.js'
 import { visibleReminderControls } from '../lib/reminder-runtime/control-view.js'
+import { ensureSessionLog } from '../lib/session-log.js'
 
 /** The composer and message markers need no journal pages or full diagnostic bodies.
  * @param {import('@deepseek-ai/cordis').Context} ctx
@@ -53,8 +54,10 @@ export function createCareViewReader(ctx, journal) {
       case 'actions':
       case 'prompts': {
         const records = ctx.contextCareRequests.list(sessionId)
-        const actions = topic === 'actions' ? contextCareActions(records, session) : undefined
-        const items = actions?.actions ?? contextCarePrompts(records, session)
+        const { actions, items } = ensureSessionLog(ctx).withLive(session, log => {
+          const actions = topic === 'actions' ? contextCareActions(records, session, log) : undefined
+          return { actions, items: actions?.actions ?? contextCarePrompts(records, session, log) }
+        })
         const index = seq === undefined ? -1 : items.findIndex(item => item.seq === seq)
         const pageOffset = index < 0 ? offset : Math.floor(index / 20) * 20
         const page = items.slice(pageOffset, pageOffset + 20)

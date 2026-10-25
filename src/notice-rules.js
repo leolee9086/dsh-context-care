@@ -31,7 +31,7 @@ export const RULES_SERVICE = 'memoryNoticeRules'
  * @param {(record: object, where: {sessionId: string|undefined}) => void} [options.onHit] 每条命中的回调。
  * @returns {{collect: (input: {agent: object, messages: object[]}) => object[]}}
  */
-export function installNoticeRules(ctx, { plugin, onHit = () => {}, rulesFor }) {
+export function installNoticeRules(ctx, { plugin, onHit = () => {}, rulesFor, history }) {
   /** 每个会话一个引擎:冷却和 surface 去重都是按会话算的。 */
   const engines = new Map()
   /**
@@ -117,9 +117,12 @@ export function installNoticeRules(ctx, { plugin, onHit = () => {}, rulesFor }) 
     const engine = engineFor(agent)
     const collected = []
     const hits = []
-    const events = agent.session?.snapshotEvents?.() ?? []
-    const userEvent = message.id === undefined ? undefined : events.findLast(event => event.type === 'user/message' && event.data.id === message.id)
-    const assistantEvent = events.findLast(event => event.type === 'assistant/message')
+    const evidence = log => {
+      const events = log ? log.select(['user/message']) : agent.session?.snapshotEvents?.() ?? []
+      return { userEvent: message.id === undefined ? undefined : events.findLast(event => event.type === 'user/message' && event.data.id === message.id),
+        assistantEvent: log ? log.last('assistant/message') : events.findLast(event => event.type === 'assistant/message') }
+    }
+    const { userEvent, assistantEvent } = history && agent.session ? history.withLive(agent.session, evidence) : evidence(undefined)
     runEvidence = { inputMessageId: message.id, userText: text, facts, userSeq: userEvent?.seq, assistantSeq: assistantEvent?.seq, sourceSeqs: [userEvent?.seq, assistantEvent?.seq].filter(seq => seq !== undefined) }
     hitSink = hits
     sink = collected
