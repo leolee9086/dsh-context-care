@@ -9,11 +9,11 @@ import { createClientChanges } from '../lib/client-changes.js'
 import { createRewriteRecords } from '../src/rewrite-records.js'
 import { ensureSessionLog } from '../lib/session-log.js'
 
-interface Harness { open(t: test.TestContext): Promise<{ ctx: Context; session: Session; base: string; cookie: string;
+interface Harness { open(t: test.TestContext, external?: boolean): Promise<{ ctx: Context; session: Session; base: string; cookie: string;
   forbidFullReads(): void; rewrite(index: number): Promise<unknown>; http(): Promise<void>; probe(): Promise<void> }> }
 export function registerRewritePerformanceCases(harness: Harness) {
-  test('long rewrite subscriptions send only exact revisions without full request history or body rescans', { timeout: 120000 }, async t => {
-    const fixture = await harness.open(t), { ctx, session, base, cookie } = fixture, errors: unknown[] = [], routes: string[] = []
+  for (const external of [false, true]) test(`long rewrite subscriptions${external ? ' with fresh legacy index rows' : ''} send only exact revisions without full request history or body rescans`, { timeout: 120000 }, async t => {
+    const fixture = await harness.open(t, external), { ctx, session, base, cookie } = fixture, errors: unknown[] = [], routes: string[] = []
     const frames: { type: string; value?: { records: object[]; removed?: string[] } }[] = []
     for (let index = 0; index < 1000; index++) session.append('assistant/message', { turn: 1, step: 1, stream: [], message: createMessage({
       role: 'assistant', source: { kind: 'model', provider: 'care-test', model: 'care-test' }, content: [{ type: 'text', text: 'original native answer' }] }) }, { surfaceOp: 'append' })
@@ -39,6 +39,9 @@ export function registerRewritePerformanceCases(harness: Harness) {
     const coldMs = performance.now() - began, beforeReads = reads.mock.callCount()
     const work = () => ensureSessionLog(ctx).cache.report().find(row => row.name === 'rewrite-view')?.work ?? 0
     const beforeWork = work(); assert.equal(beforeWork, 1000)
+    const wireWork = () => ensureSessionLog(ctx).cache.report().find(row => row.name === 'rewrite-wire')?.work ?? 0
+    const beforeWire = wireWork()
+    assert.ok(beforeWire <= (external ? 1500 : 1000), `cold normalization count: ${beforeWire}`)
     const timed = async (run: () => Promise<unknown>) => { const at = performance.now(); await run(); return performance.now() - at }
     const [liveMs, httpMs, otherAgentMs] = await Promise.all([timed(async () => {
       for (let index = 1000; index < 1020; index++) {
@@ -50,9 +53,10 @@ export function registerRewritePerformanceCases(harness: Harness) {
     }), timed(fixture.http), timed(fixture.probe)])
     assert.equal(reads.mock.callCount(), beforeReads); assert.equal(snapshots.mock.callCount(), 0)
     assert.equal(work() - beforeWork, 20); assert.equal(records.records.getSnapshot().size, 1020)
+    assert.ok(wireWork() - beforeWire <= (external ? 40 : 20), 'only new local/external facts normalize, not each fresh response body')
     assert.deepEqual(routes, ['/context-care/changes']); assert.deepEqual(errors, [])
     await yieldToHost(); loop.disable(); const cpu = process.cpuUsage(cpuStart)
-    t.diagnostic(`rewrite-stream-performance ${JSON.stringify({ nativeEvents: session.seq, rewrites: 1020, coldMs, liveMs, httpMs, otherAgentMs,
+    t.diagnostic(`rewrite-stream-performance ${JSON.stringify({ external, wireNormalizations: wireWork(), nativeEvents: session.seq, rewrites: 1020, coldMs, liveMs, httpMs, otherAgentMs,
       cpuUserMs: cpu.user / 1000, cpuSystemMs: cpu.system / 1000, loopMaxMs: loop.max / 1e6, nativeReads: reads.mock.callCount(), frames: frames.length })}`)
     assert.ok(coldMs < 1500 && liveMs < 2500 && httpMs < 1000 && otherAgentMs < 1500 && loop.max / 1e6 < 1000)
   })

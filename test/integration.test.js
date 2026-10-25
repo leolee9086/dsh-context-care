@@ -626,10 +626,22 @@ registerDenialLifetimeHostCases({ async open(t, ruleTimeoutMs) {
 
 registerDiagnosticPageCases({ async open(t) { const owned = await fixture(t, false); return owned.open() } })
 
-registerRewritePerformanceCases({ async open(t) {
+registerRewritePerformanceCases({ async open(t, external) {
   const owned = await fixture(t, false), ctx = await owned.open(), { base, cookie } = await controlCookie(ctx)
   ctx.llm.registerAdapter(['care-test'], new CompletionAdapter([{ blocks: [{ type: 'text', text: 'Independent rewrite probe completed.' }] }]))
   const target = await ctx.agentLoop.create('long-rewrite-stream', { provider: 'care-test', model: 'care-test' }), session = target.session
+  if (external) {
+    // The optional provider has no revision/event API and returns fresh JSON;
+    // its current listAttributes defaults to the newest 500 rows.
+    const rows = []
+    ctx.provide('sessionBlockQuery', {
+      async putAttribute(row) { rows.push(JSON.parse(JSON.stringify(row))); return String(rows.length) },
+      async listAttributes(filter) {
+        return rows.filter(row => row.sessionId === filter.sessionId && row.namespace === filter.namespace)
+          .slice(-500).reverse().map(row => JSON.parse(JSON.stringify(row)))
+      },
+    })
+  }
   let writer
   ctx.provide('requestRewrite', { register(name, callback) {
     assert.equal(name, 'context-care'); writer = callback

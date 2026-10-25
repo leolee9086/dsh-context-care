@@ -1,5 +1,32 @@
 # 诊断查询与数据推送验收
 
+## v0.14.5：wire缓存归属与外部修订复用（2026-10-26）
+
+第34轮核查实际旧服务dsh-better-session-query的lib/index.js:769-784和lib/store.js:484-516：属性put/list/remove没有revision或变更通知；块索引generation不是属性修订；list默认返回最新500条。因此不能安全以Session版本或块generation跳过属性读取，不修改提供者、不假定外部不再更新或撤销。
+
+v0.14.4仍有两个具体漏项。rewrite-wire虽然使用统一缓存，却以每个source row为owner；journal或外部数组仍持有这些对象时，release(Session)不能释放它们。另一个是外部list每次返回新对象时仍重复JSON parse、Zod校验和wire重建。现原生Session同时持有rewrite-view和rewrite-wire；后者弱持有不可变源身份，仅强持有当前外部响应的wire修订，外部撤销条目从复用表移除。统一Session release即使源数组仍存活也能清除两个域，后读按原事实重建。无模块全局注册表、无额外业务账本，不改原生事件或投递语义。
+
+对无revision的外部结果仍按实际字节比较；不依赖其对象identity，原地修改和新对象修订都可见。已返回相同wire的正文不再parse/validate/重新规范化，同哈希多个旧修订也各自复用；Host有界维护诊断与本地journal相同已ACK wire值共用candidate。原生来源优先和时间顺序不变、失败仍显式传播/可重试。外部查询、JSON序列化比较及可选提供者自身的JSON解析仍有成本，本轮不是把它们包装成恒定时间或零扫描。
+
+新增500条外部正文及同哈希旧修订单元，验证fresh对象重复读取、原地变化、撤销、Session释放与重建；真实Host再用1000条2KB正文验证十次不变读无新归一化、单条变化、旧公开数组、release后全部rewrite域entries0及零原生历史读取。实际注册writer到Host journal/鉴权stream/客户端投影新增有无旧索引两种压力；旧索引使用按实际提供者行为返回fresh JSON且最新500条的服务fixture，只替代外部索引，不mock原生Harness，也不声称加载了实际索引SQLite插件。
+
+新增计数最初发现冷读1001/1501而非1000/1500；定位request-cache.put规范化生成Host副本，修复相同wire共用后原断言通过，未放宽阈值。此前完整任务pwsh-d033a89b0c374871被明确取消、收取killed，不计为最终通过；最终源码重新执行全部发布门禁。
+
+最终release:check退出0，单元495/495（17652.17ms）、104JS语法、strict、62事件目录及Host/Client构建通过；完整源码Host213/213（240163.28ms），客户端3文件24/24。全部基于最后Host副本复用修复后的相同源码，无后续未验收代码调整。桌面0.2.1-rc.3 ASAR隔离20/20实质测试、stderr空、exit0，包括新增external生命周期回归、有/无索引writer/鉴权流、原生缓存/校准及长诊断。桌面20次新增无索引94.69ms、HTTP95.41ms/另一Agent108.54ms、CPU266/0ms、loop81.00ms；有索引108.59ms、HTTP108.30ms/另一Agent115.10ms、CPU172/0ms、loop65.77ms。wireNormalizations分别1020和1540：首读1000/1500，加20条本地或两来源40条新增，每delta恰1记录、总21帧，阶段无原生历史重读。
+
+最终源码同次整体观测如下，不以单个matcher、401或桌面定向通过替代；完整Host/Client退出和包指纹单独收取。
+
+| 场景 | 冷 / 重复 / 增量 | 并发鉴权HTTP / 另一Agent | CPU user/system；loop max |
+|---|---|---|---|
+| 1000事件+1000改写，无外部索引 | 首读37.17ms；20新增104.85ms；wire总1020 | 103.62 / 112.42ms | 125/63ms；66.52ms |
+| 相同写入链，外部fresh最新500行 | 首读36.58ms；20新增182.38ms；wire总1540 | 180.23 / 188.38ms | 250/0ms；94.63ms |
+| 7001事件诊断页 | 冷158.98 / warm2.83 / 追加2.49ms；结算28.11ms；20阶段87.30ms | 冷158.67/166.95ms；阶段25.70/40.83ms | 532/0ms；134.87ms |
+| 2012事件工作台 | display383.73/3.46ms；reconcile579.12/4.03ms | display32.58/41.49ms；reconcile HTTP5.55ms | 844/266ms；53.25ms |
+| 4002事件提醒 | collect5.91/0.58ms，historyReads0 | 28.28/45.38ms | 188/0ms；24.37ms |
+| 当前工具命中与原生去重 | 81.94ms | HTTP71.15ms | 156/0ms；75.96ms |
+
+最终包使用新的tgz路径与全新消费者普通离线安装，运行入口/Client factory/嵌套改写/原始块/真实Worker并逐字比较src/lib运行时及声明；结果和哈希记在持久记录，不复用旧file路径缓存冒充一致性。所有性能事件为隔离生成原生会话，未重新解码业务长日志。磁盘desktop插件manifest仍0.13.9，不代表进程加载状态；没有安装/启用/重启或借401冒充响应。哥哥安装后的实际版本、同GUI CPU/loop/鉴权HTTP/其它Agent与14条规则原生接纳/最终投递/去重仍待现场，真实时间窗不伪造。整体goal继续active，本轮两个具体漏项交付不等于所有未知生产路径清完。
+
 ## v0.14.4：改写订阅增量与共享 wire 投影（2026-10-26）
 
 第33轮沿生产改写订阅读者发现：index.js 的 durable.list 仍取完整 contextCareRequests.list 后过滤；rewrite-journal 每次重新遍历全部进程内记录并合并排序；change-route 对每个订阅读者 clone/parse/stringify 全表再逐行 stringify 比较。v0.14.3 的动作/提示增量断言没有覆盖此路径，本轮修复不据前次通过推断所有消费者完成。

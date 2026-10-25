@@ -94,7 +94,7 @@ export function registerDiagnosticPageCases(harness: Harness): void {
     const old = [...rewriteSnapshot(cold)]
     const work = () => logs.cache.report().find(row => row.name === 'rewrite-view')?.work
     assert.equal(work(), 1000)
-    const wireBuilds = () => logs.cache.report().find(row => row.name === 'rewrite-wire')?.builds
+    const wireBuilds = () => logs.cache.report().find(row => row.name === 'rewrite-wire')?.work
     const built = wireBuilds()
     for (let index = 0; index < 10; index++) {
       assert.equal(await journal.view(String(session.id)), cold)
@@ -113,9 +113,41 @@ export function registerDiagnosticPageCases(harness: Harness): void {
     assert.equal(delta.added[0].added, '1019'); assert.equal(old[999].at, 0)
     assert.equal(work(), 1020); assert.equal(reads.mock.callCount(), 0); assert.equal(snapshot.mock.callCount(), 0)
     logs.cache.release(session)
+    assert.equal(logs.cache.report().find(row => row.name === 'rewrite-wire')?.entries, 0, 'native release drops all wire caches despite retained source rows')
     const rebuilt = await journal.view(String(session.id))
     assert.notEqual(rewriteCut(rebuilt)!.feed, rewriteCut(latest)!.feed)
     assert.equal(rewriteSnapshot(rebuilt).length, 1000)
+  })
+
+  test('native external rewrite JSON reuses normalization and releases every wire entry with its Session', async t => {
+    const ctx = await harness.open(t), logs = ensureSessionLog(ctx), session = ctx.sessions.create(SessionId('native-external-rewrite'))
+    const sessionId = String(session.id), rows = Array.from({ length: 1000 }, (_, index) => ({ hash: `external-${index}`, at: index, removed: 'x'.repeat(2048) }))
+    let externalReads = 0
+    const journal = createRewriteJournal({ logs, owner: () => session, store: () => ({
+      async listAttributes() {
+        externalReads++
+        return rows.map(value => ({ sessionId, value: JSON.parse(JSON.stringify(value)) }))
+      },
+    }) })
+    t.after(() => journal.close())
+    const reads = t.mock.method(session, 'eventAt'), snapshots = t.mock.method(session, 'snapshotEvents')
+    const work = () => logs.cache.report().find(row => row.name === 'rewrite-wire')?.work
+    const cold = await journal.view(sessionId), reader = {}
+    assert.equal(rewriteCut(cold)!.feed.consume(reader).added.length, 1000)
+    const old = [...rewriteSnapshot(cold)]
+    for (let index = 0; index < 10; index++) assert.equal(await journal.view(sessionId), cold)
+    assert.equal(externalReads, 11); assert.equal(work(), 1000)
+    rows[0].removed = 'actual external mutation'
+    const delta = rewriteCut(await journal.view(sessionId))!.feed.consume(reader)
+    assert.equal(delta.added.length, 1); assert.equal(delta.removed.length, 1)
+    assert.equal(delta.added[0].removed, 'actual external mutation'); assert.equal(work(), 1001)
+    assert.equal(old.at(-1)!.removed, 'x'.repeat(2048))
+    logs.cache.release(session)
+    assert.ok(logs.cache.report().filter(row => row.name.startsWith('rewrite-')).every(row => row.entries === 0))
+    const rebuilt = await journal.view(sessionId)
+    assert.notEqual(rewriteCut(rebuilt)!.feed, rewriteCut(cold)!.feed)
+    assert.equal(rewriteSnapshot(rebuilt).length, 1000); assert.equal(work(), 2001)
+    assert.equal(reads.mock.callCount(), 0); assert.equal(snapshots.mock.callCount(), 0)
   })
 
   test('native diagnostic pages materialize only requested bodies and retain unaffected entries', async t => {

@@ -157,6 +157,40 @@ test('managed rewrite reads preserve legacy precedence, concurrent reads, remova
   journal.close(); assert.equal(cache.report().some(row => row.name.startsWith('rewrite-')), false); cache.close()
 })
 
+test('managed rewrite wire normalization reuses external JSON revisions and releases with the native owner', async () => {
+  const cache = createSessionCache(), owner = {}, sessionId = 'one'
+  let rows = Array.from({ length: 500 }, (_, index) => ({ hash: `external-${index}`, at: index, removed: 'x'.repeat(2048) }))
+  rows.push({ hash: 'external-1', at: -1, removed: 'older duplicate revision' })
+  let fresh = true, calls = 0
+  const journal = createRewriteJournal({ logs: { cache }, owner: () => owner, store: () => ({
+    async listAttributes() {
+      calls++
+      return rows.map(value => ({ sessionId, value: fresh ? JSON.parse(JSON.stringify(value)) : value }))
+    },
+  }) })
+  const work = () => cache.report().find(row => row.name === 'rewrite-wire')?.work
+  const cold = await journal.view(sessionId), reader = {}
+  assert.equal(rewriteCut(cold).feed.consume(reader).added.length, 500); assert.equal(work(), 501)
+  for (let index = 0; index < 5; index++) assert.equal(await journal.view(sessionId), cold)
+  assert.equal(calls, 6, 'each read still observes the external store without a revision promise')
+  assert.equal(work(), 501, 'fresh but unchanged rows do not parse, validate or normalize bodies again')
+  fresh = false
+  rows[0].removed = 'changed in place'
+  const changed = await journal.view(sessionId), delta = rewriteCut(changed).feed.consume(reader)
+  assert.equal(delta.added.length, 1); assert.equal(delta.removed.length, 1)
+  assert.equal(delta.added[0].removed, 'changed in place'); assert.equal(work(), 502)
+  rows = rows.slice(1)
+  const deleted = rewriteCut(await journal.view(sessionId)).feed.consume(reader)
+  assert.equal(deleted.added.length, 0); assert.deepEqual(deleted.removed.map(row => row.hash), ['external-0'])
+  assert.equal(work(), 502)
+  cache.release(owner)
+  assert.ok(cache.report().every(row => row.entries === 0), 'source rows retained by an external service do not retain Session wire entries')
+  const rebuilt = await journal.view(sessionId)
+  assert.notEqual(rewriteCut(rebuilt).feed, rewriteCut(cold).feed)
+  assert.equal(rewriteSnapshot(rebuilt).length, 499); assert.equal(work(), 1002)
+  journal.close(); cache.close()
+})
+
 test('managed rewrite failure discards partially advanced cursors and retries all selected facts', async () => {
   const cache = createSessionCache(), owner = {}, sessionId = 'one'
   let rows = [{ sessionId, hash: 'first', at: 1 }], invalid = true
