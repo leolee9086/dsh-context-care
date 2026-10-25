@@ -5,9 +5,15 @@ import type { Session, SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
 import type {} from '@deepseek-ai/dsh-session-projection'
-import { ReminderRule } from './schema.js'
 import { localWindow } from './request-context.js'
-import { quotaFor, type ClaimBookValue } from './claims.js'
+import { quotaFor, type ClaimBookValue, type SharedQuota } from './claims.js'
+
+// 只读取历史中已经使用过的额度参数，规则版本不参与恢复。
+type RecordedModel = { shared?: SharedQuota }
+type RecordedRule = { when: { timeWindow?: { start: string; end: string } } } & (
+  | { effect: { deliver: { model: RecordedModel } } }
+  | { deliver: { model: RecordedModel } }
+)
 
 const SharedFact = z.object({ key: z.string(), until: z.number().optional() })
 const OwnedMessage = z.object({ id: z.string(), source: z.object({
@@ -46,12 +52,14 @@ export function createSessionClaims(ctx: Context, now: () => number = Date.now) 
     // record the charged identity explicitly, including null for an uncharged tick.
     if (shared === undefined) {
       if (!trace) throw new Error('reminder-shared-evidence-missing')
-      const rule = ReminderRule.parse(trace.rule)
-      if (!rule.effect.deliver.model.shared) return
+      const rule = trace.rule as RecordedRule
+      const model = 'effect' in rule ? rule.effect.deliver.model : rule.deliver.model
+      if (!model.shared) return
       if (trace.evidence?.activationId && chargedActivations.has(trace.evidence.activationId)) return
       const clock = trace.evidence?.event?.clock?.at ?? trace.evidence?.clock?.at
-      const window = 'timeWindow' in rule.when ? localWindow(rule.when.timeWindow, clock) : undefined
-      shared = quotaFor({ sourceId: trace.sourceId, ruleId: trace.ruleId, rule, ...(window ? { window } : {}) })
+      const window = localWindow(rule.when.timeWindow, clock)
+      shared = quotaFor({ sourceId: trace.sourceId, ruleId: trace.ruleId,
+        rule: { effect: { deliver: { model } } }, ...(window ? { window } : {}) })
     }
     if (!shared || (shared.until !== undefined && shared.until <= now())) return
     let bucket = book.buckets.find(item => item.key === shared.key)

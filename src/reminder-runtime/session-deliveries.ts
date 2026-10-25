@@ -2,10 +2,20 @@ import { z } from 'zod'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId, Session, SessionEvent, UserMessage } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
-import { ReminderRule } from './schema.js'
 import { localWindow } from './request-context.js'
 import { readSnoozeResult, SNOOZE_TOOL } from './snooze.js'
 import { triggerKey, type HandoffRule, type OutputHandoffRule, type StateValue, type StickyStateValue } from './state.js'
+
+// 历史快照只提供当时的投递参数，不重新执行或校验规则。
+type RecordedModel = {
+  once: string
+  sticky?: Pick<StickyStateValue, 'clock' | 'cooldown'> & { lifetime: number }
+  shared?: unknown
+}
+type RecordedRule = { when: { timeWindow?: { start: string; end: string } } } & (
+  | { effect: { deliver: { model: RecordedModel } } }
+  | { deliver: { model: RecordedModel } }
+)
 
 const KIND = 'plugin:dsh-context-care:reminder'
 const record = (value: unknown): value is Record<string, unknown> =>
@@ -15,7 +25,7 @@ const Delivery = z.object({ id: z.string(), content: z.array(z.object({ type: z.
     reminder: z.object({ key: z.string(), candidateId: z.string(), sessionId: z.string().optional(), humanId: z.string().optional(),
       window: z.object({ id: z.string(), start: z.number(), end: z.number() }).optional(),
       shared: z.object({ key: z.string(), until: z.number().optional() }).nullable().optional() }),
-    contextCareTrace: z.object({ sourceId: z.string(), ruleId: z.string(), rule: ReminderRule,
+    contextCareTrace: z.object({ sourceId: z.string(), ruleId: z.string(), rule: z.unknown(),
       evidence: z.object({ activationId: z.string().optional(),
         event: z.object({ clock: z.object({ at: z.number() }).optional() }).optional() }).passthrough() }) }) })
 const Trigger = z.object({ source: z.object({ kind: z.literal(KIND),
@@ -222,13 +232,14 @@ function apply(projection: Projection, sessionId: string, event: SessionEvent) {
   if (event.seq < projection.inheritedEnd || (message.source.reminder.sessionId !== undefined
     && message.source.reminder.sessionId !== sessionId)) return
   const { reminder, contextCareTrace: trace } = message.source
-  const model = trace.rule.effect.deliver.model
+  const rule = trace.rule as RecordedRule
+  const model = 'effect' in rule ? rule.effect.deliver.model : rule.deliver.model
   if (model.once === 'window') {
     let window = reminder.window
     if (!window) {
       const at = trace.evidence.event?.clock?.at
-      if (at === undefined || !('timeWindow' in trace.rule.when)) throw new Error('reminder-delivery-window-evidence-missing')
-      window = localWindow(trace.rule.when.timeWindow, at)
+      if (at === undefined || !rule.when.timeWindow) throw new Error('reminder-delivery-window-evidence-missing')
+      window = localWindow(rule.when.timeWindow, at)
       if (!window || reminder.key !== JSON.stringify([trace.sourceId, trace.ruleId, 'model', window.id])) {
         throw new Error('reminder-delivery-window-evidence-mismatch')
       }
