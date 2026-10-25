@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { Context } from '@deepseek-ai/cordis'
-import { SessionId, deriveEventMessage, type SessionSeq } from '@deepseek-ai/dsh-session'
+import { SessionId, deriveEventMessage, type SessionSeq, type EpochHeader } from '@deepseek-ai/dsh-session'
 import { createUserMessage, createMessage } from '@deepseek-ai/dsh-llm'
 import { ensureSessionLog } from '../lib/session-log.js'
 import { createRequestCache } from '../lib/request-cache.js'
@@ -460,6 +460,60 @@ export function registerSessionLogCases(harness: Harness): void {
     assert.equal(revisited.eventAt(input.seq), input)
     assert.equal(snapshots.mock.callCount(), 0)
     assert.throws(() => logs.historical(session, session.seq + 1), /cut-invalid/)
+  })
+
+  test('shared calibration retains interleaved tool catalogs and advances only the changed settlement', async t => {
+    const ctx = await harness.open(t), logs = ensureSessionLog(ctx), session = ctx.sessions.create(SessionId('interleaved-calibration'))
+    const config = { provider: 'care-test', model: 'care-test' }
+    const header = (name: string) => ({ config, tools: [{ name, description: name, parameters: { type: 'object' as const } }] })
+    const a = header('catalog-a'), b = header('catalog-b'), missing = header('catalog-missing')
+    const append = (selected: typeof a) => {
+      session.append('request/header', { header: selected, reason: 'series' })
+      session.append('user/message', message(selected.tools[0].name), { surfaceOp: 'append' })
+      return session.append('assistant/message', { turn: 1, step: 1, stream: [], usage: { inputTokens: 8, outputTokens: 1 },
+        message: createMessage({ role: 'assistant', source: { kind: 'model', ...config }, content: [{ type: 'text', text: 'answer' }] }) }, { surfaceOp: 'append' })
+    }
+    const firstA = append(a), firstB = append(b)
+    const reads = t.mock.method(session, 'eventAt'), prepare = t.mock.method(ctx.sessions, 'prepare')
+    let measurements = 0, capabilityA = {}, capabilityB = {}
+    const options = { sessions: ctx.sessions, logs,
+      measurementDependencies: (selected: EpochHeader | undefined) => [selected?.tools?.[0]?.name === 'catalog-a' ? capabilityA : capabilityB],
+      measureInput: () => ({ textTokens: ++measurements, visualTokens: 0 }) }
+    const first = createRequestCache(options), second = createRequestCache(options)
+    t.after(async () => { await first.close(); await second.close() })
+    const workOf = (name: string) => logs.cache.report().filter(row => row.name === name).reduce((sum, row) => sum + row.work, 0)
+    const valueA = first.calibrationRecords(session, a)[0], valueB = second.calibrationRecords(session, b)[0]
+    assert.equal(valueA.data.eventSeq, firstA.seq); assert.equal(valueB.data.eventSeq, firstB.seq)
+    assert.equal(measurements, 2); assert.equal(prepare.mock.callCount(), 2)
+    const indexed = workOf('request-calibration-selection'), hashed = workOf('request-header-hash'), nativeReads = reads.mock.callCount()
+    for (let index = 0; index < 3; index++) {
+      assert.deepEqual(second.calibrationRecords(session, a)[0].data.rawInput, valueA.data.rawInput)
+      assert.deepEqual(first.calibrationRecords(session, b)[0].data.rawInput, valueB.data.rawInput)
+      assert.equal(first.calibrationRecords(session, missing)[0].data.rawInput, undefined)
+    }
+    assert.equal(measurements, 2, 'interleaving full headers cannot evict another successful measurement')
+    assert.equal(prepare.mock.callCount(), 2, 'unchanged catalog reads cannot replay historical inputs')
+    assert.equal(reads.mock.callCount(), nativeReads)
+    assert.equal(workOf('request-calibration-selection'), indexed)
+    // The first same-configuration miss may hash its own header, but never old candidates again.
+    assert.equal(workOf('request-header-hash'), hashed + 1)
+    const nextA = append(a)
+    assert.equal(first.calibrationRecords(session, a)[0].data.eventSeq, nextA.seq)
+    assert.equal(measurements, 3, 'only the newer successful A settlement needs a new input measurement')
+    assert.deepEqual(second.calibrationRecords(session, b)[0].data.rawInput, valueB.data.rawInput)
+    assert.equal(measurements, 3, 'unrelated catalog B survives the new A settlement')
+    const selection = workOf('request-calibration-selection')
+    assert.equal(selection, indexed + 1, 'only the appended eligible settlement is indexed')
+    capabilityA = {}
+    first.calibrationRecords(session, a)
+    assert.equal(measurements, 4, 'a real estimator dependency change invalidates its own header')
+    second.calibrationRecords(session, b)
+    assert.equal(measurements, 4, 'a catalog-local dependency change does not invalidate another catalog')
+    capabilityB = {}
+    second.calibrationRecords(session, b)
+    assert.equal(measurements, 5)
+    first.calibrationRecords(session, a)
+    assert.equal(measurements, 5); assert.equal(workOf('request-calibration-selection'), selection)
   })
 
   test('native Session disposal releases all managed projections and isolates a reused id', async t => {

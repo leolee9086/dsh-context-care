@@ -47,10 +47,11 @@ interface CalibrationInput {
   value?: MeasuredInput
 }
 // Calibration values stay under one Host-managed Session entry. Weak function
-// keys allow closed facades and temporary meters to be collected independently.
-const calibrationInputKey: CacheKey<Session, WeakMap<Options['measureInput'], CalibrationInput>> = {
+// keys release temporary meters. Keep only the latest sample per actual full
+// header: interleaved catalogs must not evict each other or replay old inputs.
+const calibrationInputKey: CacheKey<Session, WeakMap<Options['measureInput'], Map<string, CalibrationInput>>> = {
   name: 'request-calibration-input',
-  validity: 'Native Session identity and exact input-measurement function identity.',
+  validity: 'Native Session and measurement function identity; latest successful sample and capabilities per full header.',
   create: () => new WeakMap(),
 }
 
@@ -65,13 +66,15 @@ export function createRequestCache({ sessions, logs, measureInput, measurementDe
   const cacheKey: CacheKey<Session, SessionCache> = logs.cache.define('request-cache',
     'Native Session identity; transient diagnostic revisions advance only after accepted writes.',
     () => ({ active: new Map(), recent: new Map(), revision: 0, publicRows: new Map() }))
-  function measuredFor(session: Session, header = session.requestHeader()): CalibrationInput {
+  function measuredFor(session: Session, header: EpochHeader | undefined, key: string): CalibrationInput {
     const values = logs.cache.use(session, calibrationInputKey)
+    let headers = values.get(measureInput)
+    if (!headers) { headers = new Map(); values.set(measureInput, headers) }
     const dependencies = measurementDependencies?.(header) ?? []
-    let value = values.get(measureInput)
+    let value = headers.get(key)
     if (!value || value.dependencies?.length !== dependencies.length
       || !dependencies.every((dependency, index) => Object.is(value?.dependencies?.[index], dependency))) {
-      value = { dependencies: [...dependencies] }; values.set(measureInput, value)
+      value = { dependencies: [...dependencies] }; headers.set(key, value)
     }
     return value
   }
@@ -130,7 +133,7 @@ export function createRequestCache({ sessions, logs, measureInput, measurementDe
         && typeof raw.textTokens === 'number' && typeof raw.visualTokens === 'number') {
         // Reuse the actual hot-path measurement. Cold recovery computes the same
         // two scalars from the logged input instead of restoring a second ledger.
-        const measured = measuredFor(session)
+        const measured = measuredFor(session, session.requestHeader(), data.calibrationHeaderKey)
         measured.seq = data.eventSeq
         measured.value = { rawInput: { textTokens: raw.textTokens, visualTokens: raw.visualTokens },
           calibrationHeaderKey: data.calibrationHeaderKey }
@@ -202,7 +205,7 @@ export function createRequestCache({ sessions, logs, measureInput, measurementDe
         return latest ? [latest] : []
       }
       const expected = history.headerKey(header)
-      const measured = measuredFor(session, header)
+      const measured = measuredFor(session, header, expected)
       if (measured.seq !== sample.data.eventSeq || measured.value?.calibrationHeaderKey !== expected) {
         const replay = replayRequest(logs, session, sample)
         // Publish only after successful reconstruction and measurement. A failed
