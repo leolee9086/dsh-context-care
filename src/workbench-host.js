@@ -133,30 +133,32 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
   }
   const token = (agent, variables) => JSON.stringify([store.token(String(agent.session.id), presetId(agent), variables), generation, executors.token(), detectors.token(), controls.revision(String(agent.session.id)),
     controls.epoch(String(agent.session.id), '', ''), templates.versions()])
-  function decision(agent, event, action, expected, { delivery = false, dispatchId } = {}) {
+  function decision(agent, event, action, expected, { delivery = false, dispatchId, planning } = {}) {
     const id = String(agent.session.id)
     if (fileFailure) return { enabled: false, reason: `rule-file-load-failed: ${fileFailure.message}` }
     if (closed || !store.available(id)) return { enabled: false, reason: 'workbench-storage-unavailable' }
     if (expected !== undefined && expected !== token(agent)) return { enabled: false, reason: 'workbench-changed' }
-    const selected = controls.decision(id, event.sourceId, event.ruleId, action.id)
+    const selected = planning ? planning.select(event.sourceId, event.ruleId, action.id) : controls.decision(id, event.sourceId, event.ruleId, action.id)
     if (!selected.enabled) return selected
     const evidence = event.triggerSeq === undefined ? event.sourceSeqs : [event.triggerSeq]
     if (evidence.some(seq => seq <= controls.sinceSeq(id, event.sourceId, event.ruleId))) return { enabled: false, reason: 'historical-evidence' }
     if (!delivery) {
-      const held = record(agent).runtime.state[dispatchKey(event, action)]
+      const state = planning?.state ?? record(agent)
+      const held = state.runtime.state[dispatchKey(event, action)]
       // Only this handoff's queue admission may cross its own reservation. New
       // plans and unresolved crashes remain blocked without consuming success state.
       if (held && held.status !== 'settled' && !(held.status === 'handoff' && held.callId === dispatchId))
         return { enabled: false, reason: held.status === 'unknown' ? held.reason : 'request-dispatch-reserved' }
-      const previous = record(agent).runtime.state[actionKey(event, action)]
+      const previous = state.runtime.state[actionKey(event, action)]
       if (previous && action.dedupe.mode === 'occurrence' && previous.occurrenceId === event.occurrenceId) return { enabled: false, reason: 'duplicate-occurrence' }
-      const entry = documents(agent).find(document => event.sourceId === `context-care:document:${document.id}`)?.entries.find(entry => `entry:${entry.id}` === event.ruleId)
+      const entry = planning ? planning.entries.get(JSON.stringify([event.sourceId, event.ruleId]))
+        : documents(agent).find(document => event.sourceId === `context-care:document:${document.id}`)?.entries.find(entry => `entry:${entry.id}` === event.ruleId)
       // Entry activation intervals govern new slices; held slices are materialized on
       // every request. Ordinary rule actions retain their successful-delivery limits.
       if (!entry || action.stage !== 'request.assemble') {
         if (previous && Date.now() - previous.lastStarted < action.cooldownMs) return { enabled: false, reason: 'cooldown' }
         const lifetime = action.target?.lifetime ?? 'request'
-        if (previous && (lifetime === 'session' || lifetime === 'turn' && previous.turnId === sessionTurn(agent.session)))
+        if (previous && (lifetime === 'session' || lifetime === 'turn' && previous.turnId === (planning?.turnId ?? sessionTurn(agent.session))))
           return { enabled: false, reason: 'action-lifetime-consumed' }
       }
     }
@@ -263,7 +265,8 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
     const admissions = freshSeq === undefined ? undefined : ruleAdmissions(agent, rules, docs)
     // Ineligible historical rules cannot claim an exclusive group before a still-enabled sibling.
     const admittedRules = admissions ? rules.filter(rule => freshSeq > admissions.get(rule)) : rules
-    let enabled = admittedRules.map(rule => ({ ...rule, actions: rule.actions.filter(action => controls.enabled(id, rule.sourceId, rule.id, action.id)) })).filter(rule => rule.actions.length)
+    let enabled = controls.withDecisions(id, select => admittedRules.map(rule => ({ ...rule,
+      actions: rule.actions.filter(action => select(rule.sourceId, rule.id, action.id).enabled) })).filter(rule => rule.actions.length))
     const entries = new Map(docs.flatMap(document => document.entries.filter(entry => entry.target.view === 'model').map(entry =>
       [JSON.stringify([`context-care:document:${document.id}`, `entry:${entry.id}`, entry.revision, 'inject']), entry])))
     const policies = {}; const entryPrevious = {}; const entryTransitions = []
@@ -296,13 +299,19 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
     const detected = await matcher.detect({ rules: enabled, blocks, stage, snapshot, freshSeq }, request.signal,
       { sessionId: id, scope: request.detectorScope, epoch: captured, current: () => captured === token(agent) })
     const events = request.deltaProjection ? request.deltaProjection.unseen(detected) : detected
-    const decide = (event, action) => {
-      const selected = decision(agent, event, action, captured)
-      const policy = policies[actionKey(event, action)]
-      return selected.enabled && policy?.reason ? { enabled: false, reason: policy.reason } : selected
-    }
+    const decisionEntries = new Map(docs.flatMap(document => document.entries.map(entry =>
+      [JSON.stringify([`context-care:document:${document.id}`, `entry:${entry.id}`]), entry])))
+    // No await inside the callback: delivery always rechecks live policy separately.
+    const planPass = input => controls.withDecisions(id, select => {
+      const planning = { select, entries: decisionEntries, state: record(agent), turnId: sessionTurn(agent.session) }
+      return planRequestV2({ ...input, decision(event, action) {
+        const selected = decision(agent, event, action, captured, { planning })
+        const policy = policies[actionKey(event, action)]
+        return selected.enabled && policy?.reason ? { enabled: false, reason: policy.reason } : selected
+      } })
+    })
     const estimateMessage = message => ctx.tokenMeter.estimateMessage(message)
-    const planned = planRequestV2({ request, blocks, rules, events, templates: localTemplates, snapshot, decision: decide,
+    const planned = planPass({ request, blocks, rules, events, templates: localTemplates, snapshot,
       maxInjectedChars, maxInjectedTokens, maxCacheChangedBytes, maxRequestBytes, estimateMessage, analysis })
     if (stage === 'request.assemble') {
       const visited = new Set(events.map(event => JSON.stringify([event.sourceId, event.ruleId])))
@@ -333,7 +342,7 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
             if (policies[key].reuse) snapshot.materializations[key] = policies[key].text
           }
         }
-        const next = planRequestV2({ request: planned.request, blocks: nextBlocks, rules, events: found, templates: localTemplates, snapshot, decision: decide,
+        const next = planPass({ request: planned.request, blocks: nextBlocks, rules, events: found, templates: localTemplates, snapshot,
           maxInjectedChars: maxInjectedChars - planned.injectedChars, maxInjectedTokens: maxInjectedTokens - planned.injectionBudget.tokens,
           maxCacheChangedBytes, impactBaseline: request, maxRequestBytes, estimateMessage, analysis })
         planned.request = next.request; planned.diff.after = next.diff.after; planned.impact = next.impact; planned.injectedChars += next.injectedChars

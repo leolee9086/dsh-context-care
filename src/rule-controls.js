@@ -114,6 +114,20 @@ export function createRuleControls({ entries = [], save, boundary = () => -1, ch
   function decision(sessionId, sourceId, ruleId, actionId) {
     return decisionFor(sessionId, catalog(sessionId).find(item => item.sourceId === sourceId), ruleId, actionId)
   }
+  /** Borrow one validated catalog only inside a synchronous planning pass, never across await. */
+  function withDecisions(sessionId, run) {
+    const bySource = new Map(catalog(sessionId).map(source => [source.sourceId, source])), capturedRemoval = removed
+    let active = true
+    try {
+      const result = run((sourceId, ruleId, actionId) => {
+        if (!active) throw new Error('control-decision-batch-closed')
+        if (capturedRemoval !== removed) return decisionFor(sessionId, undefined, ruleId, actionId)
+        return decisionFor(sessionId, bySource.get(sourceId), ruleId, actionId)
+      })
+      if (result && typeof result.then === 'function') throw new Error('control-decision-batch-must-be-synchronous')
+      return result
+    } finally { active = false; bySource.clear() }
+  }
   function snapshot(sessionId) {
     const record = stored(sessionId)
     return { sessionId, revision: record.revision, storageError: failures.has(sessionId) ? 'storage-unavailable' : undefined,
@@ -165,7 +179,7 @@ export function createRuleControls({ entries = [], save, boundary = () => -1, ch
       return () => { if (sources.get(source.sourceId) === source) { sources.delete(source.sourceId); removed++; changed(source.sessionId) } }
     },
     registerProvider(provider) { if (closed) throw new ControlError(503, 'controls-closed'); providers.add(provider); changed(); return () => { providers.delete(provider); removed++; changed() } },
-    catalog, decision, snapshot, patch,
+    catalog, decision, withDecisions, snapshot, patch,
     enabled: (sessionId, sourceId, ruleId, actionId) => decision(sessionId, sourceId, ruleId, actionId).enabled,
     sinceSeq: (sessionId, sourceId, ruleId) => preference(sessionId, sourceId, ruleId)?.sinceSeq ?? -1,
     epoch: (sessionId, sourceId, ruleId) => `${removed}:${preference(sessionId, sourceId, ruleId)?.epoch ?? 0}:${failures.has(sessionId)}`,

@@ -7,7 +7,7 @@ import { createMessage, createToolResultMessage, ToolCallId, type GenerateOption
 
 interface Harness {
   open(t: test.TestContext): Promise<{ session: Session; configure(filters?: boolean | 'cascade'): Promise<void>; display(seq: number): Promise<unknown>;
-    preview(request: GenerateOptions): Promise<{ request: GenerateOptions; applied: unknown[]; records: { cascadePass?: number }[] }>; cacheNames(): string[]; projectionWork(): number;
+    preview(request: GenerateOptions): Promise<{ request: GenerateOptions; applied: unknown[]; records: { cascadePass?: number }[] }>; cacheNames(): string[]; projectionWork(): number; catalogReads(): number; recordReads(): number; pauseFilter(paused: boolean): Promise<void>;
     reconcile(): Promise<void>; http(): Promise<void>; probe(): Promise<void>; runs(): number; displayCalls(): number }>
 }
 
@@ -61,6 +61,7 @@ export function registerWorkbenchPerformanceCases(harness: Harness): void {
     }
     await fixture.configure(true)
     const before = structuredClone(request), reads = t.mock.method(session, 'eventAt')
+    const beforeCatalog = fixture.catalogReads(), beforeRecords = fixture.recordReads()
     const snapshots = t.mock.method(session, 'snapshotEvents'), fullMessages = t.mock.method(session, 'deriveMessages')
     const loop = monitorEventLoopDelay({ resolution: 10 }); loop.enable(); t.after(() => loop.disable())
     const cpuStart = process.cpuUsage(); await yieldToHost()
@@ -68,6 +69,9 @@ export function registerWorkbenchPerformanceCases(harness: Harness): void {
     const [planned, http, other] = await Promise.all([timed(() => fixture.preview(request)), timed(fixture.http), timed(fixture.probe)])
     const result = planned.value as Awaited<ReturnType<typeof fixture.preview>>
     assert.equal(result.applied.length, 500, 'both matching child occurrences retain their action records')
+    const catalogReads = fixture.catalogReads() - beforeCatalog, recordReads = fixture.recordReads() - beforeRecords
+    assert.ok(catalogReads < 20, `500 evidence records must not cause per-action catalog reads: ${catalogReads}`)
+    assert.ok(recordReads < 50, `500 evidence records must not clone per-action runtime state: ${recordReads}`)
     assert.equal(result.request.messages.length, 500, 'only the 250 complete KEEP tool pairs remain')
     assert.equal(result.request.messages.filter(message => message.role === 'tool').length, 250)
     assert.ok(result.request.messages.filter(message => message.role === 'tool').every(message => message.content.every(block => block.type === 'text' && block.text.startsWith('KEEP'))))
@@ -78,8 +82,15 @@ export function registerWorkbenchPerformanceCases(harness: Harness): void {
     assert.equal(snapshots.mock.callCount(), 0); assert.equal(fullMessages.mock.callCount(), 0)
     assert.ok(!fixture.cacheNames().some(name => name === 'request-plan-analysis' || name === 'request-plan-block-index' || name === 'request-model-projection'))
     await yieldToHost(); loop.disable(); const cpu = process.cpuUsage(cpuStart)
-    t.diagnostic(`workbench-tool-filter ${JSON.stringify({ events: session.seq, messages: request.messages.length, matchedChildren: 500, planMs: planned.ms, httpMs: http.ms, otherAgentMs: other.ms, cpuUserMs: cpu.user / 1000, cpuSystemMs: cpu.system / 1000, loopMaxMs: loop.max / 1e6, nativeReads: reads.mock.callCount() })}`)
+    t.diagnostic(`workbench-tool-filter ${JSON.stringify({ events: session.seq, messages: request.messages.length, matchedChildren: 500, catalogReads, recordReads, planMs: planned.ms, httpMs: http.ms, otherAgentMs: other.ms, cpuUserMs: cpu.user / 1000, cpuSystemMs: cpu.system / 1000, loopMaxMs: loop.max / 1e6, nativeReads: reads.mock.callCount() })}`)
     assert.ok(planned.ms < 5000 && http.ms < 1000 && other.ms < 1500 && loop.max / 1e6 < 1000)
+    await fixture.pauseFilter(true)
+    const paused = await fixture.preview(request)
+    assert.equal(paused.applied.length, 0); assert.deepEqual(paused.request, request)
+    await fixture.pauseFilter(false)
+    const resumed = await fixture.preview(request)
+    assert.equal(resumed.applied.length, 500); assert.deepEqual(resumed.request, result.request)
+    assert.equal(reads.mock.callCount(), beforeWarm, 'new policy batches reuse native reads but never stale action controls')
   })
 
   test('long workbench history shares reads and keeps authenticated HTTP and another Agent responsive', { timeout: 120000 }, async t => {

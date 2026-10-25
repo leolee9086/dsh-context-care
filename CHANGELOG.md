@@ -1,5 +1,14 @@
 # 更新记录
 
+## v0.14.8
+
+**2026-10-26：按实测热点清除逐证据控制目录及运行状态重建。**
+
+- 第37轮先对既有500配对工具/1000请求消息/500命中真实Host用例CPU采样。原规划约920ms、loop551ms；包含两次预览的sample堆栈显示decision约857ms、controls catalog约630ms，workbench sources约229ms，未把包含时间相加或把loader/GC算成业务优化收益。最大已测重复为每动作catalog验证/来源重建与record深copy，未按此前猜测先改Worker传输。
+- 控制withDecisions只在单个同步callback内捕获一次validated目录、按source查找，保留原偏好/依赖/available/storage检查；finally释放且禁止callback逃逸，异步返回拒绝，批内来源移除立即拒绝。没有跨await/跨请求控制缓存或业务账本。工作台每个planPass读取一次运行状态并共享条目索引；每次matcher await后建立新batch，投递仍独立live复查，token/历史水位/去重/冷却/生命周期逻辑不变。
+- 新增2个批次生命周期单元；真实500证据原生回归新增catalog3次/record14次断言，并保留500动作/250成对删除/独立结果/不变native读取，额外pause/resume后下一预览立即生效。定向27单元与6实质Host过；新采样plan456.48ms、HTTP105.61ms/另一Agent116.19ms、loop99.81ms，采样工作量增加了暂停/恢复阶段，不编精确CPU加速比。
+- 最终release:check通过（strict/104JS/62事件目录、508/508单元18317.96ms、Host+Client构建），完整源码Host216/216（242629.37ms）、Client3文件24/24（3.91s）。审查修正每pass从统一Session入口读取当前turn，旧混合源码任务明确取消不计最终，最终从release全部重跑。桌面ASAR隔离22/22实质、0skip、stderr空、exit0（19318.99ms），工具规划320.08ms/loop80.61ms，catalog3/record14/暂停恢复生效。独立包最终结果见诊断验收和持久记录。首次消息正文投影、owned-request copy、完整byte比较/Worker输入仍有成本，不据单用例变快宣称整体完成；未修改Harness、Worker预算或取消，未代装启用重启，旧tag保持。
+
 ## v0.14.7
 
 **2026-10-26：级联规划复用不可变消息正文，只读取实际需要的历史视图。**

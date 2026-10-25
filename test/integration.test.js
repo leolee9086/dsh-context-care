@@ -713,9 +713,14 @@ registerWorkbenchPerformanceCases({ async open(t) {
   const agent = await ctx.agentLoop.create('workbench-performance', { provider: 'care-test', model: 'care-test' })
   const displayCalls = t.mock.method(service, 'display')
   const projectionCalls = t.mock.method(ensureSessionLog(ctx).cache, 'worked')
+  const recordReads = t.mock.method(service.store, 'read')
+  let catalogReads = 0
+  t.after(ctx.contextCareControls.registerProvider(id => { if (id === agent.id) catalogReads++; return [] }))
   const { base, cookie } = await controlCookie(ctx)
   ctx.llm.registerAdapter(['care-test'], new CompletionAdapter([{ blocks: [{ type: 'text', text: 'Independent workbench probe completed.' }] }]))
-  return { session: agent.session,
+  return { session: agent.session, catalogReads: () => catalogReads, recordReads: () => recordReads.mock.calls.filter(call => call.arguments[0] === agent.id).length,
+    pauseFilter: paused => ctx.contextCareControls.patch(agent.id, { revision: ctx.contextCareControls.revision(agent.id),
+      sourceId: 'context-care:document:workbench-performance', ruleId: 'filter-pairs', paused }).then(() => undefined),
     preview: request => service.preview(agent, request), cacheNames: () => ensureSessionLog(ctx).cache.report().map(row => row.name),
     projectionWork: () => projectionCalls.mock.calls.filter(call => call.arguments[0].name === 'request-model-projection')
       .reduce((sum, call) => sum + (call.arguments[1] ?? 1), 0),
