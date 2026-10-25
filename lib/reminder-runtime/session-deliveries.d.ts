@@ -17,11 +17,6 @@ export interface DeliveryState {
 export declare function createSessionDeliveries(ctx: Context, now?: () => number): {
     /** Newly created sessions can maintain this projection without a history read. */
     created(session: Session): void;
-    /** Reuse the trigger discovery read; a live prefix may already be ahead of it. */
-    observeLog(sessionId: string, log: {
-        events: readonly SessionEvent[];
-        inheritedEventCount?: number;
-    }): void;
     /** Read accepted inputs, including quota-blocked claims no longer in the inbox. */
     queued(sessionId: string): UserMessage[];
     observe(session: Session, event: SessionEvent): void;
@@ -29,8 +24,6 @@ export declare function createSessionDeliveries(ctx: Context, now?: () => number
     currentHumanTurn(sessionId: string): string | undefined;
     /** Native handoff evidence survives cancellation, compaction and an empty runtime cache. */
     wasHanded(sessionId: string, eventId: string, rule?: HandoffRule, fromSeq?: number): Promise<boolean>;
-    /** One cold read serves every sample in the caller's ordered recovery scan. */
-    handoffs(sessionId: string): Promise<(eventId: string, rule?: HandoffRule) => boolean>;
     /** Last local human arrival; a delayed commit does not create a new interrupt budget. */
     humanTurn(sessionId: string): Promise<string>;
     read(sessionId: string, currentHumanId: string, fromSeq?: number): Promise<DeliveryState>;

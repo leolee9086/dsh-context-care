@@ -118,12 +118,15 @@ export function installNoticeRules(ctx, { plugin, onHit = () => {}, rulesFor, hi
     const collected = []
     const hits = []
     const evidence = log => {
-      const events = log ? log.select(['user/message']) : agent.session?.snapshotEvents?.() ?? []
-      return { userEvent: message.id === undefined ? undefined : events.findLast(event => event.type === 'user/message' && event.data.id === message.id),
-        assistantEvent: log ? log.last('assistant/message') : events.findLast(event => event.type === 'assistant/message') }
+      // The candidate belongs to this active turn; do not search/replay older turns for evidence.
+      const turn = log.last('turn/start')
+      const events = log.select(['user/message'], turn?.seq ?? agent.session.inheritedEventCount)
+      return { userEvent: message.id === undefined ? undefined : events.findLast(event => event.data.id === message.id),
+        assistantEvent: log.last('assistant/message') }
     }
-    const { userEvent, assistantEvent } = history && agent.session ? history.withLive(agent.session, evidence) : evidence(undefined)
-    runEvidence = { inputMessageId: message.id, userText: text, facts, userSeq: userEvent?.seq, assistantSeq: assistantEvent?.seq, sourceSeqs: [userEvent?.seq, assistantEvent?.seq].filter(seq => seq !== undefined) }
+    const { userEvent, assistantEvent } = history.withLive(agent.session, evidence)
+    runEvidence = { inputMessageId: message.id, userText: text, facts, userSeq: userEvent?.seq, assistantSeq: assistantEvent?.seq,
+      sourceSeqs: [userEvent?.seq, assistantEvent?.seq].filter(seq => seq !== undefined) }
     hitSink = hits
     sink = collected
     try {
@@ -132,8 +135,8 @@ export function installNoticeRules(ctx, { plugin, onHit = () => {}, rulesFor, hi
         surface: { placement: 'user', text },
         ctx: {
           userText: text,
-          assistantText: lastAssistantText(agent.session),
-          toolCalls: recentToolCalls(agent.session),
+          assistantText: lastAssistantText(agent.session, history),
+          toolCalls: recentToolCalls(agent.session, history),
           now: Date.now(),
           // 事实值放到最后展开：它们只有算得出来的那一侧（本插件的 pre-step）知道，
           // 而引擎不认识这些指标名 —— 它只按 key 取值比较。约定好的键写在本插件的文档里。

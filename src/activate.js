@@ -5,6 +5,7 @@ import { calculateState, renderState, resolveConfig } from './policy.js'
 import { createUserMessage } from './message.js'
 import { producedBy, producerKind } from './producer-source.js'
 import { CARE_SOURCE, controlledState } from './control-catalog.js'
+import { ensureSessionLog } from '../lib/session-log.js'
 
 export const name = 'dsh-context-care-activate'
 export const inject = ['agents', 'agentPresets', 'tools']
@@ -31,7 +32,7 @@ export async function apply(ctx, config) {
           const config = envelope?.config
           const info = config?.provider && config.model ? await scoped.llm.resolveModelInfo(config.provider, config.model, signal) : null
           signal.throwIfAborted()
-          const pricing = captureInputPricing({ meter: scoped.tokenMeter, llm: scoped.llm, session: owner.session, header: envelope,
+          const pricing = captureInputPricing({ history: ensureSessionLog(scoped), meter: scoped.tokenMeter, llm: scoped.llm, session: owner.session, header: envelope,
             requests: scoped.get('contextCareRequests') })
           const measurement = pricing.measure()
           const incoming = pricing.priceMessages(decision.messages.filter(message => !isState(message)))
@@ -48,7 +49,7 @@ export async function apply(ctx, config) {
 
           const rendered = controls ? controlledState(state, outcome,
             (ruleId, actionId) => controls.enabled(String(owner.session.id), CARE_SOURCE, ruleId, actionId), requested) : renderState(state)
-          const prior = previousState(owner.session)
+          const prior = previousState(owner.session, ensureSessionLog(scoped))
           const notificationText = controls ? rendered : existingText ?? rendered
 
           if (!requested && (!rendered || !shouldNotify(prior, notificationText, state))) {

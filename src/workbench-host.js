@@ -28,16 +28,15 @@ const dispatchItems = planned => [...new Map([...planned.applied, ...(planned.en
  * @param {import('zod').input<typeof import('./request-host.js').Config>} options */
 export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executors: configuredExecutors = [], maxCascadePasses = 4, maxInjectedChars = 65536, maxInjectedTokens = 65536, maxCacheChangedBytes, maxRequestBytes = 8388608, maxQueued = 128, maxConcurrent = 8, maxDeltaChars = 32768, maxDeltaBlocks = 16, matcher: matcherOptions = {}, requiredStages = [] } = {}) {
   const history = ensureSessionLog(ctx)
-  const displayHistoryKey = {}, windows = new WeakMap()
-  const windowFor = (session, kind) => {
-    let owned = windows.get(session)
-    if (!owned) { owned = { display: createWorkbenchWindow(), output: createWorkbenchWindow() }; windows.set(session, owned) }
-    return owned[kind]
-  }
+  const displayHistoryKey = {}
+  const windowsKey = history.cache.define('workbench-windows',
+    'Native Session identity; each source tracks its append cursor and replacement generation.',
+    () => ({ display: createWorkbenchWindow(), output: createWorkbenchWindow() }))
+  const windowFor = (session, kind) => history.cache.use(session, windowsKey)[kind]
   const sessionTurn = session => history.withLive(session, log => readSessionTurn(session, log))
   const entryTurn = session => history.withLive(session, log => readEntryTurn(session, log))
-  const originalSessionBlocks = session => history.withLive(session, log => readOriginalBlocks(session, log, history))
-  const modelRequestBlocks = (session, request, requestId) => history.withLive(session, log => readModelBlocks(session, request, requestId, log, history))
+  const originalSessionBlocks = session => readOriginalBlocks(session, history)
+  const modelRequestBlocks = (session, request, requestId) => readModelBlocks(String(session.id), request, requestId, history.origins(session), sessionTurn(session))
   const report = error => ctx.logger.warn(`context-care: workbench failed: ${String(error)}`)
   const templates = createTemplates()
   const registrations = new Map(); const observations = new Map(); const admittedSessions = new Map(); let generation = 0; let closed = false; let closing
@@ -229,7 +228,10 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
     })
     report(error)
   }
-  async function plan(agent, request, stage, suppliedBlocks, freshSeq, analysis = createRequestPlanCache(requestImpact)) {
+  /** @param {ReturnType<typeof createRequestPlanCache<import('@deepseek-ai/dsh-llm').GenerateOptions, ReturnType<typeof requestImpact>>>} [analysis] */
+  async function plan(agent, request, stage, suppliedBlocks, freshSeq, analysis) {
+    const ownedAnalysis = analysis === undefined
+    analysis ??= createRequestPlanCache(requestImpact, history.cache)
     try { return await evaluatePlan(agent, request, stage, suppliedBlocks, freshSeq, analysis) }
     catch (error) {
       if (!(error instanceof MatcherFailure) || request.signal?.aborted) throw error
@@ -243,7 +245,7 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
       return { ...unchanged, matchStatus: 'failed', failure: error.diagnostic,
         records: failedRules.map(rule => ({ sourceId: rule.sourceId, ruleId: rule.ruleId, status: 'skipped', assessment: 'failed', reason: error.message })),
         token: token(agent), stage, turnId: sessionTurn(agent.session), documents: [], entryTransitions: [], entryPolicies: {}, entryPrevious: {} }
-    }
+    } finally { if (ownedAnalysis) analysis.close() }
   }
   async function evaluatePlan(agent, request, stage, suppliedBlocks, freshSeq, analysis) {
     const captured = token(agent); const docs = documents(agent); const localTemplates = renderTemplates(agent)
@@ -630,22 +632,24 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
         if (!fresh.length) return
         const all = originalSessionBlocks(agent.session)
         let request = { messages: history.messages(agent.session), purpose: 'preview', signal }
-        const analysis = createRequestPlanCache(requestImpact)
-        const indexed = { length: all.length, at: index => all[index], slice: (from, end) => all.slice(from, end) }
-        const generation = agent.session.surface.replaceGeneration
-        for (const event of fresh) {
-          // Query the declared history window, not a new full-prefix copy per output.
-          const stage = event.type === 'tool/result' ? 'tool.result' : 'output.complete'
-          const selected = windowFor(agent.session, 'output')(indexed, rules.filter(rule => rule.on.includes(stage)), event.seq, generation)
-          const messages = history.messages(agent.session)
-          if (messages !== request.messages) request = { ...request, messages }
-          const planned = await plan(agent, request, stage, selected, event.seq, analysis)
-          await jobs.enqueue(id, planned.scheduled, planned.token)
-          await store.runtime(id, runtime => {
-            // This is an attempted watermark. A failed assessment is explicitly retained as failed.
-            runtime.state['$observed'] = { seq: event.seq, assessment: planned.matchStatus === 'failed' ? 'failed' : 'completed' }
-          })
-        }
+        const analysis = createRequestPlanCache(requestImpact, history.cache)
+        try {
+          const indexed = { length: all.length, at: index => all[index], slice: (from, end) => all.slice(from, end) }
+          const generation = agent.session.surface.replaceGeneration
+          for (const event of fresh) {
+            // Query the declared history window, not a new full-prefix copy per output.
+            const stage = event.type === 'tool/result' ? 'tool.result' : 'output.complete'
+            const selected = windowFor(agent.session, 'output')(indexed, rules.filter(rule => rule.on.includes(stage)), event.seq, generation)
+            const messages = history.messages(agent.session)
+            if (messages !== request.messages) request = { ...request, messages }
+            const planned = await plan(agent, request, stage, selected, event.seq, analysis)
+            await jobs.enqueue(id, planned.scheduled, planned.token)
+            await store.runtime(id, runtime => {
+              // This is an attempted watermark. A failed assessment is explicitly retained as failed.
+              runtime.state['$observed'] = { seq: event.seq, assessment: planned.matchStatus === 'failed' ? 'failed' : 'completed' }
+            })
+          }
+        } finally { analysis.close() }
       })()
       observations.set(id, operation)
       try { await operation } finally { observations.delete(id) }
@@ -687,6 +691,7 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
       closed = true
       closing = releaseResources([['workbench-file-load', () => fileLoad], ['workbench-created-listener', disposeCreated], ['workbench-provider', disposeProvider], ['workbench-jobs', () => jobs.close()],
         ['workbench-matcher', () => matcher.close()], ...[...observations.values()].map((operation, index) => [`workbench-observation:${index}`, () => operation]),
+        ['workbench-windows', () => history.cache.clear(windowsKey)],
         ['workbench-executors', () => executors.close()], ['workbench-store', () => store.close()]])
       return closing
     },

@@ -3,6 +3,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Session, SessionEvent, EpochHeader } from '@deepseek-ai/dsh-session'
 import type { AssistantStreamRecord } from '@deepseek-ai/dsh-llm'
 import { requestDecision } from './request-replay.js'
+import type { SessionLog } from './session-log.js'
+import type { CacheKey } from './session-cache.js'
 
 interface Route { provider: string; model: string }
 interface Candidate { label: string; line: string }
@@ -41,6 +43,7 @@ interface Projection {
   prompt?: Receipt
 }
 interface Options {
+  logs: SessionLog
   sessions: Pick<Context['sessions'], 'get' | 'list' | 'flush'>
   cooldownMs: number
   maxObservedChars: number
@@ -68,8 +71,14 @@ function sameRoute(left: Route, right: Route) {
  * @returns the completion request contribution and disposable projection owner.
  */
 export function createSessionCompletions(options: Options) {
-  let states = new WeakMap<Session, Projection>()
+  const stateKey: CacheKey<Session, Projection> = options.logs.cache.define('completion-projection',
+    'Native Session identity and completion-control since-seq; only committed relevant events advance the projection.',
+    (_session, [since]) => {
+      if (typeof since !== 'number') throw new Error('context-care: completion projection requires since-seq')
+      return { through: 0 as Session['seq'], since, notices: new Map(), receipts: new Map() }
+    })
   const reservations = new Map<string, { sessionId: string; keys: Set<string> }>()
+  const stateOf = (session: Session) => options.logs.cache.use(session, stateKey, [options.since(session)])
 
   function apply(state: Projection, session: Session, event: SessionEvent) {
     if (event.type === 'request/header') state.header = event.data.header
@@ -117,15 +126,19 @@ export function createSessionCompletions(options: Options) {
   }
 
   function read(session: Session): Projection {
-    const since = options.since(session)
-    let state = states.get(session)
-    if (!state || state.since !== since) {
-      state = { through: 0 as Session['seq'], since, notices: new Map(), receipts: new Map() }
-      states.set(session, state)
+    const state = stateOf(session)
+    using log = options.logs.live(session)
+    try {
+      for (const event of log.select(['request/header', 'step/start', 'assistant/message', 'assistant/attempt'], state.through)) {
+        apply(state, session, event)
+        state.through = (event.seq + 1) as Session['seq']
+      }
+      state.through = log.length as Session['seq']
+      return state
+    } catch (error) {
+      options.logs.cache.invalidate(session, stateKey)
+      throw error
     }
-    for (const event of session.snapshotEvents(state.through)) apply(state, session, event)
-    state.through = session.seq
-    return state
   }
 
   function notices(session: Session): Map<string, CompletionNotice> {
@@ -178,7 +191,7 @@ export function createSessionCompletions(options: Options) {
       return selected(sessionId).filter(options.active).flatMap(session => [...notices(session).values()])
     },
     /** Release derived state; the next request reconstructs it from the same events. */
-    clear() { states = new WeakMap(); reservations.clear() },
-    close() { states = new WeakMap(); reservations.clear() },
+    clear() { options.logs.cache.clear(stateKey); reservations.clear() },
+    close() { options.logs.cache.clear(stateKey); reservations.clear() },
   }
 }

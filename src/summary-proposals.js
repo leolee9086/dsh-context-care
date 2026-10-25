@@ -10,14 +10,14 @@ import { producedUnder } from './producer-source.js'
  * @param compact summary executor
  * @returns proposal execution returning null for an unchanged useless proposal
  */
-export function createProposalExecutor(requests, compact) {
+export function createProposalExecutor(requests, compact, history) {
   return async function execute(service, proposal, agent, signal, operation, spec, reason) {
     const session = agent.session
     const seqs = proposal.sourceSeqs.filter(seq => {
-      const event = session.eventAt(seq)
+      const event = history.withLive(session, log => log.at(seq))
       return !(event.type === 'user/message' && producedUnder(event.data.source, 'dsh-context-care:'))
     })
-    const messages = seqs.map(seq => session.deriveEventMessage(session.eventAt(seq)))
+    const messages = seqs.map(seq => history.messageAt(session, seq))
     const key = createHash('sha256').update(JSON.stringify({ sources: seqs, messages,
       prices: messages.map(message => operation.priceMessages([message])), header: operation.pricingBasis.header,
       summary: spec.summary ?? service.config, prompts: spec.modelScopedPrompts })).digest('hex')

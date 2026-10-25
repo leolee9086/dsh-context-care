@@ -47,24 +47,11 @@ import { describeHit, detectDegradation } from './loop-patterns.js'
  * @param {object} session 当前会话
  * @returns {string|undefined} 最近的助手文本；没有助手消息时返回 undefined
  */
-function latestAssistantText(session, afterSeq = -1) {
-  const nodes = session?.surface?.nodes
-  if (!Array.isArray(nodes)) return undefined
-  for (let index = nodes.length - 1; index >= 0; index--) {
-    const event = session.eventAt(nodes[index])
-    if (event?.type !== 'assistant/message') continue
-    if (event.seq <= afterSeq) return undefined
-    const content = event.data?.message?.content
-    if (!Array.isArray(content)) return undefined
-    const parts = []
-    for (const block of content) {
-      if (typeof block?.text === 'string' && (block.type === 'reasoning' || block.type === 'text')) {
-        parts.push(block.text)
-      }
-    }
-    return parts.join('\n')
-  }
-  return undefined
+function latestAssistantText(session, afterSeq, history) {
+  const event = history.lastSurface(session, 'assistant/message')
+  if (!event || event.seq <= afterSeq) return undefined
+  return history.messageAt(session, event.seq).content
+    .filter(block => block.type === 'reasoning' || block.type === 'text').map(block => block.text).join('\n')
 }
 
 /**
@@ -76,8 +63,8 @@ function latestAssistantText(session, afterSeq = -1) {
  * @param {object} session 当前会话
  * @returns {object|undefined} 命中信息（形状见 loop-patterns.js）；没命中返回 undefined
  */
-export function detectLoop(session, only, afterSeq = -1) {
-  const text = latestAssistantText(session, afterSeq)
+export function detectLoop(session, only, afterSeq = -1, history) {
+  const text = latestAssistantText(session, afterSeq, history)
   if (text === undefined) return undefined
   return detectDegradation(text, only)
 }
@@ -110,16 +97,9 @@ export function loopNeedsReminder(hit, cleanupActive) {
  * @param {string} plugin 提醒消息的生产者名
  * @returns {boolean} 最近一条 user 消息已经是本插件发的提醒时为 true
  */
-export function alreadyWarned(session, plugin) {
-  const nodes = session?.surface?.nodes
-  if (!Array.isArray(nodes)) return false
-  for (let index = nodes.length - 1; index >= 0; index--) {
-    const event = session.eventAt(nodes[index])
-    if (event?.type !== 'user/message') continue
-    // 只看最后一条 user 消息：中间隔着别的消息就说明情况变了，该重新提醒。
-    return producedBy(event.data?.source, plugin)
-  }
-  return false
+export function alreadyWarned(session, plugin, history) {
+  const event = history.lastSurface(session, 'user/message')
+  return event !== undefined && producedBy(history.messageAt(session, event.seq)?.source, plugin)
 }
 
 /**

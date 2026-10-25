@@ -10,7 +10,7 @@ interface InterruptOptions<Agent> {
   sessionId: (agent: Agent) => string
   prepareHumanTurn?: (agent: Agent) => Promise<void>
   humanTurn: (agent: Agent) => string | undefined
-  visible: (agent: Agent) => MessageView[]
+  visible: (agent: Agent) => readonly MessageView[]
   isCurrent: (agent: Agent, output: OutputEvidence) => boolean
   cancel: (agent: Agent) => void
   steer: (agent: Agent, message: ReminderMessage) => void

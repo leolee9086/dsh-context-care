@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
 import { SessionStore, SessionId } from '@deepseek-ai/dsh-session'
+import { createSessionLog } from '../lib/session-log.js'
 import { createMessage } from '@deepseek-ai/dsh-llm'
 import { openOutputFeedback } from '../src/output-feedback.js'
 import { resolveScopedPrompts } from '../src/scoped-prompts.js'
@@ -17,12 +18,13 @@ const rules = resolveScopedPrompts([rule()])
 async function fixture(t, configured = rules, seed) {
   const ctx = new Context(), sessions = new SessionStore(ctx)
   const session = sessions.create(SessionId('s1'), seed ? { seed: seed.events, meta: seed.header } : undefined)
+  const logs = createSessionLog(ctx)
   let feedback
   const open = async () => {
-    feedback = await openOutputFeedback({ sessions, rulesFor: () => configured, eligible: () => true, revision: () => 0 })
+    feedback = await openOutputFeedback({ sessions, logs, rulesFor: () => configured, eligible: () => true, revision: () => 0 })
     return feedback
   }
-  t.after(async () => { await feedback?.close(); await ctx.fiber.dispose() })
+  t.after(async () => { await feedback?.close(); logs.close(); await ctx.fiber.dispose() })
   await open()
   let step = 0
   function request(segments = [], callId = `test-call-${step}`, receiving = route, outcome = 'completed', text = 'Actual verified work continues.') {

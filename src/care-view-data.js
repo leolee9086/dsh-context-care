@@ -1,6 +1,7 @@
 // @ts-check
-import { contextCareActions } from './action-view-data.js'
-import { contextCarePrompts } from './prompt-view-data.js'
+import { createActionIndex, actionEventTypes } from './action-view-data.js'
+import { createPromptIndex, promptEventTypes } from './prompt-view-data.js'
+import { createDiagnosticPages } from '../lib/diagnostic-pages.js'
 import { runtimePage } from './rule-runtime-data.js'
 import { visibleReminderControls } from '../lib/reminder-runtime/control-view.js'
 import { ensureSessionLog } from '../lib/session-log.js'
@@ -26,11 +27,24 @@ export function careStatus(ctx, sessionId) {
   }
 }
 
+/** One owner for HTTP reads and push subscriptions; no process-global cache.
+ * @param {import('@deepseek-ai/cordis').Context} ctx */
+export function createCarePages(ctx) {
+  const history = ensureSessionLog(ctx)
+  const actions = createDiagnosticPages(history, actionEventTypes, createActionIndex)
+  const prompts = createDiagnosticPages(history, promptEventTypes, createPromptIndex)
+  ctx.effect(() => () => { actions.close(); prompts.close() })
+  /** @param {import('@deepseek-ai/dsh-session').Session} session
+   * @param {'actions' | 'prompts'} topic
+   * @param {{ offset: number, limit: number, seq?: number }} query */
+  return (session, topic, query) => (topic === 'actions' ? actions : prompts)(session, ctx.contextCareRequests.view(String(session.id)), query)
+}
+
 /** Build the subscribed page from committed owner state, without performing HTTP reads.
  * @param {import('@deepseek-ai/cordis').Context} ctx
  * @param {{ list(filter: { sessionId: string }): Promise<object[]> }} journal
  * @returns {(query: import('./care-stream.js').CareSubscriptionValue, signal: AbortSignal) => Promise<unknown>} */
-export function createCareViewReader(ctx, journal) {
+export function createCareViewReader(ctx, journal, pages = createCarePages(ctx)) {
   return async (query, signal) => {
     signal.throwIfAborted()
     const { sessionId, topic, offset, seq } = query
@@ -53,23 +67,15 @@ export function createCareViewReader(ctx, journal) {
       }
       case 'actions':
       case 'prompts': {
-        const records = ctx.contextCareRequests.list(sessionId)
-        const { actions, items } = ensureSessionLog(ctx).withLive(session, log => {
-          const actions = topic === 'actions' ? contextCareActions(records, session, log) : undefined
-          return { actions, items: actions?.actions ?? contextCarePrompts(records, session, log) }
-        })
-        const index = seq === undefined ? -1 : items.findIndex(item => item.seq === seq)
-        const pageOffset = index < 0 ? offset : Math.floor(index / 20) * 20
-        const page = items.slice(pageOffset, pageOffset + 20)
+        const { items, admission, ...pagination } = pages(session, topic, { offset, seq, limit: 20 })
         const runtime = topic === 'actions' ? ctx.get('contextCareWorkbench')?.store.read(sessionId)?.runtime : undefined
         const matchingFailures = (runtime?.runs ?? []).flatMap(run => {
           if (run === null || typeof run !== 'object' || Array.isArray(run) || (run.kind !== 'matching' && run.kind !== 'display')) return []
           return [{ id: run.id, kind: run.kind, status: run.status, reason: run.reason, count: run.count,
             updatedAt: run.updatedAt, sourceSeqs: run.sourceSeqs, diagnostic: run.result }]
         })
-        return { ...(topic === 'actions' ? { ...careStatus(ctx, sessionId), admission: actions?.admission, matchingFailures } : {}),
-          [topic]: page, total: items.length, offset: pageOffset, selectedFound: seq === undefined ? undefined : index >= 0,
-          nextOffset: pageOffset + page.length < items.length ? pageOffset + page.length : null }
+        return { ...(topic === 'actions' ? { ...careStatus(ctx, sessionId), admission, matchingFailures } : {}),
+          [topic]: items, ...pagination }
       }
     }
   }

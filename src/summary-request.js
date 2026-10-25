@@ -49,42 +49,45 @@ export function summaryConfig(service, agent, explicit) {
 }
 
 /** Construct the same envelope used both by planning and the prepared dispatch. */
-export function buildSummaryRequest(session, seqs, config, signal) {
-  const head = session.eventAt(session.surface.nodes[0])
-  const system = head?.type === 'system/message' ? session.deriveEventMessage(head) : null
-  const messages = seqs.map(seq => session.deriveEventMessage(session.eventAt(seq))).filter(Boolean)
+export function buildSummaryRequest(session, seqs, config, signal, history) {
+  const head = history.messageAt(session, session.surface.nodes[0])
+  const system = head?.role === 'system' ? head : null
+  const messages = seqs.map(seq => history.messageAt(session, seq)).filter(Boolean)
   return { ...config, messages: [...(system === null ? [] : [system]), ...messages,
     { role: 'user', content: [{ type: 'text', text: SUMMARY_INSTRUCTION }], source: { kind: 'plugin:dsh-context-care:summary-instruction', contextCareTrace: { sourceSeqs: [...seqs] } } }],
-    tools: session.requestHeader()?.tools, toolHistory: session.toolHistory(), sessionId: session.id, purpose: 'compaction', signal }
+    tools: session.requestHeader()?.tools, toolHistory: history.tools(session), sessionId: session.id, purpose: 'compaction', signal }
 }
 
-/** Balanced prefix candidates in descending size, with a fresh-material minimum. */
-export function summaryCandidates(session, range, measurement, minFreshTokens, pluginName) {
+/** Balanced prefix metadata in descending size; sequence arrays are materialized only when selected. */
+export function summaryRanges(session, range, measurement, minFreshTokens, pluginName, log) {
   const surface = session.surface.nodes
   const from = surface.indexOf(range.start)
   const end = surface.indexOf(range.end)
-  if (from < 0 || end < from || session.eventAt(range.start)?.type === 'system/message') throw new Error('context-care: invalid summary range')
+  if (from < 0 || end < from || log.at(range.start)?.type === 'system/message') throw new Error('context-care: invalid summary range')
   const tokens = new Map(measurement.nodes.map(node => [node.seq, node.tokens]))
-  let pending = 0
-  let fresh = 0
+  let pending = 0, freshTokens = 0, rangeCost = 0, checkpoints = 0, onlyCheckpoints = true
   const candidates = []
   for (let index = from; index <= end; index++) {
-    const event = session.eventAt(surface[index])
+    const event = log.at(surface[index])
     if (event.type === 'assistant/message') pending += event.data.message.content.filter(block => block.type === 'tool-call').length
     if (event.type === 'tool/result') pending--
     if (pending < 0) throw new Error('context-care: summary range begins inside a tool batch')
-    const status = event.type === 'user/message' && (isCheckpointSource(event.data.source) || producedUnder(event.data.source, `${pluginName}:`))
-    if (!status && event.type !== 'system/message') fresh += tokens.get(event.seq)
-    if (pending === 0 && fresh >= minFreshTokens) candidates.push(surface.slice(from, index + 1))
+    rangeCost += tokens.get(event.seq)
+    if (event.type === 'user/message' && isCheckpointSource(event.data.source)) checkpoints++
+    else if (event.type !== 'system/message' && !(event.type === 'user/message' && producedUnder(event.data.source, `${pluginName}:`))) {
+      freshTokens += tokens.get(event.seq); onlyCheckpoints = false
+    }
+    if (pending === 0 && freshTokens >= minFreshTokens) candidates.push({ start: surface[from], end: surface[index],
+      from, to: index + 1, freshTokens, rangeCost, checkpoints, onlyCheckpoints })
   }
   if (pending !== 0) throw new Error('context-care: summary range ends inside a tool batch')
   return candidates.reverse()
 }
 
 /** Capture auxiliary pricing and allowances once for the prepared summary route. */
-export function summaryPricing({ meter, llm, session, prepared, spec, requests }) {
+export function summaryPricing({ meter, llm, session, prepared, spec, requests, history }) {
   const header = { config: prepared.config, tools: session.requestHeader()?.tools, adapterDefaults: prepared.adapterDefaults }
-  const pricing = captureInputPricing({ meter, llm, session, header, requests })
+  const pricing = captureInputPricing({ meter, llm, session, header, requests, history })
   const policy = budgetPolicy(spec, prepared.config, 'compaction')
   return { pricing, budgetFor: request => contextBudget({ inputTokens: pricing.priceRequest(requests?.preview(session, request).request ?? request),
     physicalCapacity: prepared.context?.contextWindow, policyCapacity: policy.contextBudgetTokens,

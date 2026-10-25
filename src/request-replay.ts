@@ -1,6 +1,6 @@
 import { z } from 'zod'
-import type { Context } from '@deepseek-ai/cordis'
-import type { Session, SessionEvent, SessionLogOffset } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+import type { SessionLog } from './session-log.js'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import type { SessionRequestRecord } from './request-history.js'
 
@@ -31,29 +31,19 @@ export function requestDecision(event: SessionEvent) {
 /**
  * Reconstruct one settled conversation's input using the native Session surface
  * projection. Only calibration misses need this; no provider or judge is called.
- * @param sessions - the existing detached-session constructor.
+ * @param logs - the Host-owned native log and historical projection service.
  * @param session - the original event log.
  * @param record - the settlement to price.
  * @returns the historical input, including committed request-only changes.
  */
-export function replayRequest(sessions: Pick<Context['sessions'], 'prepare'>, session: Session, record: SessionRequestRecord) {
-  const prefix = [...session.snapshotEvents(undefined, record.data.eventSeq as number as SessionLogOffset)]
-  const restored = sessions.prepare(undefined, { seed: prefix })
-  const header = restored.requestHeader()
+export function replayRequest(logs: SessionLog, session: Session, record: SessionRequestRecord) {
+  const restored = logs.historical(session, record.data.eventSeq)
+  const header = record.data.sourceHeader
   if (!header) throw new Error('context-care: settled request has no logged header')
-  let prompt: z.infer<typeof Prompt> | undefined
-  let workbench: z.infer<typeof Workbench> | undefined
-  // Request-only inputs apply to one attempt, not every later request that reuses its header.
-  for (let index = prefix.length - 1; index >= 0; index--) {
-    const event = prefix[index]
-    if (event.type === 'assistant/message' || event.type === 'assistant/attempt'
-      || event.type === 'step/start' || event.type === 'compaction/summary') break
-    const decision = requestDecision(event)
-    prompt ??= decision?.prompt
-    workbench ??= decision?.workbench
-  }
-  const request: GenerateOptions = { ...header.config, sessionId: session.id, toolHistory: restored.toolHistory(),
-    messages: workbench?.diff.after.messages ?? restored.deriveMessages(),
+  // The shared settlement fold already binds changes to exactly this attempt.
+  const prompt = record.data.promptDecision, workbench = record.data.workbenchDecision
+  const request: GenerateOptions = { ...header.config, sessionId: session.id, toolHistory: logs.tools(restored),
+    messages: workbench?.diff.after.messages ?? [...logs.messages(restored)],
     ...(header.tools === undefined ? {} : { tools: header.tools }),
     ...(workbench?.diff.after.system === undefined ? {} : { system: workbench.diff.after.system }) }
   if (prompt?.message && !workbench) {

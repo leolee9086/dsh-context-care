@@ -20,6 +20,7 @@ import { resolveConfig } from '../src/policy.js'
 import { contextCarePrompts } from '../src/prompt-view-data.js'
 import { contextCareActions } from '../src/action-view-data.js'
 import { openRequestJournal } from '../src/request-journal.js'
+import { ensureSessionLog } from '../lib/session-log.js'
 import { createClientChanges } from '../lib/client-changes.js'
 import { createActionRecords } from '../src/action-records.js'
 import { createRewriteRecords } from '../src/rewrite-records.js'
@@ -32,6 +33,8 @@ import { registerDenialLifetimeHostCases } from './reminder-denial-lifetime-host
 import { registerSiyuanWindowHostCases } from './reminder-siyuan-window-host-cases.ts'
 import { registerHistoryPerformanceCases } from './reminder-history-performance-host-cases.ts'
 import { registerSessionLogCases } from './session-log-host-cases.ts'
+import { registerDiagnosticPageCases } from './diagnostic-pages-host-cases.ts'
+import { registerDiagnosticPerformanceCases } from './diagnostic-performance-host-cases.ts'
 import { registerWorkbenchPerformanceCases } from './workbench-performance-host-cases.ts'
 import { preV4State } from './fixtures/reminder-upgrade.ts'
 import { registerScopeHostCases } from './reminder-scope-host-cases.ts'
@@ -618,6 +621,31 @@ registerDenialLifetimeHostCases({ async open(t, ruleTimeoutMs) {
     await completionTurn(ctx, agent)
     return agent.session.snapshotEvents()
   } }
+} })
+
+registerDiagnosticPageCases({ async open(t) { const owned = await fixture(t, false); return owned.open() } })
+
+registerDiagnosticPerformanceCases({ async open(t) {
+  const owned = await fixture(t, false), ctx = await owned.open(), { base, cookie } = await controlCookie(ctx)
+  const session = ctx.sessions.create('long-diagnostic-pages')
+  ctx.llm.registerAdapter(['care-test'], new CompletionAdapter([{ blocks: [{ type: 'text', text: 'Independent page probe completed.' }] }]))
+  return { ctx, session,
+    page: async (offset, seq) => {
+      const query = new URLSearchParams({ sessionId: session.id, limit: '20', offset: String(offset), ...(seq === undefined ? {} : { seq: String(seq) }) })
+      const response = await fetch(`${base}/context-care/prompts?${query}`, { headers: { cookie } })
+      assert.equal(response.status, 200); return response.json()
+    },
+    http: async () => {
+      const response = await fetch(`${base}/context-care/rules?sessionId=${session.id}`, { headers: { cookie } })
+      assert.equal(response.status, 200); await response.json()
+    },
+    probe: async () => {
+      const other = await ctx.agentLoop.create('pages-other-agent', { provider: 'care-test', model: 'care-test' })
+      await completionTurn(ctx, other, 'Answer independently of diagnostic pagination.')
+      assert.ok(other.session.deriveMessages().some(message => message.role === 'assistant'
+        && message.content.some(block => block.type === 'text' && block.text === 'Independent page probe completed.')))
+    },
+  }
 } })
 
 registerSessionLogCases({ async open(t) {
@@ -1242,7 +1270,8 @@ test('request observation preserves native cancellation and prepares only model 
 test('operation prices keep captured calibration and image projection across adapter and usage changes', async t => {
   const owned = await fixture(t)
   const ctx = await owned.open()
-  const firstPricing = { priceImages: images => images.map(() => ({ visualTokens: 100, text: 'Captured image handle' })) }
+  let imagePrices = 0
+  const firstPricing = { priceImages: images => { imagePrices++; return images.map(() => ({ visualTokens: 100, text: 'Captured image handle' })) } }
   const nextPricing = { priceImages: images => images.map(() => ({ visualTokens: 1000, text: 'New image handle'.repeat(50) })) }
   class PricingAdapter extends ScriptedAdapter {
     pricing = firstPricing
@@ -1258,12 +1287,22 @@ test('operation prices keep captured calibration and image projection across ada
     { type: 'file', attachment: { attachmentId: 'sha256:abcdef12', name: 'records.txt', bytes: 100 } },
   ] })
   session.append('user/message', message, { surfaceOp: 'append' })
-  const rawPricing = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session, header })
+  const estimates = t.mock.method(ctx.tokenMeter, 'estimateMessage'), fileReads = t.mock.method(ctx.llm, 'fileRequestText')
+  const derives = t.mock.method(session, 'deriveEventMessage')
+  const rawPricing = captureInputPricing({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, session, header })
+  assert.equal(estimates.mock.callCount(), 1, 'capture only estimates role framing, not all retained messages')
+  assert.equal(imagePrices, 0, 'file prewarm must not invoke provider image pricing')
+  assert.equal(fileReads.mock.callCount(), 1)
+  const projected = derives.mock.callCount()
+  captureInputPricing({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, session, header })
+  assert.equal(derives.mock.callCount(), projected, 'another operation borrows the unchanged file attachment projection')
+  assert.equal(estimates.mock.callCount(), 2); assert.equal(imagePrices, 0)
+  assert.equal(fileReads.mock.callCount(), 2, 'path-dependent file text is frozen separately at each operation')
   const raw = rawPricing.priceRequest({ messages: [message], tools: header.tools })
   const calibrationRecords = []
   const calibration = { calibration: (_session, selectedHeader, basis) => journalCalibration(calibrationRecords, selectedHeader, basis) }
   function usageCall(inputTokens, step) {
-    const rawInput = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session, header }).decomposeRequest({ messages: session.deriveMessages(), tools: header.tools })
+    const rawInput = captureInputPricing({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, session, header }).decomposeRequest({ messages: session.deriveMessages(), tools: header.tools })
     calibrationRecords.push({ kind: 'request', data: { purpose: 'conversation', dispatched: true, outcome: 'completed',
       eventType: 'assistant/message', eventSeq: session.seq, rawInput, usage: { inputTokens }, calibrationHeaderKey: calibrationHeaderKey(header) } })
     session.append('step/start', { turn: 1, step })
@@ -1274,7 +1313,7 @@ test('operation prices keep captured calibration and image projection across ada
     session.append('step/end', { turn: 1, step })
   }
   usageCall((raw - 200) * 3 + 200, 1)
-  const pricing = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session, requests: calibration })
+  const pricing = captureInputPricing({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, session, requests: calibration })
   assert.equal(pricing.pricingBasis.textScale, 3)
   assert.equal(pricing.measure().inputTokens, pricing.priceRequest({ messages: session.deriveMessages(), tools: header.tools }))
   const request = { messages: [message], tools: header.tools, system: 'One-shot system' }
@@ -1283,14 +1322,14 @@ test('operation prices keep captured calibration and image projection across ada
   assert.equal(before, parts.textTokens * 3 + parts.visualTokens)
   adapter.pricing = nextPricing
   usageCall(50000, 2)
-  const repriced = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session, requests: calibration })
+  const repriced = captureInputPricing({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, session, requests: calibration })
   assert.notEqual(repriced.pricingBasis.textScale, 3)
   assert.notEqual(repriced.priceRequest(request), before)
   assert.equal(pricing.priceRequest(request), before)
   assert.equal(pricing.measure().pricingBasis, pricing.pricingBasis)
   assert.equal(pricing.measure().logRevision, session.seq)
   // Dispatch can explicitly bind absence, even if the route currently declares images.
-  const absent = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session, imageRequestPricing: undefined })
+  const absent = captureInputPricing({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, session, imageRequestPricing: undefined })
   const imageOnly = createUserMessage({ source: { kind: 'user' }, content: [image] })
   assert.equal(absent.priceMessages([imageOnly]), ctx.tokenMeter.estimateMessage(imageOnly) * absent.pricingBasis.textScale)
 })
@@ -1352,14 +1391,14 @@ test('natural rest merges two old checkpoints, records recursive coverage and pr
   ctx.llm.registerAdapter(['care-test'], adapter)
   const agent = await ctx.agentLoop.create('checkpoint-merge', { provider: 'care-test', model: 'care-test' })
   await completionTurn(ctx, agent, 'Original requirement: finish report. '.repeat(400))
-  const compact = createSummaryExecutor({ meter: ctx.tokenMeter, llm: ctx.llm, requests: ctx.contextCareRequests, spec: resolveConfig() })
+  const compact = createSummaryExecutor({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, requests: ctx.contextCareRequests, spec: resolveConfig() })
   let sources = agent.session.surface.nodes.slice(1)
   await compact(ctx.compaction, { start: sources[0], end: sources.at(-1) }, agent, new AbortController().signal,
-    captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session }))
+    captureInputPricing({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session }))
   const correction = agent.session.append('user/message', createUserMessage({ source: { kind: 'user' },
     content: [{ type: 'text', text: 'Correction: exclude the obsolete conclusion. Pending job: verify D:/dev/work.md. '.repeat(400) }] }), { surfaceOp: 'append' })
   await compact(ctx.compaction, { start: correction.seq, end: correction.seq }, agent, new AbortController().signal,
-    captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session }))
+    captureInputPricing({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session }))
   const parents = agent.session.surface.nodes.slice(1)
   const tail = agent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Recent retained work. '.repeat(500) }] }), { surfaceOp: 'append' })
   await ctx.tools.get('context_rest', agent).execute({ note: 'Continue from the two verified checkpoints.'.padEnd(1200, '…') }, { agent, signal: new AbortController().signal })
@@ -1391,20 +1430,20 @@ test('summary planner fits the complete auxiliary request and preserves a balanc
     source: { kind: 'user' }, content: [{ type: 'text', text: `Work unit ${index}. `.repeat(800) }],
   }), { surfaceOp: 'append' })
   const selected = agent.session.surface.nodes.slice(1, -1)
-  const pricing = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session })
+  const pricing = captureInputPricing({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session })
   const proposed = { provider: 'care-summary', model: 'small', maxTokens: 128 }
   // Enough space for exactly the shorter prefix, including the system, schemas
   // and directive. The full selected prefix is deliberately larger.
   const shorter = selected.slice(0, -1)
-  const summaryPrice = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session,
+  const summaryPrice = captureInputPricing({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session,
     header: { config: proposed, tools: agent.session.requestHeader().tools } })
-  const capacity = Math.ceil(summaryPrice.priceRequest(ctx.contextCareRequests.preview(agent.session, buildSummaryRequest(agent.session, shorter, proposed, new AbortController().signal)).request)) + 128
+  const capacity = Math.ceil(summaryPrice.priceRequest(ctx.contextCareRequests.preview(agent.session, buildSummaryRequest(agent.session, shorter, proposed, new AbortController().signal, ensureSessionLog(ctx))).request)) + 128
   class SmallAdapter extends ScriptedAdapter {
     async resolveModel(provider, model) { return { provider, id: model, name: model, context: { contextWindow: capacity } } }
   }
   const small = new SmallAdapter()
   ctx.llm.registerAdapter(['care-summary'], small)
-  const compact = createSummaryExecutor({ meter: ctx.tokenMeter, llm: ctx.llm, requests: ctx.contextCareRequests,
+  const compact = createSummaryExecutor({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, requests: ctx.contextCareRequests,
     spec: resolveConfig({ summary: proposed, minFreshTokens: 100 }) })
   const tail = agent.session.surface.nodes.at(-1)
   const result = await compact(ctx.compaction, { start: selected[0], end: selected.at(-1) }, agent, new AbortController().signal, pricing)
@@ -1431,12 +1470,12 @@ test('a custom summary provider is rechecked after its audit acknowledgement', a
   await completionTurn(ctx, agent, 'Verified prefix. '.repeat(100))
   let active = true
   let called = false
-  const compact = createSummaryExecutor({ meter: ctx.tokenMeter, llm: ctx.llm,
+  const compact = createSummaryExecutor({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm,
     requests: { ...ctx.contextCareRequests, async recordAction(...args) {
       await ctx.contextCareRequests.recordAction(...args)
       active = false
     } }, spec: resolveConfig({}), eligible: () => active })
-  const pricing = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session })
+  const pricing = captureInputPricing({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session })
   const seqs = agent.session.surface.nodes
   await assert.rejects(compact({ compactRegion() { called = true } }, { start: seqs[0], end: seqs.at(-1) }, agent,
     new AbortController().signal, pricing), { code: 'CONTROL_DISABLED' })
@@ -1463,10 +1502,10 @@ test('summary overflow shrinks its candidate once and a changed surface closes w
   }
   const summary = new RetryAdapter()
   const offSummary = ctx.llm.registerAdapter(['care-summary'], summary)
-  const compact = createSummaryExecutor({ meter: ctx.tokenMeter, llm: ctx.llm, requests: ctx.contextCareRequests,
+  const compact = createSummaryExecutor({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, requests: ctx.contextCareRequests,
     spec: resolveConfig({ summary: { provider: 'care-summary', model: 'summary', maxTokens: 100, maxRetries: 1 } }) })
   let seqs = agent.session.surface.nodes.slice(1, -1)
-  let pricing = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session })
+  let pricing = captureInputPricing({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session })
   const result = await compact(ctx.compaction, { start: seqs[0], end: seqs.at(-1) }, agent, new AbortController().signal, pricing)
   assert.equal(summary.requests.length, 2)
   assert.ok(summary.requests[1].messages.length < summary.requests[0].messages.length)
@@ -1483,7 +1522,7 @@ test('summary overflow shrinks its candidate once and a changed surface closes w
   offSummary()
   ctx.llm.registerAdapter(['care-summary'], new MutatingAdapter())
   seqs = agent.session.surface.nodes.slice(1, -1)
-  pricing = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session })
+  pricing = captureInputPricing({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session })
   const replacements = agent.session.snapshotEvents().filter(event => event.surfaceOp?.op === 'replace').length
   await assert.rejects(compact(ctx.compaction, { start: seqs[0], end: seqs.at(-1) }, agent, new AbortController().signal, pricing), { code: 'SUMMARY_SURFACE_CHANGED' })
   assert.equal(agent.session.snapshotEvents().filter(event => event.surfaceOp?.op === 'replace').length, replacements)
@@ -1534,11 +1573,11 @@ test('summary repair rebases replaced endpoints, preserves the original failure 
       settle: mode === 'settlement-fails' ? async () => { throw new Error('Settlement audit failed') } : ctx.contextCareRequests.settle,
       recordAction: async (session, data) => { if (mode === 'repair-audit-fails' && data.phase === 'repaired') throw new Error('Repair audit failed'); return ctx.contextCareRequests.recordAction(session, data) },
     }
-    const compact = createSummaryExecutor({ meter: ctx.tokenMeter, llm: ctx.llm, requests,
+    const compact = createSummaryExecutor({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, requests,
       spec: resolveConfig({ minFreshTokens: 100, summary: { provider: 'repair-summary', model: 'summary', maxTokens: 100, maxRetries: 0 },
         ...(mode === 'repair-cap' ? { maxSummaryRepairRetries: 0 } : {}), ...(mode === 'call-cap' ? { maxSummaryCallsPerAction: 1 } : {}) }),
       recover: payload => ctx.waterfall('compaction/summary-error', payload, () => false) })
-    const pricing = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session })
+    const pricing = captureInputPricing({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session })
     const run = () => compact(ctx.compaction, { start: first, end: last }, agent, new AbortController().signal, pricing)
     if (mode === 'endpoint') {
       const result = await run()
@@ -1574,17 +1613,17 @@ test('summary uses calibrated replacement cost and retains history when the fram
   } }] })
   agent.session.append('user/message', image, { surfaceOp: 'append' })
   const header = { config: { provider: 'care-vision', model: 'vision' } }
-  const raw = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session, header }).priceMessages([image])
+  const raw = captureInputPricing({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session, header }).priceMessages([image])
   agent.session.append('step/start', { turn: 1, step: 1 })
   agent.session.append('request/header', { header, reason: 'initial' })
   agent.session.append('assistant/message', { turn: 1, step: 1, stream: [], usage: { inputTokens: (raw - 300) * 4 + 300, outputTokens: 1 },
     message: createMessage({ role: 'assistant', source: { kind: 'model', provider: 'care-vision', model: 'vision' }, content: [{ type: 'text', text: 'Recent tail' }] }),
   }, { surfaceOp: 'append' })
   agent.session.append('step/end', { turn: 1, step: 1 })
-  const rawInput = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session, header }).decomposeRequest({ messages: [image] })
+  const rawInput = captureInputPricing({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session, header }).decomposeRequest({ messages: [image] })
   const calibrationRecords = [{ kind: 'request', data: { purpose: 'conversation', dispatched: true, outcome: 'completed',
     eventType: 'assistant/message', eventSeq: agent.session.seq - 2, rawInput, usage: { inputTokens: (raw - 300) * 4 + 300 }, calibrationHeaderKey: calibrationHeaderKey(header) } }]
-  const pricing = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session,
+  const pricing = captureInputPricing({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session,
     requests: { calibration: (_session, selectedHeader, basis) => journalCalibration(calibrationRecords, selectedHeader, basis) } })
   assert.equal(pricing.pricingBasis.textScale, 4)
   class LongSummary extends ScriptedAdapter {
@@ -1598,7 +1637,7 @@ test('summary uses calibrated replacement cost and retains history when the fram
   const replacement = createUserMessage({ source: { kind: 'plugin:checkpoint' }, content: frameSummary([{ type: 'text', text: 'Structured checkpoint.'.repeat(15) }]) })
   assert.ok(ctx.tokenMeter.estimateMessage(replacement) < pricing.priceMessages([image]), 'Fixed replacement heuristic would falsely pass')
   assert.ok(pricing.priceMessages([replacement]) >= pricing.priceMessages([image]))
-  const compact = createSummaryExecutor({ meter: ctx.tokenMeter, llm: ctx.llm, requests: ctx.contextCareRequests,
+  const compact = createSummaryExecutor({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, requests: ctx.contextCareRequests,
     spec: resolveConfig({ summary: { provider: 'care-summary', model: 'summary', maxTokens: 1000 }, minFreshTokens: 1 }) })
   const seq = agent.session.surface.nodes[0]
   await assert.rejects(compact(ctx.compaction, { start: seq, end: seq }, agent, new AbortController().signal, pricing), { code: 'SUMMARY_NOT_SMALLER' })
@@ -1624,16 +1663,16 @@ test('native rejected summary survives empty caches and native JSONL in a fresh 
   const material = agent.session.append('user/message', createUserMessage({ source: { kind: 'user' },
     content: [{ type: 'text', text: 'Keep this verified task.' }] }), { surfaceOp: 'append' })
   const spec = resolveConfig({ summary: { provider: 'care-summary', model: 'summary', maxTokens: 1000 }, minFreshTokens: 1 })
-  const operation = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session })
+  const operation = captureInputPricing({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session })
   const proposal = { start: material.seq, end: material.seq, sourceSeqs: [material.seq], rule: 'fresh-summary', comparisons: [] }
   const service = { config: {} }, signal = new AbortController().signal
-  const compact = createSummaryExecutor({ meter: ctx.tokenMeter, llm: ctx.llm, requests: ctx.contextCareRequests, spec })
-  const execute = createProposalExecutor(ctx.contextCareRequests, compact)
+  const compact = createSummaryExecutor({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, requests: ctx.contextCareRequests, spec })
+  const execute = createProposalExecutor(ctx.contextCareRequests, compact, ensureSessionLog(ctx))
   await assert.rejects(execute(service, proposal, agent, signal, operation, spec, 'requested'), { code: 'SUMMARY_NOT_SMALLER' })
   assert.equal(await execute(service, proposal, agent, signal, operation, spec, 'requested'), null)
   assert.equal(summaryCalls, 1)
   let rerun = false
-  const reconfigured = createProposalExecutor(ctx.contextCareRequests, async () => { rerun = true; return 'summary policy changed' })
+  const reconfigured = createProposalExecutor(ctx.contextCareRequests, async () => { rerun = true; return 'summary policy changed' }, ensureSessionLog(ctx))
   const changed = resolveConfig({ summary: { provider: 'care-summary', model: 'summary', maxTokens: 2000 }, minFreshTokens: 1 })
   assert.equal(await reconfigured(service, proposal, agent, signal, operation, changed, 'requested'), 'summary policy changed')
   assert.equal(rerun, true)
@@ -1658,11 +1697,11 @@ test('native rejected summary survives empty caches and native JSONL in a fresh 
   const doc = await cold.sessionQuery.readSession(agent.id)
   const detached = cold.sessions.prepare(agent.id, { seed: doc.events, meta: doc.session,
     inheritedEventCount: doc.inheritedEventCount, eventState: 'detached' })
-  const after = captureInputPricing({ meter: cold.tokenMeter, llm: cold.llm, session: detached })
+  const after = captureInputPricing({ history: ensureSessionLog(cold), meter: cold.tokenMeter, llm: cold.llm, session: detached })
   assert.equal(cold.contextCareRequests.list(agent.id).length, 0, 'no action side records are available to decide rejection')
   const coldExecute = createProposalExecutor(cold.contextCareRequests, async () => {
     throw new Error('a rejected proposal must not call the summary executor again')
-  })
+  }, ensureSessionLog(cold))
   assert.equal(await coldExecute(service, proposal, { session: detached }, signal, after, spec, 'requested'), null)
   assert.equal(cold.sessions.list().length, 0)
   assert.equal(cold.agents.list().length, 0)
@@ -2015,7 +2054,7 @@ for (const outcome of ['completed', 'failed', 'cancelled', 'legacy', 'partial'])
   const { cold, doc, detached, readCount } = await openNative(seed)
   const replayed = []
   for (const event of doc.events) if (event.type === 'assistant/message' || event.type === 'assistant/attempt') {
-    replayed.push(...replayNativeOutput(config, detached, event, error => { throw error }))
+    replayed.push(...ensureSessionLog(cold).withLive(detached, log => [...replayNativeOutput(config, detached, log, event, error => { throw error })]))
   }
   if (outcome === 'legacy') {
     const legacyId = initialLive[0].rootCallId, nativeId = replayed[0].rootCallId
@@ -2030,7 +2069,7 @@ for (const outcome of ['completed', 'failed', 'cancelled', 'legacy', 'partial'])
   const input = { sessionId: String(header.id), visible: [] }
   const submitOutput = async target => {
     for (const terminal of doc.events) if (terminal.type === 'assistant/message' || terminal.type === 'assistant/attempt') {
-      for (const event of replayNativeOutput(config, detached, terminal, error => { throw error })) {
+      for (const event of ensureSessionLog(cold).withLive(detached, log => [...replayNativeOutput(config, detached, log, terminal, error => { throw error })])) {
         await target.get('reminderRules').submit({ ...event, native: { type: 'assistant-output', seq: terminal.seq } })
       }
     }
@@ -2163,7 +2202,7 @@ test('complete-input calibration shrinks once and does not repeat maintenance ov
     async resolveModel(provider, model) { return { provider, id: model, name: model, context: { contextWindow: 262144 } } }
     async *stream(options) {
       this.requests.push(options)
-      const raw = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session, header: { config: options, tools: options.tools } }).decomposeRequest(options)
+      const raw = captureInputPricing({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session, header: { config: options, tools: options.tools } }).decomposeRequest(options)
       const text = options.purpose === 'compaction' ? 'Verified progress, corrections and pending paths. '.repeat(240) : 'Continue verified work.'
       yield { type: 'block-end', index: 0, block: { type: 'text', text } }
       yield { type: 'usage', usage: { inputTokens: raw.textTokens * (250000 / 49000) + raw.visualTokens, outputTokens: 8192 } }
@@ -2188,7 +2227,7 @@ test('complete-input calibration shrinks once and does not repeat maintenance ov
   const requests = () => ctx.contextCareRequests.list(agent.session.id).filter(record => record.kind === 'request' && record.data.purpose === 'conversation')
   assert.ok(Math.abs(requests().at(-1).data.pricingBasis.textScale - 250000 / 49000) < 1e-9)
   assert.ok(requests().at(-1).data.budget.inputTokens < 201523)
-  const frozen = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session, requests: ctx.contextCareRequests })
+  const frozen = captureInputPricing({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session, requests: ctx.contextCareRequests })
   const before = frozen.measure().inputTokens
   for (let index = 0; index < 10; index++) agent.session.append('request/header', { header: agent.session.requestHeader(), reason: 'series' })
   assert.equal(frozen.measure().inputTokens, before, 'Log-only records add no phantom input')
@@ -2394,12 +2433,12 @@ test('real deep rest commits one handoff, fixed shadow prices, and replayable co
   assert.equal(deepActions[0].journalPersisted, false, 'live prices are cache diagnostics, not a durable side audit')
   assert.ok(deepActions[0].replacements.some(item => item.newSeq === replacement.seq))
   const restored = Session.create('care-deep-replay', events, undefined, undefined, ctx.sessions.messageProjections)
-  const replayedAction = contextCareActions([], restored).actions.find(action => action.action === 'deep-rest')
+  const replayedAction = ensureSessionLog(ctx).withLive(restored, log => contextCareActions([], restored, log)).actions.find(action => action.action === 'deep-rest')
   assert.equal(replayedAction.auditStatus, 'session-only')
   assert.equal(replayedAction.journalPersisted, false)
   assert.ok(replayedAction.replacements.some(item => item.newSeq === replacement.seq))
-  const { logRevision: restoredRevision, ...restoredInput } = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: restored }).measure()
-  const { logRevision: liveRevision, ...liveInput } = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session }).measure()
+  const { logRevision: restoredRevision, ...restoredInput } = captureInputPricing({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, session: restored }).measure()
+  const { logRevision: liveRevision, ...liveInput } = captureInputPricing({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session }).measure()
   // Session.create owns an additional constructor-seed event, with no input cost.
   assert.equal(restoredRevision, liveRevision + 1)
   assert.deepEqual(restoredInput, liveInput)
@@ -2416,7 +2455,7 @@ test('real request cache rebuilds route and calibration from Session without req
     async resolveModel(provider, model) { return { provider, id: model, name: model, context: { contextWindow: 100000 } } }
     async *stream(request) {
       requests.push(request)
-      const raw = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session }).decomposeRequest(request)
+      const raw = captureInputPricing({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session }).decomposeRequest(request)
       yield { type: 'block-end', index: 0, block: { type: 'text', text: 'Continue verified work.' } }
       yield { type: 'usage', usage: { inputTokens: raw.textTokens * 2 + raw.visualTokens } }
       yield { type: 'finish', reason: { kind: 'stop' } }
@@ -2428,7 +2467,7 @@ test('real request cache rebuilds route and calibration from Session without req
   await completionTurn(ctx, agent, 'Use the actual session facts.')
   await ctx.contextCareRequests.flush(agent.id)
   assert.equal(requests.length, 1)
-  const initial = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session, requests: ctx.contextCareRequests }).pricingBasis
+  const initial = captureInputPricing({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session, requests: ctx.contextCareRequests }).pricingBasis
   assert.equal(initial.textScale, 2, 'one-shot text must be included in the recovered denominator')
   const facts = ctx.contextCareRequests.list(agent.id).filter(record => record.kind === 'request')
     .map(({ data }) => ({ callId: data.callId, route: data.route, outcome: data.outcome, eventSeq: data.eventSeq, usage: data.usage }))
@@ -2440,7 +2479,7 @@ test('real request cache rebuilds route and calibration from Session without req
   ctx = await fresh.open()
   ctx.llm.registerAdapter(['care-test'], new ReplayAdapter())
   agent = (await ctx.agents.create({ sessionId: 'request-session-replay', seed, agentOptions: options })).agent
-  const restored = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session, requests: ctx.contextCareRequests }).pricingBasis
+  const restored = captureInputPricing({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session, requests: ctx.contextCareRequests }).pricingBasis
   assert.equal(restored.textScale, initial.textScale)
   assert.equal(restored.sampleSeq, initial.sampleSeq)
   assert.deepEqual(ctx.contextCareRequests.list(agent.id).filter(record => record.kind === 'request')
@@ -2482,9 +2521,9 @@ test('real request settlements and summary actions recover from the actual Sessi
   const facts = rows => rows.filter(record => record.kind === 'request').map(({ data }) => ({
     outcome: data.outcome, eventSeq: data.eventSeq, eventType: data.eventType, purpose: data.purpose, route: data.route, usage: data.usage }))
   const expected = facts(records)
-  const actions = contextCareActions([], agent.session)
+  const actions = ensureSessionLog(ctx).withLive(agent.session, log => contextCareActions([], agent.session, log))
   assert.ok(actions.actions.length > 0, 'the actual Session carries committed checkpoint actions')
-  assert.ok(contextCareActions(records, agent.session).actions.every(action => !action.journalPersisted),
+  assert.ok(ensureSessionLog(ctx).withLive(agent.session, log => contextCareActions(records, agent.session, log)).actions.every(action => !action.journalPersisted),
     'live diagnostics must not claim a separate persisted audit')
   const seed = agent.session.snapshotEvents()
   await owned.close(ctx)
@@ -2493,7 +2532,7 @@ test('real request settlements and summary actions recover from the actual Sessi
   const restored = (await ctx.agents.create({ sessionId: agent.id, seed,
     agentOptions: { provider: 'care-test', model: 'care-test' } })).agent
   assert.deepEqual(facts(ctx.contextCareRequests.list(restored.id)), expected)
-  assert.deepEqual(contextCareActions([], restored.session), actions)
+  assert.deepEqual(ensureSessionLog(ctx).withLive(restored.session, log => contextCareActions([], restored.session, log)), actions)
 })
 
 test('exact model-switch prompts are request-only, logged, priced and absent from another summary route', async t => {
@@ -2533,8 +2572,8 @@ test('exact model-switch prompts are request-only, logged, priced and absent fro
   assert.equal(decisions.length, 2)
   assert.ok(decisions.every(event => event.surfaceOp === undefined))
   assert.ok(agent.session.deriveMessages().every(message => !hasReminder({ messages: [message] }).length))
-  const operation = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session })
-  const compact = createSummaryExecutor({ meter: ctx.tokenMeter, llm: ctx.llm, requests: ctx.contextCareRequests,
+  const operation = captureInputPricing({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session })
+  const compact = createSummaryExecutor({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, requests: ctx.contextCareRequests,
     spec: resolveConfig({ summary: { provider: 'care-other', model: 'care-other', maxTokens: 128 }, minFreshTokens: 100 }) })
   const selected = agent.session.surface.nodes.slice(1, -1)
   await compact(ctx.compaction, { start: selected[0], end: selected.at(-1) }, agent, new AbortController().signal, operation)
@@ -2567,7 +2606,7 @@ test('actual request calibration includes a large one-shot reminder and does not
   class CalibratedAdapter extends ScriptedAdapter {
     async *stream(options) {
       this.requests.push(options)
-      const raw = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session }).decomposeRequest(options)
+      const raw = captureInputPricing({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session }).decomposeRequest(options)
       yield { type: 'block-end', index: 0, block: { type: 'text', text: '继续实际工作。' } }
       yield { type: 'usage', usage: { inputTokens: raw.textTokens * 2 + raw.visualTokens } }
       yield { type: 'finish', reason: { kind: 'stop' } }
@@ -2586,7 +2625,7 @@ test('actual request calibration includes a large one-shot reminder and does not
   assert.equal(records[1].data.pricingBasis.textScale, 2)
   assert.equal(records[1].data.pricingBasis.sampleCallId, records[0].data.callId)
   assert.equal(records[1].data.budget.inputTokens, Math.ceil(records[1].data.rawInput.textTokens * 2 + records[1].data.rawInput.visualTokens))
-  const pricing = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session })
+  const pricing = captureInputPricing({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session })
   const raw = adapter.requests.map(request => pricing.decomposeRequest(request))
   assert.ok(raw[0].textTokens > raw[1].textTokens, 'the actual one-shot request is larger')
   assert.equal(records[1].data.budget.inputTokens, Math.ceil(raw[1].textTokens * 2 + raw[1].visualTokens))
@@ -2890,7 +2929,7 @@ test('real prompt evidence replays from Session with an empty request journal', 
   const log = agent.session.snapshotEvents()
   const notice = log.find(event => event.type === 'user/message' && event.data.source.contextCareTrace?.evaluation)
   assert.ok(notice, 'the real rule engine must deliver its evaluation in the message')
-  const expected = contextCarePrompts([], agent.session).find(prompt => prompt.seq === notice.seq)
+  const expected = ensureSessionLog(ctx).withLive(agent.session, log => contextCarePrompts([], agent.session, log)).find(prompt => prompt.seq === notice.seq)
   assert.equal(expected.evaluations.length, 1)
   assert.deepEqual(expected.evaluations[0].facts, notice.data.source.contextCareTrace.evaluation.facts)
   await owned.close(ctx)
@@ -2904,7 +2943,7 @@ test('real prompt evidence replays from Session with an empty request journal', 
   const reconstructed = reopened.contextCareRequests.list(agent.id)
   assert.equal(reconstructed.filter(record => record.kind === 'maintenance').length, 0)
   assert.ok(reconstructed.some(record => record.kind === 'request'), 'the request query now reads committed Session facts')
-  const actual = contextCarePrompts(reconstructed, restored.session).find(prompt => prompt.seq === notice.seq)
+  const actual = ensureSessionLog(reopened).withLive(restored.session, log => contextCarePrompts(reconstructed, restored.session, log)).find(prompt => prompt.seq === notice.seq)
   assert.deepEqual(actual, expected)
 })
 
@@ -3005,7 +3044,7 @@ test('long Session diagnostic queries keep unrelated HTTP responsive and push on
     session.append('assistant/message', { turn: index + 1, step: 1, stream: [], usage: { inputTokens: 100, outputTokens: 1 },
       message: createMessage({ role: 'assistant', source: { kind: 'model', ...config }, content: [{ type: 'text', text: 'Recorded answer.' }] }) }, { surfaceOp: 'append' })
   }
-  const journal = await openRequestJournal({ sessions: ctx.sessions, measureInput: () => ({ textTokens: 50, visualTokens: 0 }) })
+  const journal = await openRequestJournal({ sessions: ctx.sessions, logs: ensureSessionLog(ctx), measureInput: () => ({ textTokens: 50, visualTokens: 0 }) })
   t.after(() => journal.close())
   const measured = (run, count = 1) => { const start = performance.now(); for (let index = 0; index < count; index++) run(); return performance.now() - start }
   const cpuStart = process.cpuUsage(); const wallStart = performance.now()
@@ -3069,7 +3108,7 @@ test('Workbench v2 edits request copies, renders strict entry templates, logs th
     requests = []
     async *stream(request) {
       this.requests.push(request)
-      const raw = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session }).decomposeRequest(request)
+      const raw = captureInputPricing({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session }).decomposeRequest(request)
       for await (const chunk of super.stream(request)) {
         if (chunk.type === 'usage') continue
         if (chunk.type === 'finish') yield { type: 'usage', usage: { inputTokens: raw.textTokens * 2 + raw.visualTokens } }
@@ -3105,10 +3144,10 @@ test('Workbench v2 edits request copies, renders strict entry templates, logs th
   assert.equal(audit.data.contextCareWorkbench.impact.cacheHitTokens, null)
   assert.equal(ctx.contextCareControls.snapshot(agent.id).sources.find(source => source.sourceId === 'context-care:document:editable').rules.length, 2)
   const seq = agent.session.seq
-  const cold = await openRequestJournal({ sessions: ctx.sessions,
-    measureInput: (session, request) => captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session }).decomposeRequest(request) })
+  const cold = await openRequestJournal({ sessions: ctx.sessions, logs: ensureSessionLog(ctx),
+    measureInput: (session, request) => captureInputPricing({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, session }).decomposeRequest(request) })
   const samples = cold.calibrationRecords(agent.session, agent.session.requestHeader())
-  const pricing = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session })
+  const pricing = captureInputPricing({ history: ensureSessionLog(ctx), meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session })
   assert.equal(samples.length, 1)
   assert.deepEqual(samples[0].data.rawInput, pricing.decomposeRequest(sent),
     'cold recovery must price the logged AFTER request and injected entry, not the original BEFORE surface')

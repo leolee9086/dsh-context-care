@@ -3,6 +3,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Session, SessionEvent, EpochHeader } from '@deepseek-ai/dsh-session'
 import type { AssistantStreamRecord } from '@deepseek-ai/dsh-llm'
 import { requestDecision } from './request-replay.js'
+import type { SessionLog } from './session-log.js'
+import type { CacheKey } from './session-cache.js'
 
 export interface Route { provider: string; model: string }
 export interface DetectorBounds {
@@ -54,7 +56,6 @@ export interface Episode<M> {
 }
 interface Receipt { callId: string; keys: Set<string> }
 interface Projection<M> {
-  signature: string
   /** Next event index; converted to a native position only below session.seq. */
   through: number
   header?: EpochHeader
@@ -76,6 +77,7 @@ export interface Segment<M> extends Route {
 }
 interface Options<D, M> {
   sessions: Pick<Context['sessions'], 'get' | 'list' | 'flush'>
+  logs: SessionLog
   detect(text: string, config: D): M
   trigger(sample: Sample<M>, window: readonly Sample<M>[], config: D): string | undefined
   rulesFor(sessionId: string): readonly FeedbackRule<D>[]
@@ -103,7 +105,10 @@ function requireMeasured<M extends FeedbackMetrics>(sample: Sample<M>): asserts 
  * @returns the request contribution and disposable native projection owner.
  */
 export function createSessionOutputFeedback<D extends DetectorBounds, M extends FeedbackMetrics>(options: Options<D, M>) {
-  let states = new WeakMap<Session, Projection<M>>()
+  const stateKey: CacheKey<Session, Projection<M>> = options.logs.cache.define('output-feedback',
+    'Native Session identity; rule signature, settings revision and committed event cursor.', () => ({
+      through: 0, receipts: new Set(), episodes: new Map(),
+    }))
   const reservations = new Map<string, { sessionId: string; keys: Set<string> }>()
 
   function apply(state: Projection<M>, session: Session, event: SessionEvent, rules: readonly FeedbackRule<D>[]) {
@@ -184,11 +189,7 @@ export function createSessionOutputFeedback<D extends DetectorBounds, M extends 
   }
   function read(session: Session, rules = options.rulesFor(String(session.id))) {
     const signature = fingerprint({ rules, revision: options.revision(String(session.id)) })
-    let state = states.get(session)
-    if (!state || state.signature !== signature) {
-      state = { signature, through: 0, receipts: new Set(), episodes: new Map() }
-      states.set(session, state)
-    }
+    const state = options.logs.cache.use(session, stateKey, [signature])
     // With no output detector there is no episode to reconstruct. Adding one
     // changes the signature and starts a fresh fold from the native history.
     if (!rules.some(rule => rule.trigger === 'output-pattern')) {
@@ -196,19 +197,17 @@ export function createSessionOutputFeedback<D extends DetectorBounds, M extends 
       return state
     }
     try {
-      // Read the committed suffix directly; a snapshot would clone and retain
-      // another array of every event in a cold Session during this fold.
-      const end = session.seq
-      while (state.through < end) {
-        const event = session.eventAt(state.through as SessionEvent['seq'])
-        if (!event) throw new Error('context-care: output feedback native event missing')
+      using log = options.logs.live(session)
+      for (const event of log.select(['request/header', 'step/start', 'assistant/message', 'assistant/attempt'], state.through)) {
         apply(state, session, event, rules)
         state.through = event.seq + 1
+        options.logs.cache.worked(stateKey)
       }
+      state.through = log.length
       return state
     } catch (error) {
-      // A parser failure must not leave partly incremented episode counters.
-      states.delete(session)
+      // Parser failures must not publish partial counters; the next read replays native facts.
+      options.logs.cache.invalidate(session, stateKey)
       throw error
     }
   }
@@ -254,7 +253,7 @@ export function createSessionOutputFeedback<D extends DetectorBounds, M extends 
     },
     async flush(sessionId?: string) { await Promise.all(selected(sessionId).map(session => options.sessions.flush(session))) },
     list(sessionId?: string) { return selected(sessionId).flatMap(session => [...read(session).episodes.values()].map(value => structuredClone(value))) },
-    clear() { states = new WeakMap(); reservations.clear() },
-    async close() { states = new WeakMap(); reservations.clear() },
+    clear() { options.logs.cache.clear(stateKey); reservations.clear() },
+    async close() { options.logs.cache.clear(stateKey); reservations.clear() },
   }
 }

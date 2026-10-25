@@ -1,6 +1,7 @@
 import type { Session, SessionSeq, EpochHeader } from '@deepseek-ai/dsh-session';
 import type { TokenUsage, LlmCallConfig } from '@deepseek-ai/dsh-llm';
 import { requestDecision } from './request-replay.js';
+import type { SessionLog } from './session-log.js';
 /** Request settlement facts read from the Session, not a second durable ledger. */
 export interface SessionRequestRecord {
     key: string;
@@ -34,9 +35,18 @@ export interface SessionRequestRecord {
  * values; no request body, tool schema, or header is serialized into another file.
  * @returns Session-scoped read and release operations.
  */
-export declare function createRequestHistory(): {
+export declare function createRequestHistory(logs: SessionLog): {
+    headerKey: (header: EpochHeader | undefined) => string;
     /** Read settled requests, consuming only events appended since the last read. */
     read(session: Session): readonly SessionRequestRecord[];
-    /** Drop derived rows; the next read reconstructs them from the same Session. */
-    clear(): void;
+    /** One native settlement lookup, without searching the full request array per diagnostic. */
+    contains(session: Session, row: {
+        key: string;
+        data: Readonly<Record<string, unknown>>;
+    }): boolean;
+    previous(session: Session, purpose: string): SessionRequestRecord | undefined;
+    /** Do not serialize every historical catalog merely to list requests. Each actual
+     * configuration has one pending newest-first lane and a positive header index.
+     * Unknown configurations allocate nothing; repeated negative queries do no fold work. */
+    calibration(session: Session, header: EpochHeader | undefined): SessionRequestRecord | undefined;
 };

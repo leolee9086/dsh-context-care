@@ -1,25 +1,32 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { Session, SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { Context } from '@deepseek-ai/cordis'
+import { Session, SessionId, SessionStore, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { createSessionLog } from '../lib/session-log.js'
 import { ToolCallId, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-tools'
 import { createToolEvents } from '../lib/reminder-runtime/tool-events.js'
 import { createReminderRuntime } from '../lib/reminder-runtime/runtime.js'
 import { createBoundedMatcher } from '../src/bounded-matcher.js'
 import { createTemplates } from '../src/templates.js'
+import { eventLog } from './fixtures/event-log.js'
 
 const config = { maxContextChars: 256, maxContextMessages: 8, maxQueued: 2, maxConcurrent: 1 }
 
-test('native anchored trigger reconstructs its historical prefix after cache loss and later context', async () => {
+function logFixture(t: test.TestContext) {
+  const ctx = new Context(), sessions = new SessionStore(ctx), logs = createSessionLog(ctx)
+  t.after(async () => { logs.close(); await ctx.fiber.dispose() })
+  return { logs, sessions }
+}
+
+test('native anchored trigger reconstructs its historical prefix after cache loss and later context', async t => {
+  const { logs, sessions } = logFixture(t)
+  const prepare = t.mock.method(sessions, 'prepare')
   const session = Session.create(SessionId('native-tool-prefix')), events: SessionEvent[] = []
-  let reads = 0, preparations = 0
+  let reads = 0
   const history: NonNullable<Parameters<typeof createToolEvents>[1]> = {
-    sessions: { messageProjections: [], get: id => id === session.id ? session : undefined,
-      prepare: (id, options) => {
-        preparations++
-        return Session.create(id ?? SessionId('detached-prefix'), options?.seed)
-      } },
-    readSession: async id => { assert.equal(id, session.id); reads++; return { events } },
+    logs, sessions: { get: id => id === session.id ? session : undefined },
+    readSession: async id => { assert.equal(id, session.id); reads++; return eventLog(events) },
   }
   const source = createToolEvents(config, history)
   events.push(session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'EARLY_CONTEXT' }],
@@ -49,20 +56,21 @@ test('native anchored trigger reconstructs its historical prefix after cache los
   source.close()
   assert.throws(() => source.observe(session, terminal), /context-is-not-current/)
   assert.deepEqual(await source.resolve(tampered), expected)
-  assert.equal(reads, 1); assert.equal(preparations, 1)
+  assert.equal(reads, 1); assert.equal(prepare.mock.callCount(), 1)
   assert.deepEqual(await source.resolve(tampered), expected)
   assert.equal(reads, 1, 'the reconstructed value is also a disposable bounded cache')
   const dormant = createToolEvents(config, { ...history, sessions: { ...history.sessions, get: () => undefined } })
   assert.deepEqual(await dormant.resolve(tampered), expected, 'a detached source does not require a live Agent')
-  assert.equal(reads, 2); assert.equal(preparations, 2)
+  assert.equal(reads, 2); assert.equal(prepare.mock.callCount(), 1, 'another facade shares the immutable native prefix fold')
   const controller = new AbortController(); controller.abort(new Error('stop native replay'))
   await assert.rejects(source.resolve(tampered, controller.signal), /stop native replay/)
   assert.equal(reads, 2)
   await assert.rejects(source.resolve({ ...tampered, native: { type: 'tool-result', seq: call.seq } }), /result-not-found/)
 })
 
-test('native tool trigger uses committed arguments outcome time and the preceding context', () => {
-  const session = Session.create(SessionId('native-tool-events')), source = createToolEvents(config)
+test('native tool trigger uses committed arguments outcome time and the preceding context', t => {
+  const { logs, sessions } = logFixture(t)
+  const session = Session.create(SessionId('native-tool-events')), source = createToolEvents(config, { logs, sessions, readSession: async () => logs.live(session) })
   const callId = ToolCallId('call-one')
   const call = session.append('tool/call', { turn: 0, step: 0, callId, name: 'read', arguments: '{"file_path":"a.ts"}' })
   assert.equal(source.observe(session, call), undefined)
@@ -95,8 +103,11 @@ test('native tool trigger uses committed arguments outcome time and the precedin
   assert.deepEqual(failed.data.meta, { toolOwned: 'unchanged' })
 })
 
-test('native PTC result keeps the subcall root and derives the same trigger with an empty fold cache', async () => {
-  const session = Session.create(SessionId('native-ptc-events')), source = createToolEvents(config)
+test('native PTC result keeps the subcall root and derives the same trigger with an empty fold cache', async t => {
+  const { logs, sessions } = logFixture(t)
+  const session = Session.create(SessionId('native-ptc-events'))
+  const history = { logs, sessions, readSession: async () => logs.live(session) }
+  const source = createToolEvents(config, history)
   const rootCallId = ToolCallId('root'), subCallId = ToolCallId('root:ptc:1')
   const start = session.append('tool/ptc-dispatch-start', {
     rootCallId, parentCallId: rootCallId, subCallId, name: 'probe', arguments: { selected: true },
@@ -113,16 +124,13 @@ test('native PTC result keeps the subcall root and derives the same trigger with
   assert.deepEqual(submitted.event.arguments, { selected: true })
   assert.equal(submitted.event.error?.code, 'TOOL_TIMED_OUT')
   assert.deepEqual(submitted.event.context?.messages, [], 'a PTC result does not enter model context')
-  const cold = createToolEvents(config)
+  const cold = createToolEvents(config, history)
   assert.deepEqual(cold.observe(session, end)?.event, submitted.event, 'the PTC terminal event contains its own call facts')
   const later = session.append('user/message', createUserMessage({ source: { kind: 'user' },
     content: [{ type: 'text', text: 'Later than the nested result.' }] }), { surfaceOp: 'append' })
-  let preparations = 0
-  const recovered = createToolEvents(config, {
-    sessions: { messageProjections: [], get: () => undefined, prepare: (id, options) => {
-      preparations++
-      return Session.create(id ?? SessionId('detached-ptc-prefix'), options?.seed)
-    } }, readSession: async () => ({ events: [start, end, later], inheritedEventCount: 0 }),
+  const prepare = t.mock.method(sessions, 'prepare')
+  const recovered = createToolEvents(config, { logs, sessions: { get: () => undefined },
+    readSession: async () => eventLog([start, end, later]),
   })
   assert.deepEqual(await recovered.resolve({ ...submitted.event, name: 'wrong', rootCallId: 'wrong',
     arguments: {}, error: { code: 'wrong' } }), submitted.event)
@@ -134,14 +142,14 @@ test('native PTC result keeps the subcall root and derives the same trigger with
   assert.equal(before.clock?.at, start.time)
   assert.equal(before.context, undefined)
   assert.equal(before.error, undefined)
-  assert.equal(preparations, 0, 'empty historical context and before-execution facts need no prepared Session')
+  assert.equal(prepare.mock.callCount(), 0, 'empty historical context and before-execution facts need no prepared Session')
 })
 
 test('runtime collection ignores old tool outcomes and handles explicitly observed current results', async t => {
+  const { logs } = logFixture(t)
   const session = Session.create(SessionId('native-runtime-growth'))
-  const source = createToolEvents(config, { sessions: { messageProjections: [], get: () => undefined,
-    prepare: (id, options) => Session.create(id ?? SessionId('runtime-growth-prefix'), options?.seed) },
-    readSession: async () => ({ events: session.snapshotEvents(), inheritedEventCount: 0 }),
+  const source = createToolEvents(config, { logs, sessions: { get: () => undefined },
+    readSession: async () => eventLog(session.snapshotEvents()),
   })
   const matcher = createBoundedMatcher({ timeoutMs: 2000, startupMs: 2000 })
   const runtime = createReminderRuntime({ config: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 }, templates: createTemplates(),
@@ -170,46 +178,42 @@ test('runtime collection ignores old tool outcomes and handles explicitly observ
   assert.deepEqual(messages[0].content, [{ type: 'text', text: 'RECOVERED late.ts' }])
 })
 
-test('native recovery follows Session replacement dormant growth and calls pending at attachment', async () => {
+test('anchored retries follow native Session replacement and dormant growth without discovery', async t => {
+  const { logs } = logFixture(t)
   const session = Session.create(SessionId('native-changing-history'))
   const callId = ToolCallId('pending-at-attachment')
   const call = session.append('tool/call', { turn: 0, step: 0, callId, name: 'probe', arguments: '{"historical":true}' })
   let live: Session | undefined = session, reads = 0
   const source = createToolEvents(config, {
-    sessions: { messageProjections: [], get: () => live,
-      prepare: (id, options) => Session.create(id ?? SessionId('changing-history-prefix'), options?.seed) },
-    readSession: async () => { reads++; return { events: session.snapshotEvents(), inheritedEventCount: 0 } },
+    logs, sessions: { get: () => live },
+    readSession: async () => { reads++; return eventLog(session.snapshotEvents()) },
   })
-  const found: Awaited<ReturnType<typeof source.resolve>>[] = []
-  const recover = () => source.recover(String(session.id), async event => { found.push(event) }, new AbortController().signal)
-  await recover()
-  assert.equal(reads, 1); assert.equal(found.length, 0)
   const terminal = session.append('tool/result', { turn: 0, step: 0,
     message: createToolResultMessage({ callId, isError: false, content: [{ type: 'text', text: 'COMPLETED_LATER' }] }),
   }, { surfaceOp: 'append', sourceEventSeqs: [call.seq] })
-  assert.deepEqual(source.observe(session, terminal)?.event.arguments, { historical: true }, 'a call restored as pending pairs with its later live result')
-  await recover()
-  assert.equal(reads, 1, 'a completely observed live instance requires no second scan')
+  assert.equal(source.observe(session, terminal), undefined, 'an unobserved call stays on the normal unpaired execution path')
+  assert.equal(reads, 0, 'observing a current result cannot start historical discovery')
+  const anchor = (seq: number) => ({ sessionId: String(session.id), callId: 'supplied', rootCallId: 'supplied', origin: 'human' as const, facts: {},
+    native: { type: 'tool-result' as const, seq } })
+  const first = await source.resolve(anchor(terminal.seq))
+  assert.deepEqual(first.arguments, { historical: true })
+  assert.deepEqual(await source.resolve(anchor(terminal.seq)), first); assert.equal(reads, 1)
   live = Session.create(session.id, session.snapshotEvents())
-  await recover()
-  assert.equal(reads, 2, 'a different Session object cannot inherit the previous instance marker')
-  assert.deepEqual(found.map(event => event.callId), [callId])
+  assert.deepEqual(await source.resolve(anchor(terminal.seq)), first); assert.equal(reads, 2)
   live = undefined
-  await recover()
-  assert.equal(reads, 3, 'an unattached native log must be queried again')
+  assert.deepEqual(await source.resolve(anchor(terminal.seq)), first); assert.equal(reads, 3)
   const nextId = ToolCallId('written-elsewhere'), next = session.append('tool/call', {
     turn: 0, step: 1, callId: nextId, name: 'probe', arguments: '{"later":true}',
   })
-  session.append('tool/result', { turn: 0, step: 1,
+  const later = session.append('tool/result', { turn: 0, step: 1,
     message: createToolResultMessage({ callId: nextId, isError: false, content: [{ type: 'text', text: 'EXTERNAL_RESULT' }] }),
   }, { surfaceOp: 'append', sourceEventSeqs: [next.seq] })
-  found.length = 0
-  await recover()
+  assert.equal((await source.resolve(anchor(later.seq))).callId, nextId)
   assert.equal(reads, 4)
-  assert.deepEqual(found.map(event => event.callId), [callId, nextId], 'dormant growth is never hidden by a session-id cache')
 })
 
-test('cold discovery selects local dispatched tools and leaves inherited and cancelled work alone', async () => {
+test('cold retries accept local dispatched tools and reject inherited or cancelled outcomes', async t => {
+  const { logs } = logFixture(t)
   const session = Session.create(SessionId('native-discovery')), events: SessionEvent[] = []
   const parentId = ToolCallId('parent-call')
   const parent = session.append('tool/call', { turn: 0, step: 0, callId: parentId, name: 'probe', arguments: '{}' })
@@ -228,31 +232,28 @@ test('cold discovery selects local dispatched tools and leaves inherited and can
   }, { surfaceOp: 'append', sourceEventSeqs: [call.seq] }))
   let reads = 0
   const source = createToolEvents(config, {
-    sessions: { messageProjections: [], get: () => undefined, prepare: (id, options) => Session.create(id ?? SessionId('discovery-prefix'), options?.seed) },
-    readSession: async () => { reads++; return { events, inheritedEventCount: inherited } },
+    logs, sessions: { get: () => undefined },
+    readSession: async () => { reads++; return eventLog(events, inherited) },
   })
-  const found: Awaited<ReturnType<typeof source.resolve>>[] = []
-  await source.recover(String(session.id), async event => { found.push(event) }, new AbortController().signal)
-  assert.deepEqual(found.map(event => event.callId), [subCallId])
-  assert.deepEqual(found[0].arguments, { local: true })
-  assert.deepEqual(found[0].context?.messages.map(message => message.text), ['INHERITED_RESULT'])
+  const anchor = (seq: number) => ({ sessionId: String(session.id), callId: 'supplied', rootCallId: 'supplied', origin: 'human' as const, facts: {},
+    native: { type: 'tool-result' as const, seq } })
+  const found = await source.resolve(anchor(inherited))
+  assert.equal(found.callId, subCallId)
+  assert.deepEqual(found.arguments, { local: true })
+  assert.deepEqual(found.context?.messages.map(message => message.text), ['INHERITED_RESULT'])
   assert.equal(reads, 1)
-  const cancelled = new AbortController(); cancelled.abort(new Error('discovery cancelled'))
-  await assert.rejects(source.recover(String(session.id), async () => assert.fail('cancelled replay submitted work'), cancelled.signal), /discovery cancelled/)
+  const cancelled = new AbortController(); cancelled.abort(new Error('retry cancelled'))
+  await assert.rejects(source.resolve(anchor(inherited), cancelled.signal), /retry cancelled/)
   assert.equal(reads, 1)
-  const hot = Session.create(SessionId('observed-from-creation'))
-  const live = createToolEvents(config, { sessions: { messageProjections: [], get: () => hot,
-    prepare: () => { throw new Error('live prefix must not be prepared') } },
-    readSession: async () => { throw new Error('live history must not be read') } })
-  live.created(hot)
-  await live.recover(String(hot.id), async () => assert.fail('live trigger was rediscovered'), new AbortController().signal)
+  await assert.rejects(source.resolve(anchor(parent.seq + 1)), /native-tool-result-not-found/)
+  await assert.rejects(source.resolve(anchor(call.seq + 1)), /native-tool-result-not-dispatched/)
 })
 
-test('abandoned native calls cannot recover a before-execution trigger from live or cold caches', async () => {
+test('abandoned native calls cannot recover a before-execution trigger from live or cold caches', async t => {
+  const { logs } = logFixture(t)
   const session = Session.create(SessionId('native-skipped-before'))
-  const source = createToolEvents(config, { sessions: { messageProjections: [], get: () => session,
-    prepare: () => { throw new Error('abandoned call needs no historical context') } },
-    readSession: async () => ({ events: session.snapshotEvents(), inheritedEventCount: 0 }),
+  const source = createToolEvents(config, { logs, sessions: { get: () => session },
+    readSession: async () => eventLog(session.snapshotEvents()),
   })
   const callId = ToolCallId('skipped-before')
   const call = session.append('tool/call', { turn: 0, step: 0, callId, name: 'probe', arguments: '{}' })
@@ -266,17 +267,17 @@ test('abandoned native calls cannot recover a before-execution trigger from live
   assert.equal(source.preparation(session, callId), undefined)
   await assert.rejects(source.resolve({ sessionId: String(session.id), callId, rootCallId: callId, origin: 'human', facts: {},
     native: { type: 'tool-call', seq: call.seq } }), /native-tool-call-not-dispatched/)
-  const found: Awaited<ReturnType<typeof source.resolve>>[] = []
-  await source.recover(String(session.id), async event => { found.push(event) }, new AbortController().signal,
-    { tools: true, beforeTools: true, outputs: false, sessionEvents: ['tool/result'] })
-  assert.deepEqual(found.map(event => event.type), ['session.event'], 'the raw cancellation remains a real native event; no execution or outcome trigger is invented')
+  const raw = await source.resolve({ sessionId: String(session.id), callId, rootCallId: callId, origin: 'human', facts: {},
+    native: { type: 'session-event', seq: result.seq } })
+  assert.equal(raw.type, 'session.event', 'the raw cancellation remains a real native event')
+  await assert.rejects(source.resolve({ ...raw, native: { type: 'tool-result', seq: result.seq } }), /native-tool-result-not-dispatched/)
 })
 
-test('PTC collapsed route excludes only its before trigger while an ordinary unknown name keeps it', async () => {
+test('PTC collapsed route excludes only its before trigger while an ordinary unknown name keeps it', async t => {
+  const { logs } = logFixture(t)
   const session = Session.create(SessionId('native-collapsed-before'))
-  const history = { sessions: { messageProjections: [], get: () => session,
-    prepare: (id: Parameters<typeof Session.create>[0], options?: { seed?: SessionEvent[] }) => Session.create(id ?? SessionId('collapsed-prefix'), options?.seed) },
-  readSession: async () => ({ events: session.snapshotEvents(), inheritedEventCount: 0 }) }
+  const history = { logs, sessions: { get: () => session },
+  readSession: async () => eventLog(session.snapshotEvents()) }
   const source = createToolEvents(config, history)
   const calls: SessionEvent[] = []
   for (const collapsed of [true, false]) {
@@ -296,18 +297,21 @@ test('PTC collapsed route excludes only its before trigger while an ordinary unk
     native: { type: 'tool-call' as const, seq: calls[index].seq } })
   await assert.rejects(source.resolve(before(0)), /native-tool-call-not-dispatched/)
   assert.equal((await source.resolve(before(1))).callId, 'unknown')
-  const found: Awaited<ReturnType<typeof source.resolve>>[] = []
   const cold = createToolEvents(config, { ...history, sessions: { ...history.sessions, get: () => undefined } })
-  await cold.recover(String(session.id), async event => { found.push(event) }, new AbortController().signal,
-    { tools: true, beforeTools: true, outputs: false, sessionEvents: ['tool/result'] })
-  assert.deepEqual(found.map(event => [event.type, event.callId]), [
-    ['tool.failed', 'collapsed'], ['session.event', `tool/result#${calls[0].seq + 1}`],
-    ['tool.before-execute', 'unknown'], ['tool.failed', 'unknown'], ['session.event', `tool/result#${calls[1].seq + 1}`],
-  ])
+  await assert.rejects(cold.resolve(before(0)), /native-tool-call-not-dispatched/)
+  assert.equal((await cold.resolve(before(1))).callId, 'unknown')
+  for (const [index, callId] of ['collapsed', 'unknown'].entries()) {
+    const anchor = { ...before(index), native: { type: 'tool-result' as const, seq: calls[index].seq + 1 } }
+    const failure = await cold.resolve(anchor)
+    assert.equal(failure.type, 'tool.failed'); assert.equal(failure.callId, callId)
+    const raw = await cold.resolve({ ...anchor, native: { type: 'session-event', seq: anchor.native.seq } })
+    assert.equal(raw.type, 'session.event'); assert.equal(raw.callId, `tool/result#${anchor.native.seq}`)
+  }
 })
 
-test('native abandoned-before-dispatch result produces no reminder trigger', () => {
-  const session = Session.create(SessionId('native-skipped-event')), source = createToolEvents(config)
+test('native abandoned-before-dispatch result produces no reminder trigger', t => {
+  const { logs, sessions } = logFixture(t)
+  const session = Session.create(SessionId('native-skipped-event')), source = createToolEvents(config, { logs, sessions, readSession: async () => logs.live(session) })
   const callId = ToolCallId('skipped')
   const call = session.append('tool/call', { turn: 0, step: 0, callId, name: 'probe', arguments: '{}' })
   source.observe(session, call)

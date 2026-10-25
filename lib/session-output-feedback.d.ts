@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session';
+import type { SessionLog } from './session-log.js';
 export interface Route {
     provider: string;
     model: string;
@@ -82,6 +83,7 @@ export interface Segment<M> extends Route {
 }
 interface Options<D, M> {
     sessions: Pick<Context['sessions'], 'get' | 'list' | 'flush'>;
+    logs: SessionLog;
     detect(text: string, config: D): M;
     trigger(sample: Sample<M>, window: readonly Sample<M>[], config: D): string | undefined;
     rulesFor(sessionId: string): readonly FeedbackRule<D>[];

@@ -28,12 +28,12 @@ export function nativeSessionEvent(sessionId: string, event: SessionEvent): Even
 export async function resolveNativeSessionEvent(event: EventValue, history: NativeHistory, signal?: AbortSignal): Promise<EventValue> {
   if (event.native?.type !== 'session-event') return event
   signal?.throwIfAborted()
-  const log = await history.readSession(event.sessionId as Session['id'])
+  const log = await history.readSession(event.sessionId as Session['id'], signal)
   using lease = { [Symbol.dispose]: () => log[Symbol.dispose]?.() }
   signal?.throwIfAborted()
-  const native = log.at ? log.at(event.native.seq) : log.events[event.native.seq]
-  const inherited = log.inheritedEventCount ?? history.sessions.get(event.sessionId as Session['id'])?.inheritedEventCount
-  if (!native || native.seq !== event.native.seq || inherited === undefined || native.seq < inherited) {
+  const native = log.at(event.native.seq)
+  const inherited = log.inheritedEventCount
+  if (!native || native.seq !== event.native.seq || native.seq < inherited) {
     throw new Error('reminder-native-session-event-not-found')
   }
   return nativeSessionEvent(event.sessionId, native)

@@ -1,9 +1,11 @@
 import { z } from 'zod'
+import { setImmediate as yieldToHost } from 'node:timers/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId, Session, SessionEvent, UserMessage } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
 import { localWindow } from './request-context.js'
 import { ensureSessionLog } from '../session-log.js'
+import type { CacheKey } from '../session-cache.js'
 import { readSnoozeResult, SNOOZE_TOOL } from './snooze.js'
 import { triggerKey, type HandoffRule, type OutputHandoffRule, type StateValue, type StickyStateValue } from './state.js'
 
@@ -50,10 +52,10 @@ interface Projection {
   stickies: Map<string, Activation>
   toolCalls: Map<string, string>
   committed: Set<string>
-  handedEvents: Set<string>
-  handedRules: Set<string>
-  handedOutputs: Set<string>
-  handedChoices: Set<string>
+  handedEvents: Map<string, number>
+  handedRules: Map<string, number>
+  handedOutputs: Map<string, number>
+  handedChoices: Map<string, number>
   outputCutoffs: Map<string, number>
   inbox: Record<'next-turn' | 'next-step', UserMessage[]>
   queued: Map<string, UserMessage>
@@ -70,8 +72,8 @@ export interface DeliveryState {
 
 function emptyProjection(inheritedEnd: number): Projection {
   return { cursor: 0, step: -1, openStep: false, humanStep: -1, humanId: '', humanArrival: '', humanCommit: '', inheritedEnd,
-    windows: new Map(), stickies: new Map(), toolCalls: new Map(), committed: new Set(), handedEvents: new Set(),
-    handedRules: new Set(), handedOutputs: new Set(), handedChoices: new Set(), outputCutoffs: new Map(),
+    windows: new Map(), stickies: new Map(), toolCalls: new Map(), committed: new Set(), handedEvents: new Map(),
+    handedRules: new Map(), handedOutputs: new Map(), handedChoices: new Map(), outputCutoffs: new Map(),
     inbox: { 'next-turn': [], 'next-step': [] }, queued: new Map() }
 }
 
@@ -114,17 +116,18 @@ function handoffRuleKey(eventId: string, rule: Pick<HandoffRule, 'sourceId' | 'r
 function outputChoiceKey(eventId: string, group: string): string {
   return JSON.stringify([eventId, group])
 }
-function handed(state: Projection, sessionId: string, eventId: string, rule?: HandoffRule): boolean {
-  if (!rule) return state.handedEvents.has(eventId)
-  if (state.handedRules.has(handoffRuleKey(eventId, rule))) return true
-  if (rule.exclusiveGroup && state.handedChoices.has(outputChoiceKey(eventId, rule.exclusiveGroup))) return true
+function handed(state: Projection, sessionId: string, eventId: string, rule?: HandoffRule, fromSeq = 0): boolean {
+  const accepted = (seq: number | undefined) => seq !== undefined && seq >= fromSeq
+  if (!rule) return accepted(state.handedEvents.get(eventId))
+  if (accepted(state.handedRules.get(handoffRuleKey(eventId, rule)))) return true
+  if (rule.exclusiveGroup && accepted(state.handedChoices.get(outputChoiceKey(eventId, rule.exclusiveGroup)))) return true
   if (!rule.output) return false
   const outputRule: OutputHandoffRule = { ...rule, output: rule.output }
-  if (state.handedOutputs.has(outputRuleKey(outputRule))) return true
+  if (accepted(state.handedOutputs.get(outputRuleKey(outputRule)))) return true
   const prefix = `session:${sessionId}:output:`, attempt = outputRule.output.attemptId
   if (!attempt.startsWith(prefix)) return false
   const boundary = Number(attempt.slice(prefix.length)), cutoff = state.outputCutoffs.get(outputStepKey(outputRule))
-  return Number.isSafeInteger(boundary) && boundary >= 0 && cutoff !== undefined && boundary < cutoff
+  return Number.isSafeInteger(boundary) && boundary >= 0 && cutoff !== undefined && cutoff - 1 >= fromSeq && boundary < cutoff
 }
 
 /** A real inbox acceptance or message commit establishes this trigger's completed match. */
@@ -139,21 +142,25 @@ function rememberTrigger(projection: Projection, sessionId: string, value: unkno
   if (callId !== undefined) {
     const eventId = triggerKey(type, callId)
     if (sourceId !== undefined && ruleId !== undefined) {
-      projection.handedRules.add(handoffRuleKey(eventId, { sourceId, ruleId }))
-    } else if (type !== 'assistant.output') projection.handedEvents.add(eventId)
+      const key = handoffRuleKey(eventId, { sourceId, ruleId })
+      projection.handedRules.set(key, Math.max(projection.handedRules.get(key) ?? -1, projection.cursor - 1))
+    } else if (type !== 'assistant.output') projection.handedEvents.set(eventId, Math.max(projection.handedEvents.get(eventId) ?? -1, projection.cursor - 1))
     if (record(rule) && typeof rule.exclusiveGroup === 'string') {
-      projection.handedChoices.add(outputChoiceKey(eventId, rule.exclusiveGroup))
+      const key = outputChoiceKey(eventId, rule.exclusiveGroup)
+      projection.handedChoices.set(key, Math.max(projection.handedChoices.get(key) ?? -1, projection.cursor - 1))
     }
   }
   // A natural boundary coalesces an output rule's pending prefixes from one
   // attempt. Later retries in the same step retain their own native identities.
   if (type === 'assistant.output' && sourceId !== undefined && ruleId !== undefined && output !== undefined) {
     const handed = { sourceId, ruleId, output }
-    projection.handedOutputs.add(outputRuleKey(handed))
+    const key = outputRuleKey(handed)
+    projection.handedOutputs.set(key, Math.max(projection.handedOutputs.get(key) ?? -1, projection.cursor - 1))
     // A handed message consumes pending prefixes from attempts already started
     // in that native step. The cursor also covers older lifecycle-local attempt
     // ids without mistaking a later retry for an already delivered observation.
-    projection.outputCutoffs.set(outputStepKey(handed), projection.cursor)
+    const stepKey = outputStepKey(handed)
+    projection.outputCutoffs.set(stepKey, Math.max(projection.outputCutoffs.get(stepKey) ?? 0, projection.cursor))
   }
 }
 
@@ -275,83 +282,120 @@ function apply(projection: Projection, sessionId: string, event: SessionEvent) {
  */
 export function createSessionDeliveries(ctx: Context, now: () => number = Date.now) {
   const history = ensureSessionLog(ctx)
-  const states = new Map<string, Projection>()
-  // Accepted but uncommitted inbox messages are protocol state, not old trigger
-  // work. Keep this lightweight fold separate from sticky clocks and tool replay.
-  const queuedStates = new WeakMap<Session, Pick<Projection, 'cursor' | 'inheritedEnd' | 'inbox' | 'queued'>>()
-  const pending = new Map<string, SessionEvent[]>()
-  const restoring = new Map<string, Promise<Projection>>()
+  const stateKey: CacheKey<object, Projection> = history.cache.define('reminder-deliveries',
+    'Exact live Session or immutable cold log owner; successful native fold cursor.',
+    (_owner, dependencies) => emptyProjection(Number(dependencies[0])))
+  // The lightweight outstanding-input view does not restore clocks or old tools.
+  const queuedKey: CacheKey<Session, Pick<Projection, 'cursor' | 'inheritedEnd' | 'inbox' | 'queued'>> = history.cache.define('reminder-queued-input',
+    'Native Session identity and committed acceptance cursor.',
+    session => ({ cursor: 0, inheritedEnd: session.inheritedEventCount, inbox: { 'next-turn': [], 'next-step': [] }, queued: new Map() }))
+  const cached = (session: Session) => history.cache.peek(session, stateKey, [session.inheritedEventCount])
+  const receiptKey: CacheKey<object, { state: Projection; from: number; through: number; commits: Map<string, number>;
+    selected?: { from: number; revision: number; ids: ReadonlySet<string> }; revision: number }> = history.cache.define('reminder-handoff-receipts',
+    'Immutable log owner and covered native suffix; receipt sequence validates each requested anchor.',
+    (_owner, dependencies) => ({ state: emptyProjection(Number(dependencies[0])), from: Infinity, through: 0, commits: new Map(), revision: 0 }))
+  async function receipts(sessionId: string, fromSeq: number) {
+    using log = await history.read(sessionId as SessionId)
+    if (closed) throw new Error('reminder-deliveries-closed')
+    const indexed = history.cache.use(log.owner, receiptKey, [log.inheritedEventCount])
+    const from = Math.max(fromSeq, log.inheritedEventCount)
+    const fold = (start: number, end: number) => {
+      for (const event of log.select(['user/message', 'agent/inbox/spliced'], start, end)) {
+        indexed.state.cursor = event.seq + 1
+        if (event.type === 'user/message') {
+          rememberTrigger(indexed.state, sessionId, event.data)
+          const id = String(event.data.id), prior = indexed.commits.get(id)
+          if (prior === undefined || prior < event.seq) { indexed.commits.set(id, event.seq); indexed.revision++ }
+        } else if (event.type === 'agent/inbox/spliced') {
+          for (const message of event.data.inserted) rememberTrigger(indexed.state, sessionId, message)
+        }
+        history.cache.worked(receiptKey)
+      }
+    }
+    try {
+      if (indexed.from === Infinity) fold(from, log.length)
+      else {
+        if (from < indexed.from) fold(from, Math.min(indexed.from, log.length))
+        if (indexed.through < log.length) fold(Math.max(indexed.from, indexed.through), log.length)
+      }
+      indexed.from = Math.min(indexed.from, from); indexed.through = Math.max(indexed.through, log.length)
+      return { indexed, from, through: log.length }
+    } catch (error) { history.cache.invalidate(log.owner, receiptKey); throw error }
+  }
+  // These queues are in-flight transactions, not reconstructable cached views.
+  // Exact owners prevent a detached Session's fold from becoming a reused id's state.
+  const pending = new Map<object, SessionEvent[]>()
+  const restoring = new Map<object, Promise<Projection>>()
   let closed = false
 
   async function restore(sessionId: string): Promise<Projection> {
     if (closed) throw new Error('reminder-deliveries-closed')
     const nativeId = sessionId as SessionId, session = ctx.sessions.get(nativeId)
-    const state = states.get(sessionId)
-    // A live cursor validates the cache. A dormant Session has no live cursor,
-    // so its native log must be read without creating an Agent to validate it.
-    if (session && state?.cursor === session.seq) return state
-    const active = restoring.get(sessionId)
+    const state = session && cached(session)
+    if (session && !restoring.has(session) && state?.cursor === session.seq) return state
+    using log = await history.read(nativeId)
+    if (closed) throw new Error('reminder-deliveries-closed')
+    const active = restoring.get(log.owner)
     if (active) return active
+    const queued: SessionEvent[] = []
+    pending.set(log.owner, queued)
     const task = (async () => {
-      const queued: SessionEvent[] = []
-      pending.set(sessionId, queued)
+      const dependencies = [log.inheritedEventCount], next = history.cache.use(log.owner, stateKey, dependencies)
       try {
-        using log = await history.read(nativeId)
-        if (closed) throw new Error('reminder-deliveries-closed')
-        const next = emptyProjection(log.inheritedEventCount)
+        let processed = 0
         for (const event of log.select(['user/message', 'agent/inbox/spliced', 'step/start', 'step/end',
-          'turn/start', 'turn/end', 'tool/call', 'tool/result', 'tool/ptc-dispatch'])) apply(next, sessionId, event)
-        next.cursor = log.length
+          'turn/start', 'turn/end', 'tool/call', 'tool/result', 'tool/ptc-dispatch'], next.cursor)) {
+          apply(next, sessionId, event); history.cache.worked(stateKey)
+          if (++processed % 2048 === 0) {
+            await yieldToHost()
+            if (closed) throw new Error('reminder-deliveries-closed')
+          }
+        }
+        next.cursor = Math.max(next.cursor, log.length)
         for (const event of queued) apply(next, sessionId, event)
-        states.set(sessionId, next)
         return next
-      } finally { pending.delete(sessionId) }
+      } catch (error) {
+        if (!closed && history.cache.peek(log.owner, stateKey, dependencies) === next) history.cache.invalidate(log.owner, stateKey)
+        throw error
+      }
     })()
-    restoring.set(sessionId, task)
+    restoring.set(log.owner, task)
     try { return await task }
-    finally { restoring.delete(sessionId) }
+    finally { restoring.delete(log.owner); pending.delete(log.owner) }
   }
 
   return {
     /** Newly created sessions can maintain this projection without a history read. */
     created(session: Session) {
-      if (!closed && session.firstLiveSeq === 0) states.set(String(session.id), emptyProjection(0))
-    },
-    /** Reuse the trigger discovery read; a live prefix may already be ahead of it. */
-    observeLog(sessionId: string, log: { events: readonly SessionEvent[]; inheritedEventCount?: number }) {
-      if (closed) throw new Error('reminder-deliveries-closed')
-      const next = states.get(sessionId) ?? emptyProjection(log.inheritedEventCount ?? 0)
-      for (const event of log.events) apply(next, sessionId, event)
-      states.set(sessionId, next)
+      if (!closed && session.firstLiveSeq === 0) history.cache.use(session, stateKey, [session.inheritedEventCount])
     },
     /** Read accepted inputs, including quota-blocked claims no longer in the inbox. */
     queued(sessionId: string) {
       if (closed) throw new Error('reminder-deliveries-closed')
       const session = ctx.sessions.get(sessionId as SessionId)
-      const full = states.get(sessionId)
+      const full = session && cached(session)
       let accepted = full?.queued
       if (session && full?.cursor !== session.seq) {
-        let state = queuedStates.get(session)
-        if (!state) {
-          state = { cursor: 0, inheritedEnd: session.inheritedEventCount, inbox: { 'next-turn': [], 'next-step': [] }, queued: new Map() }
-          queuedStates.set(session, state)
-        }
+        const state = history.cache.use(session, queuedKey)
         using log = history.live(session)
         // No rule matching, rendering or judges run here. Only native acceptance,
         // commit and cancellation can change the frozen outstanding input set.
-        for (const event of log.select(['agent/inbox/spliced', 'user/message'], state.cursor)) {
-          if (event.type === 'agent/inbox/spliced') {
-            const splice = event.data
-            const removed = state.inbox[splice.target].splice(splice.start, splice.removedCount ?? 0, ...splice.inserted)
-            if (splice.outcome === 'canceled') for (const message of removed) state.queued.delete(String(message.id))
-            if (event.seq >= state.inheritedEnd) for (const message of splice.inserted) {
-              if (message.source.kind === KIND && message.source.reminder.handoff?.queued
-                && message.source.reminder.sessionId === sessionId) state.queued.set(String(message.id), message)
-            }
-          } else if (event.type === 'user/message') state.queued.delete(String(event.data.id))
-        }
-        state.cursor = log.length
-        accepted = state.queued
+        try {
+          for (const event of log.select(['agent/inbox/spliced', 'user/message'], state.cursor)) {
+            if (event.type === 'agent/inbox/spliced') {
+              const splice = event.data
+              const removed = state.inbox[splice.target].splice(splice.start, splice.removedCount ?? 0, ...splice.inserted)
+              if (splice.outcome === 'canceled') for (const message of removed) state.queued.delete(String(message.id))
+              if (event.seq >= state.inheritedEnd) for (const message of splice.inserted) {
+                if (message.source.kind === KIND && message.source.reminder.handoff?.queued
+                  && message.source.reminder.sessionId === sessionId) state.queued.set(String(message.id), message)
+              }
+            } else if (event.type === 'user/message') state.queued.delete(String(event.data.id))
+            history.cache.worked(queuedKey)
+          }
+          state.cursor = log.length
+          accepted = state.queued
+        } catch (error) { history.cache.invalidate(session, queuedKey); throw error }
       }
       const messages = new Map(accepted)
       const agent = ctx.get('agents')?.get(sessionId as SessionId)
@@ -363,18 +407,18 @@ export function createSessionDeliveries(ctx: Context, now: () => number = Date.n
     },
     observe(session: Session, event: SessionEvent) {
       if (closed) return
-      const id = String(session.id), queued = pending.get(id)
+      const id = String(session.id), queued = pending.get(session)
       if (queued) { queued.push(event); return }
-      const state = states.get(id)
+      const state = cached(session)
       if (state) {
         try { apply(state, id, event) }
-        catch (error) { states.delete(id); throw error }
+        catch (error) { history.cache.invalidate(session, stateKey); throw error }
       }
     },
     /** Cache-only read for the final synchronous cancel/steer check. */
     currentHumanTurn(sessionId: string): string | undefined {
-      const state = states.get(sessionId), session = ctx.sessions.get(sessionId as Session['id'])
-      if (closed || !state || !session || state.cursor !== session.seq) return undefined
+      const session = ctx.sessions.get(sessionId as Session['id']), state = session && cached(session)
+      if (closed || !state || !session || restoring.has(session) || state.cursor !== session.seq) return undefined
       return state.humanArrival || state.humanCommit || 'initial'
     },
     /** Native handoff evidence survives cancellation, compaction and an empty runtime cache. */
@@ -382,26 +426,10 @@ export function createSessionDeliveries(ctx: Context, now: () => number = Date.n
       if (closed) throw new Error('reminder-deliveries-closed')
       if (fromSeq === undefined) return handed(await restore(sessionId), sessionId, eventId, rule)
       const session = ctx.sessions.get(sessionId as SessionId)
-      const cached = states.get(sessionId)
-      if (session && cached?.cursor === session.seq) return handed(cached, sessionId, eventId, rule)
-      // Only a receipt at or after this exact trigger can acknowledge it. Do not
-      // restore clocks, tool history or unrelated rules to answer this question.
-      const receipts = emptyProjection(session?.inheritedEventCount ?? 0)
-      const inspect = (event: SessionEvent) => {
-        receipts.cursor = event.seq + 1
-        if (event.type === 'user/message') rememberTrigger(receipts, sessionId, event.data)
-        else if (event.type === 'agent/inbox/spliced') {
-          for (const message of event.data.inserted) rememberTrigger(receipts, sessionId, message)
-        }
-      }
-      using log = await history.read(sessionId as SessionId)
-      for (const event of log.select(['user/message', 'agent/inbox/spliced'], Math.max(fromSeq, log.inheritedEventCount))) inspect(event)
-      return handed(receipts, sessionId, eventId, rule)
-    },
-    /** One cold read serves every sample in the caller's ordered recovery scan. */
-    async handoffs(sessionId: string) {
-      const state = await restore(sessionId)
-      return (eventId: string, rule?: HandoffRule) => handed(state, sessionId, eventId, rule)
+      const state = session && cached(session)
+      if (session && !restoring.has(session) && state?.cursor === session.seq) return handed(state, sessionId, eventId, rule, fromSeq)
+      const { indexed, from } = await receipts(sessionId, fromSeq)
+      return handed(indexed.state, sessionId, eventId, rule, from)
     },
     /** Last local human arrival; a delayed commit does not create a new interrupt budget. */
     async humanTurn(sessionId: string): Promise<string> {
@@ -411,11 +439,13 @@ export function createSessionDeliveries(ctx: Context, now: () => number = Date.n
     async read(sessionId: string, currentHumanId: string, fromSeq?: number): Promise<DeliveryState> {
       if (closed) throw new Error('reminder-deliveries-closed')
       if (fromSeq !== undefined) {
-        const committedIds = new Set<string>()
-        const inspect = (event: SessionEvent) => { if (event.type === 'user/message') committedIds.add(String(event.data.id)) }
-        using log = await history.read(sessionId as SessionId)
-        for (const event of log.select(['user/message'], Math.max(fromSeq, log.inheritedEventCount))) inspect(event)
-        return { windows: [], stickies: [], ticked: new Set(), committedIds, humanId: currentHumanId, queued: [] }
+        const { indexed, from, through } = await receipts(sessionId, fromSeq)
+        if (indexed.selected?.from !== from || indexed.selected.revision !== indexed.revision) {
+          const ids = new Set<string>()
+          for (const [id, seq] of indexed.commits) if (seq >= from && seq < through) ids.add(id)
+          indexed.selected = { from, revision: indexed.revision, ids }
+        }
+        return { windows: [], stickies: [], ticked: new Set(), committedIds: indexed.selected.ids, humanId: currentHumanId, queued: [] }
       }
       const state = await restore(sessionId)
       // Compaction can remove the last human message from visibility, not from the
@@ -442,6 +472,6 @@ export function createSessionDeliveries(ctx: Context, now: () => number = Date.n
       return { windows: [...state.windows.values()], stickies, ticked, committedIds: state.committed, humanId,
         queued: structuredClone([...state.queued.values()]) }
     },
-    close() { closed = true; states.clear(); pending.clear() },
+    close() { closed = true; history.cache.clear(stateKey); history.cache.clear(queuedKey); history.cache.clear(receiptKey); pending.clear() },
   }
 }

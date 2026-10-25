@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { contextBudget, resolveBudgetConfig, budgetPolicy } from '../src/context-budget.js'
 import { createMaintenanceController } from '../src/maintenance-policy.js'
 import { recoveryProof } from '../src/recovery-proof.js'
+import { eventLog } from './fixtures/event-log.js'
 
 const deployment = { physicalCapacity: 1048576, policyCapacity: 262144, maxTokens: 8192, safetyTokens: 2048, burstTokens: 8192, releaseMarginTokens: 4096, softRatio: 0.8, retainRatio: 0.16 }
 test('combined policy limits preserve actual capacity and reserve output once', () => {
@@ -45,19 +46,19 @@ test('recovery requires a retained replacement after the failed revision, source
   let event = { seq: 11, sourceEventSeqs: [1], surfaceOp: { op: 'replace' } }
   let cost = 50
   let ancestors = []
-  const session = { surface: { nodes: [11, 2] }, snapshotEvents: () => [event, ...ancestors], deriveMessages: () => [{ cost }] }
+  const session = { surface: { nodes: [11, 2] }, deriveMessages: () => [{ cost }] }
   const price = messages => messages.reduce((sum, value) => sum + value.cost, 0)
-  assert.equal(recoveryProof(session, failed, price).progressed, true)
+  assert.equal(recoveryProof(session, failed, price, eventLog([event, ...ancestors]), session.deriveMessages()).progressed, true)
   event = { ...event, sourceEventSeqs: [10] }
   ancestors = [{ seq: 10, sourceEventSeqs: [1] }]
-  assert.equal(recoveryProof(session, failed, price).progressed, true, 'Summary of a pruned replacement retains transitive failed-source coverage')
+  assert.equal(recoveryProof(session, failed, price, eventLog([event, ...ancestors]), session.deriveMessages()).progressed, true, 'Summary of a pruned replacement retains transitive failed-source coverage')
   ancestors = []
   event = { ...event, sourceEventSeqs: [1] }
   cost = 100
-  assert.equal(recoveryProof(session, failed, price).progressed, false)
+  assert.equal(recoveryProof(session, failed, price, eventLog([event, ...ancestors]), session.deriveMessages()).progressed, false)
   cost = 50
   event = { ...event, seq: 9 }
-  assert.equal(recoveryProof(session, failed, price).progressed, false)
+  assert.equal(recoveryProof(session, failed, price, eventLog([event, ...ancestors]), session.deriveMessages()).progressed, false)
   event = { ...event, seq: 11, sourceEventSeqs: [7] }
-  assert.equal(recoveryProof(session, failed, price).progressed, false)
+  assert.equal(recoveryProof(session, failed, price, eventLog([event, ...ancestors]), session.deriveMessages()).progressed, false)
 })

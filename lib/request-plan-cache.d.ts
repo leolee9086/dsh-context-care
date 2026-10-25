@@ -1,3 +1,4 @@
+import type { SessionCache } from './session-cache.js';
 interface Payload {
     messages: readonly {
         content: readonly unknown[];
@@ -8,14 +9,15 @@ interface Analysis<T> {
     impact: T;
 }
 /**
- * One planning owner reuses immutable request inputs across output occurrences.
- * Changed requests are measured normally; only same-object measurements and the
- * empty-message check are cached. Do not mutate an input after its first read.
+ * One planning operation reuses immutable request inputs across output occurrences.
+ * Changed requests are measured normally. Requests must not change after first read.
  * @param measure Exact existing request byte comparison.
- * @returns Scoped analysis and comparison functions.
+ * @param cache Host-owned projection storage; close releases this operation's domain.
+ * @returns Scoped analysis, comparison and disposal functions.
  */
-export declare function createRequestPlanCache<R extends Payload, I>(measure: (before: R, after: R) => I): {
+export declare function createRequestPlanCache<R extends Payload, I>(measure: (before: R, after: R) => I, cache: SessionCache): {
     read: (request: R) => Analysis<I>;
     impact: (before: R, after: R) => I;
+    close: () => void;
 };
 export {};

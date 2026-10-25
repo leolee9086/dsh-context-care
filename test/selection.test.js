@@ -6,6 +6,11 @@ import { createProposalExecutor } from '../src/summary-proposals.js'
 import { resolveConfig } from '../src/policy.js'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { createSummaryProposalHistory, summaryProposalRecord } from '../lib/summary-proposal-history.js'
+import { eventLog } from './fixtures/event-log.js'
+import { createSessionCache } from '../lib/session-cache.js'
+const pureLogs = { withLive: (session, consume) => consume({ at: seq => session.eventAt(seq) }),
+  messageAt: (session, seq) => session.deriveEventMessage(session.eventAt(seq)) }
+const select = (session, measurement, policy) => selectMaintenanceRange(session, measurement, policy, eventLog(session.snapshotEvents()))
 
 const user = (seq, kind = 'user') => ({ seq, type: 'user/message', data: { role: 'user', source: { kind }, content: [{ type: 'text', text: `Material ${seq}` }] } })
 function history(events) {
@@ -17,25 +22,38 @@ const measure = session => ({ nodes: session.surface.nodes.map(seq => ({ seq, to
 
 test('fresh prefixes precede checkpoint merges and target selection uses the smallest covering prefix', () => {
   const session = history([user(1), user(2), user(3), user(4)])
-  assert.equal(selectMaintenanceRange(session, measure(session), policy).end, 3)
-  const target = selectMaintenanceRange(session, measure(session), { ...policy, rangeStrategy: 'target-prefix', expectedCheckpointTokens: 50, deficitTokens: 130 })
+  assert.equal(select(session, measure(session), policy).end, 3)
+  const target = select(session, measure(session), { ...policy, rangeStrategy: 'target-prefix', expectedCheckpointTokens: 50, deficitTokens: 130 })
   assert.equal(target.end, 2)
   assert.equal(target.expectedSaving, 150)
   assert.equal(target.coversDeficit, true)
-  assert.equal(selectMaintenanceRange(session, measure(session), { ...policy, rangeStrategy: 'target-prefix', expectedCheckpointTokens: 50, deficitTokens: 1000 }).end, 3)
+  assert.equal(select(session, measure(session), { ...policy, rangeStrategy: 'target-prefix', expectedCheckpointTokens: 50, deficitTokens: 1000 }).end, 3)
   assert.throws(() => resolveConfig({ rangeStrategy: 'target-prefix' }), /requires expectedCheckpointTokens/)
   assert.throws(() => resolveConfig({ maxSummaryRepairRetries: -1 }), /invalid maxSummaryRepairRetries/)
 })
 
+test('large maintenance selection accumulates candidate metrics in linear work without prefix arrays', () => {
+  const events = Array.from({ length: 2000 }, (_, index) => user(index + 1)), session = history(events)
+  const indexed = new Map(events.map(event => [event.seq, event]))
+  let reads = 0
+  const selected = selectMaintenanceRange(session, measure(session), policy, { at: seq => { reads++; return indexed.get(seq) } })
+  assert.equal(selected.end, 1999)
+  assert.equal(selected.sourceSeqs.length, 1999)
+  assert.equal(selected.comparisons.length, 1999)
+  assert.equal(selected.comparisons.every(candidate => !Object.hasOwn(candidate, 'sourceSeqs')), true,
+    'diagnostic comparisons retain scalar metrics, not overlapping copied prefixes')
+  assert.ok(reads <= events.length * 4, `event reads must remain linear: ${reads}`)
+})
+
 test('two checkpoints separated by status can merge, one cannot satisfy explicit rest, and pressure retains its fallback', () => {
   const session = history([user(1, 'compact-checkpoint'), user(2, 'plugin:dsh-context-care:state'), user(3, 'compact-checkpoint'), user(4)])
-  assert.equal(selectMaintenanceRange(session, measure(session), { ...policy, allowFallback: false }).rule, 'checkpoint-merge')
+  assert.equal(select(session, measure(session), { ...policy, allowFallback: false }).rule, 'checkpoint-merge')
   session.surface.nodes = [1, 2, 4]
-  assert.equal(selectMaintenanceRange(session, measure(session), { ...policy, allowFallback: false }), null)
-  assert.equal(selectMaintenanceRange(session, measure(session), policy).rule, 'basic-prefix')
+  assert.equal(select(session, measure(session), { ...policy, allowFallback: false }), null)
+  assert.equal(select(session, measure(session), policy).rule, 'basic-prefix')
   session.surface.nodes = [1, 2, 3, 4]
   session.eventAt(2).data.source.kind = 'user'
-  assert.equal(selectMaintenanceRange(session, measure(session), policy).rule, 'fresh-summary')
+  assert.equal(select(session, measure(session), policy).rule, 'fresh-summary')
 })
 
 test('checkpoint coverage expands prior summaries and prune references in source order without transaction leaves', () => {
@@ -45,13 +63,14 @@ test('checkpoint coverage expands prior summaries and prune references in source
     { ...user(6, 'compact-checkpoint'), data: { ...user(6).data, source: { kind: 'compact-checkpoint', compactionId: 'a' } }, sourceEventSeqs: [4, 5, 1, 3], surfaceOp: { op: 'replace' } },
     user(7), { seq: 8, type: 'compaction/summary', data: { compactionId: 'b', shadowedSeqs: [6, 7] } },
     { ...user(9, 'compact-checkpoint'), data: { ...user(9).data, source: { kind: 'compact-checkpoint', compactionId: 'b' } }, sourceEventSeqs: [8, 6, 7], surfaceOp: { op: 'replace' } }]
-  assert.deepEqual(checkpointCoverage(history(events), 9), { leafSeqs: [1, 2, 7], parentCheckpointSeqs: [6], depth: 2 })
+  assert.deepEqual(checkpointCoverage(history(events), 9, eventLog(events)), { leafSeqs: [1, 2, 7], parentCheckpointSeqs: [6], depth: 2 })
 })
 
 test('native no-useful decisions ignore status and log growth but reset on task material or frozen prices', async () => {
   const session = Session.create(SessionId('proposal-fingerprint'))
   const events = [], records = []
-  const rejected = createSummaryProposalHistory({ readSession: async () => ({ events, inheritedEventCount: 0 }) })
+  const cache = createSessionCache()
+  const rejected = createSummaryProposalHistory({ readSession: async () => eventLog(events) }, { cache })
   const append = (type, data, options) => { const event = session.append(type, data, options); events.push(event); rejected.observe(session, event); return event }
   const task = append('user/message', { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'Initial task' }] }, { surfaceOp: 'append' })
   const status = append('user/message', { role: 'user', source: { kind: 'plugin:dsh-context-care:state' }, content: [{ type: 'text', text: 'Initial status' }] }, { surfaceOp: 'append' })
@@ -65,7 +84,7 @@ test('native no-useful decisions ignore status and log growth but reset on task 
     append('compaction/start', { compactionId, turn: 0, ...summaryProposalRecord(audit.proposalKey) })
     append('compaction/end', { compactionId, turn: 0, error: 'larger checkpoint', ...summaryProposalRecord(audit.proposalKey, 'SUMMARY_NOT_SMALLER') })
     throw Object.assign(new Error('larger checkpoint'), { code: 'SUMMARY_NOT_SMALLER' })
-  })
+  }, pureLogs)
   let scale = 1
   const operation = { pricingBasis: { header: { config: { provider: 'p', model: 'm' } } }, priceMessages: () => 100 * scale }
   const proposal = { sourceSeqs: [task.seq, status.seq], start: task.seq, end: status.seq, rule: 'fresh-summary', comparisons: [] }
@@ -93,7 +112,7 @@ test('selection and executor share trigger identity and settle failures before a
   let captured
   const session = history([user(1)])
   const requests = { wasProposalRejected: async () => false, recordAction: async (_session, data) => records.push(data) }
-  const execute = createProposalExecutor(requests, async (...args) => { captured = args[6]; throw new Error('failed before start') })
+  const execute = createProposalExecutor(requests, async (...args) => { captured = args[6]; throw new Error('failed before start') }, pureLogs)
   await assert.rejects(execute({ config: {} }, { sourceSeqs: [1], rule: 'fresh-summary' }, { session }, new AbortController().signal,
     { priceMessages: () => 100, pricingBasis: { header: {} } }, {}, 'requested'), /failed before start/)
   assert.equal(captured.operationId, records[0].operationId)

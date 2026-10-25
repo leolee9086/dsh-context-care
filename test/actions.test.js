@@ -8,6 +8,7 @@ import { ActionRecord } from '../src/action-detail.js'
 import { createActionRecords } from '../src/action-records.js'
 import { dictionaries } from '../src/client-view.js'
 import { careStreamFixture, turn } from './fixtures/care-stream.js'
+import { eventLog } from './fixtures/event-log.js'
 
 test('action reads preserve the Host storage diagnostic in their visible error state', async () => {
   const transport = careStreamFixture()
@@ -33,7 +34,7 @@ test('historical compaction exposes stored facts without fabricating before/afte
     shadowedSeqs: sources, shadowedTokenCount: 96722, provider: 'aihub', model: 'gpt-6.1-sol', usage: { inputTokens: 116696, outputTokens: 3719 } } },
   { seq: 18686, type: 'user/message', time: 1791311051163, data: { source: { kind: 'compact-checkpoint', compactionId: 'historical' } },
     surfaceOp: { op: 'replace', startSeq: 18085, endSeq: 18346 } }]
-  const view = contextCareActions([], { snapshotEvents: () => events, eventAt: seq => events.find(event => event.seq === seq) })
+  const view = contextCareActions([], undefined, eventLog(events))
   assert.equal(view.actions[0].auditStatus, 'session-only')
   assert.equal(view.actions[0].beforeInput, undefined)
   assert.equal(view.actions[0].reason, undefined)
@@ -55,7 +56,7 @@ test('multiple summary transactions retain one failed operation and enrich alrea
     record('child', { action: 'summary', compactionId: 'child1', phase: 'committed' }),
     record('fail', { action: 'prune', operationId: 'op', summaryTransactions: ['child1', 'child2'], phase: 'failed', beforeInput: 5000, afterInput: 1500, error: 'late error' }),
     record('rule', { action: 'rule-evaluation', phase: 'evaluated' }), record('rewrite', { action: 'request-rewrite', phase: 'recorded' })],
-  { snapshotEvents: () => events, eventAt: seq => events.find(event => event.seq === seq) })
+  undefined, eventLog(events))
   assert.equal(view.actions.length, 1)
   const action = view.actions[0]
   assert.equal(action.id, 'op')
@@ -75,7 +76,7 @@ test('action display groups transactions, separates pricing units and reports mi
     record('b', { compactionId: 'c', action: 'summary', phase: 'prepared', afterInput: 2000 }),
     record('p', { operationId: 'p', action: 'prune', phase: 'failed', outcome: 'partial', beforeInput: 50000, afterInput: 30000, routeSaving: 20000, heuristicSaving: 5000, error: 'Summary failed after prune' }),
     record('q', { purpose: 'conversation', callId: 'q', dispatchOrder: 1, dispatched: true, route: { provider: 'p', model: 'm' }, budget: { inputTokens: 30000, hardInput: 40000 }, system: 'private prompt', tools: ['private schema'] }, 'request'),
-  ], { snapshotEvents: () => events, eventAt: seq => events.find(event => event.seq === seq) })
+  ], undefined, eventLog(events))
   const summary = value.actions.find(action => action.id === 'c')
   assert.equal(summary.phase, 'committed')
   assert.equal(summary.journalPersisted, false)
@@ -99,7 +100,7 @@ test('settled deep handoffs and partial durable failures retain one audited acti
       record('start', { operationId: 'operation', action: 'deep-rest', phase: 'started', beforeInput: 5000 }),
       record('settled', { operationId: 'operation', ...(phase === 'completed' ? { compactionId: 'c' } : {}), action: 'deep-rest', phase,
         outcome: phase === 'failed' ? 'partial' : 'committed', replacements: [{ newSeq: 3, oldStartSeq: 1, oldEndSeq: 1 }], afterInput: 1000 }),
-    ], { snapshotEvents: () => [event], eventAt: () => ({ type: 'user/message' }) })
+    ], undefined, eventLog([event]))
     assert.equal(view.actions.length, 1)
     assert.equal(view.actions[0].id, 'operation')
     assert.equal(view.actions[0].phase, phase)
@@ -108,7 +109,7 @@ test('settled deep handoffs and partial durable failures retain one audited acti
   const view = contextCareActions([
     record('latest', { purpose: 'conversation', callId: 'refused', logRevision: 12, dispatched: false, budget: { inputTokens: 6000 } }, 'request'),
     record('old-settlement', { purpose: 'conversation', callId: 'old', logRevision: 10, dispatchOrder: 9, dispatched: true, budget: { inputTokens: 5000 } }, 'request'),
-  ])
+  ], undefined, eventLog([]))
   assert.equal(view.admission.callId, 'refused')
   assert.equal(view.admission.dispatched, false)
 })

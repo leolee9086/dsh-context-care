@@ -1230,7 +1230,7 @@ export function createReminderRuntime({ config: input, entries = [], sessionAuth
       })
       if (release.length) await claims({ release })
     },
-    async filterMessages<Message extends MessageView>(sessionId: string, visible: MessageView[], messages: Message[], agentPreset?: string, queued = false) {
+    async filterMessages<Message extends MessageView>(sessionId: string, visible: readonly MessageView[], messages: Message[], agentPreset?: string, queued = false) {
       if (!messages.some(message => message.source?.kind === REMINDER_MESSAGE_KIND)) return messages
       const target = await identity(sessionId, agentPreset)
       restoreHandedMessages(sessionId, messages)

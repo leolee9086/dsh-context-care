@@ -64,7 +64,7 @@ export declare function humanActivity(events: HistoryView, now: number, withinMs
     at: number;
     evidence: string;
 } | null;
-export declare function requestContext(visible: MessageView[], config: {
+export declare function requestContext(visible: readonly MessageView[], config: {
     maxContextChars: number;
     maxContextMessages: number;
 }): {

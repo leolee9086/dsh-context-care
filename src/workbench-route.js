@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { ControlError } from './rule-controls.js'
 import { runtimePage } from './rule-runtime-data.js'
 import { PreviewWire } from './rule-runtime-wire.js'
+import { ensureSessionLog } from '../lib/session-log.js'
 
 // Only parsing request input is a client error. A broken response projection is
 // a service failure and must remain visible as such.
@@ -56,7 +57,7 @@ export function installWorkbenchRoute(ctx, path = '/context-care/workbench') {
         await service.cancel(id, request.runId); respond(200, management ? { sessionId: id, acknowledged: true } : service.store.read(id, { presetId: service.presetId(agent) }))
       } else {
         const snapshotId = service.snapshotId(agent)
-        const messages = agent.session.deriveMessages()
+        const messages = ensureSessionLog(ctx).messages(agent.session)
         const header = agent.session.requestHeader()
         const modelRequest = { ...header?.config, tools: header?.tools, messages: messages.filter(message => message.role !== 'system'),
           system: messages.filter(message => message.role === 'system').flatMap(message => message.content).filter(block => block.type === 'text').map(block => block.text).join('\n'), purpose: 'preview' }

@@ -1,6 +1,8 @@
 import { z } from 'zod'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-compaction'
+import type { SessionLog } from './session-log.js'
+import type { CacheKey } from './session-cache.js'
 
 const FORMAT = 'context-care/summary-proposal/v1'
 const Evidence = z.object({ format: z.literal(FORMAT), proposalKey: z.string().min(1),
@@ -13,8 +15,8 @@ interface Projection {
   rejected: Set<string>
 }
 interface History {
-  readSession(id: Session['id']): Promise<{ events: readonly SessionEvent[]; inheritedEventCount: number; length?: number;
-    select?(types: readonly SessionEvent['type'][], fromSeq?: number): readonly SessionEvent[]; [Symbol.dispose]?(): void }>
+  readSession(id: Session['id']): Promise<{ inheritedEventCount: number; length: number;
+    select(types: readonly SessionEvent['type'][], fromSeq?: number): readonly SessionEvent[]; [Symbol.dispose]?(): void }>
 }
 
 /**
@@ -57,9 +59,11 @@ function apply(state: Projection, event: SessionEvent) {
  * @param history - the existing native Session query, without Agent activation.
  * @returns incremental live observation and cancellable reads with disposable caches.
  */
-export function createSummaryProposalHistory(history: History) {
-  let states = new WeakMap<Session, Projection>()
-  let restoring = new WeakMap<Session, { task: Promise<Projection>; events: SessionEvent[] }>()
+export function createSummaryProposalHistory(history: History, logs: Pick<SessionLog, 'cache'>) {
+  const stateKey: CacheKey<Session, Projection> = logs.cache.define('summary-proposal-history',
+    'Native Session identity and committed compaction start/end cursor; status-only growth leaves the result reusable.',
+    session => initial(session.inheritedEventCount))
+  const restoring = new WeakMap<Session, { task: Promise<Projection>; events: SessionEvent[] }>()
   let closed = false
   return {
     /** Follow actual commits; cold and mid-install Sessions restore on first read. */
@@ -67,16 +71,18 @@ export function createSummaryProposalHistory(history: History) {
       if (closed) return
       const active = restoring.get(session)
       if (active) { active.events.push(event); return }
-      let state = states.get(session)
-      if (!state && event.seq === 0) { state = initial(session.inheritedEventCount); states.set(session, state) }
-      // A missed or invalid commit requires native replay; never jump its cursor.
-      if (state?.cursor === event.seq) apply(state, event)
+      const state = logs.cache.peek(session, stateKey)
+        ?? (event.seq === 0 ? logs.cache.use(session, stateKey) : undefined)
+      // A missed commit requires native replay; never jump its cursor.
+      if (state?.cursor !== event.seq) return
+      try { apply(state, event) }
+      catch (error) { logs.cache.invalidate(session, stateKey); throw error }
     },
     /** Read one exact proposal rejection; status-only log growth cannot clear it. */
     async has(session: Session, key: string, signal?: AbortSignal): Promise<boolean> {
       if (closed) throw new Error('context-care: summary proposal history closed')
       signal?.throwIfAborted()
-      const cached = states.get(session)
+      const cached = logs.cache.peek(session, stateKey)
       if (cached?.cursor === session.seq) return cached.rejected.has(key)
       let active = restoring.get(session)
       if (!active) {
@@ -85,16 +91,21 @@ export function createSummaryProposalHistory(history: History) {
           const log = await history.readSession(session.id)
           using lease = { [Symbol.dispose]: () => log[Symbol.dispose]?.() }
           if (closed) throw new Error('context-care: summary proposal history closed')
-          const state = cached ?? initial(log.inheritedEventCount)
-          const events = log.select?.(['compaction/start', 'compaction/end'], state.cursor) ?? log.events
-          for (const event of events) apply(state, event)
-          state.cursor = log.length ?? log.events.length
-          for (const event of queued) apply(state, event)
-          states.set(session, state)
-          // Publish and leave restore mode in one synchronous cut. Commits queued
-          // between task fulfillment and its readers must reach the live projection.
-          restoring.delete(session)
-          return state
+          const state = cached ?? logs.cache.use(session, stateKey)
+          try {
+            const events = log.select(['compaction/start', 'compaction/end'], state.cursor)
+            for (const event of events) apply(state, event)
+            state.cursor = log.length
+            for (const event of queued) apply(state, event)
+            logs.cache.worked(stateKey, events.length + queued.length)
+            // Leave restore mode before readers resume so intervening commits
+            // advance this exact projection instead of remaining in the queue.
+            restoring.delete(session)
+            return state
+          } catch (error) {
+            logs.cache.invalidate(session, stateKey)
+            throw error
+          }
         })()
         active = { task, events: queued }
         restoring.set(session, active)
@@ -107,6 +118,6 @@ export function createSummaryProposalHistory(history: History) {
       return state.rejected.has(key)
     },
     /** Forget derived proposal state; the next owner reconstructs from the same log. */
-    close() { closed = true; states = new WeakMap(); restoring = new WeakMap() },
+    close() { closed = true; logs.cache.clear(stateKey) },
   }
 }

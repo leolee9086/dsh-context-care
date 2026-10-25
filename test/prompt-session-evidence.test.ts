@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { contextCarePrompts } from '../src/prompt-view-data.js'
 import { createTransformLog } from '../src/transform-log.js'
+import { eventLog } from './fixtures/event-log.js'
 
 const evaluation = { evaluationId: 'evaluation-1', ruleId: 'notice', outcome: 'applied',
   facts: { fatigue: 80 }, rule: { id: 'notice', action: { kind: 'notify', say: 'Take a break.' } } }
@@ -13,15 +14,15 @@ const event = { type: 'user/message', seq: 12, time: 100, data: {
 } }
 
 test('prompt evidence is rebuilt from the committed message without a request side record', () => {
-  const session = { snapshotEvents: () => [structuredClone(event)] }
-  const [prompt] = contextCarePrompts([], session)
+  const log = eventLog([structuredClone(event)])
+  const [prompt] = contextCarePrompts([], undefined, log)
   assert.equal(prompt.text, 'Take a break.')
   assert.deepEqual(prompt.evaluations, [{ ...evaluation, key: 'event:12:evaluation', at: 100, eventSeq: 12 }])
   // Conflicting discarded cache data cannot override the original logged evaluation.
   const stale = [{ kind: 'maintenance', key: 'stale-cache', at: 101, data: {
     ...evaluation, action: 'rule-evaluation', facts: { fatigue: -1 },
   } }]
-  assert.deepEqual(contextCarePrompts(stale, session), [prompt])
+  assert.deepEqual(contextCarePrompts(stale, undefined, log), [prompt])
 })
 
 test('rule diagnostics need only a logger, never a Session table or request journal', () => {

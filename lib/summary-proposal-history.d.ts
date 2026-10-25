@@ -1,10 +1,10 @@
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session';
+import type { SessionLog } from './session-log.js';
 interface History {
     readSession(id: Session['id']): Promise<{
-        events: readonly SessionEvent[];
         inheritedEventCount: number;
-        length?: number;
-        select?(types: readonly SessionEvent['type'][], fromSeq?: number): readonly SessionEvent[];
+        length: number;
+        select(types: readonly SessionEvent['type'][], fromSeq?: number): readonly SessionEvent[];
         [Symbol.dispose]?(): void;
     }>;
 }
@@ -29,7 +29,7 @@ export declare function summaryProposalRecord(proposalKey: unknown, failureCode?
  * @param history - the existing native Session query, without Agent activation.
  * @returns incremental live observation and cancellable reads with disposable caches.
  */
-export declare function createSummaryProposalHistory(history: History): {
+export declare function createSummaryProposalHistory(history: History, logs: Pick<SessionLog, 'cache'>): {
     /** Follow actual commits; cold and mid-install Sessions restore on first read. */
     observe(session: Session, event: SessionEvent): void;
     /** Read one exact proposal rejection; status-only log growth cannot clear it. */

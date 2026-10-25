@@ -9,8 +9,8 @@ import { isCheckpointSource } from './producer-source.js'
  * @returns ordered unique leaves, direct checkpoint parents and processing depth
  */
 export function checkpointCoverage(session, seq, log) {
-  const events = log ? { get: seq => log.at(seq) } : new Map(session.snapshotEvents().map(event => [event.seq, event]))
-  const summaryEvents = log?.select(['compaction/summary']) ?? [...events.values()].filter(event => event.type === 'compaction/summary')
+  const events = { get: seq => log.at(seq) }
+  const summaryEvents = log.select(['compaction/summary'])
   const summaries = new Map(summaryEvents.map(event => [event.data.compactionId, event]))
   const cache = new Map()
   function visit(source, visiting = new Set()) {

@@ -2,9 +2,15 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { lastAssistantText, lastUserMessage, recentToolCalls, textOf } from '../src/prompt-text.js'
 
-/** 造一个假会话:节点顺序就是事件顺序。 */
+const pureHistory = {
+  surfaceEvents: (session, type) => session.events.filter(event => event.type === type),
+  lastSurface: (session, type) => session.events.findLast(event => event.type === type),
+  messageAt: (session, seq) => session.events[seq].data,
+}
+/** Explicit immutable surface data for pure prompt consumers. */
 function fakeSession(events) {
   return {
+    events: events.map((event, seq) => ({ ...event, seq })),
     surface: { nodes: events.map((_, index) => index) },
     eventAt: node => events[node],
   }
@@ -34,11 +40,11 @@ test('recentToolCalls 从会话事件里取工具调用，按时间正序', () =
     { type: 'tool/call', time: 200, data: { name: 'session_blocks_remember' } },
     { type: 'assistant/message', time: 300, data: { content: [{ type: 'text', text: '说完了' }] } },
   ])
-  assert.deepEqual(recentToolCalls(session), [
+  assert.deepEqual(recentToolCalls(session, pureHistory), [
     { name: 'read', at: 100 },
     { name: 'session_blocks_remember', at: 200 },
   ])
-  assert.deepEqual(recentToolCalls(session, { limit: 1 }), [{ name: 'session_blocks_remember', at: 200 }])
+  assert.deepEqual(recentToolCalls(session, pureHistory, { limit: 1 }), [{ name: 'session_blocks_remember', at: 200 }])
 })
 
 test('lastAssistantText 取最后一条助手输出', () => {
@@ -47,10 +53,11 @@ test('lastAssistantText 取最后一条助手输出', () => {
     { type: 'user/message', time: 2, data: { content: [] } },
     { type: 'assistant/message', time: 3, data: { content: [{ type: 'text', text: '刚说的' }] } },
   ])
-  assert.equal(lastAssistantText(session), '刚说的')
+  assert.equal(lastAssistantText(session, pureHistory), '刚说的')
 })
 
-test('会话没有 surface 时返回空，不抛', () => {
-  assert.deepEqual(recentToolCalls(undefined), [])
-  assert.equal(lastAssistantText({}), '')
+test('empty indexed surface returns no tool calls or assistant text', () => {
+  const session = fakeSession([])
+  assert.deepEqual(recentToolCalls(session, pureHistory), [])
+  assert.equal(lastAssistantText(session, pureHistory), '')
 })

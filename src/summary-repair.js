@@ -7,7 +7,7 @@ import { isDeepStrictEqual } from 'node:util'
  * @param before selected sources, complete surface/messages/header and log revision
  * @returns rebased contiguous selected sequences, or null without valid progress
  */
-export function rebaseSummaryRepair(session, before, log) {
+export function rebaseSummaryRepair(session, before, log, history) {
   const selected = new Set(before.seqs)
   const from = before.surface.indexOf(before.seqs[0])
   const to = before.surface.indexOf(before.seqs.at(-1))
@@ -19,7 +19,7 @@ export function rebaseSummaryRepair(session, before, log) {
     || !isDeepStrictEqual(suffix.length === 0 ? [] : current.slice(-suffix.length), suffix)) return null
   const rebased = current.slice(prefix.length, current.length - suffix.length)
   if (rebased.length === 0) return null
-  const events = new Map([...(log ? log.range(before.revision) : session.snapshotEvents(before.revision))].map(event => [event.seq, event]))
+  const events = new Map([...log.range(before.revision)].map(event => [event.seq, event]))
   function leaves(seq, visiting = new Set()) {
     if (selected.has(seq)) return [seq]
     const event = events.get(seq)
@@ -41,7 +41,7 @@ export function rebaseSummaryRepair(session, before, log) {
   if ((!replaced && !selectedProjection) || before.seqs.some(seq => !covered.has(seq))) return null
   // Projections can change message text without replacing its surface node.
   // Such changes outside the selected span still invalidate this region.
-  const outside = [...prefix, ...suffix].map(seq => session.deriveEventMessage(session.eventAt(seq)))
+  const outside = [...prefix, ...suffix].map(seq => history.messageAt(session, seq))
   if (!isDeepStrictEqual(outside, before.outsideMessages)) return null
   return rebased
 }

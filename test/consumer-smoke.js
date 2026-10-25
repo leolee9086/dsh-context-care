@@ -4,6 +4,7 @@ import { resolve, dirname } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 import { runInNewContext } from 'node:vm'
+import ts from 'typescript'
 
 // The caller supplies an independently installed consumer; never symlink the development dependencies.
 const consumer = resolve(process.argv[2])
@@ -30,21 +31,27 @@ assert.equal(manifest.dependencies['@leolee9086/dsh-rule-engine'], '0.3.0')
 const names = await readdir(resolve(root, 'src'))
 assert.equal(names.includes('vendor'), false)
 for (const file of names.filter(name => name.endsWith('.js'))) {
-  const source = await readFile(resolve(root, 'src', file), 'utf8')
+  // Type paths in JSDoc intentionally resolve against published declarations;
+  // only executable imports belong to the installed runtime closure.
+  const source = ts.transpileModule(await readFile(resolve(root, 'src', file), 'utf8'), { fileName: file, compilerOptions: {
+    target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext, removeComments: true,
+  } }).outputText
   for (const [, target] of source.matchAll(/(?:from\s+|import\s*)['"]([^'"]+)['"]/g)) if (target.startsWith('.')) await readFile(resolve(root, 'src', target))
 }
 const engine = await import(pathToFileURL(packageRequire.resolve('@leolee9086/dsh-rule-engine')).href)
-const { originalSessionBlocks, modelRequestBlocks, setRequestBlock } = await import(pathToFileURL(resolve(root, 'src/request-blocks.js')).href)
-// Exercise the consumer's real traversal and patch path, including nested tool output.
+const { modelRequestBlocks, setRequestBlock } = await import(pathToFileURL(resolve(root, 'src/request-blocks.js')).href)
+const { extractRawBlocks } = await import(pathToFileURL(packageRequire.resolve('@leolee9086/dsh-session-blocks')).href)
+// Exercise pure immutable traversal data; Host projection ownership is covered by native integration tests.
 const message = { id: 'm7', role: 'assistant', content: [
   { type: 'text', text: '  ORIGINAL\n' },
   { type: 'tool-result', callId: 'call-1', content: [{ type: 'text', text: 'nested original' }] },
 ] }
 const event = { seq: 7, type: 'assistant/message', time: 1, data: { message } }
-const session = { id: 'public-consumer', snapshotEvents: () => [event], surface: { nodes: [7] }, deriveEventMessage: () => message }
-const [block] = originalSessionBlocks(session)
+const sessionId = 'public-consumer', turnId = `${sessionId}:seed`
+const origins = { byId: new Map([[message.id, { event, turnId, message }]]), system: undefined }
+const [block] = extractRawBlocks(event, { sessionId, turnId })
 const request = { messages: [structuredClone(message)] }
-const nested = modelRequestBlocks(session, request, 'request-1').find(block => block.text === 'nested original')
+const nested = modelRequestBlocks(sessionId, request, 'request-1', origins, turnId).find(block => block.text === 'nested original')
 setRequestBlock(request, nested, { type: 'text', text: 'nested replacement' })
 assert.equal(request.messages[0].content[1].content[0].text, 'nested replacement')
 assert.equal(message.content[1].content[0].text, 'nested original')

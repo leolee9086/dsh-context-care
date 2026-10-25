@@ -45,7 +45,8 @@ export function createSessionClaims(ctx: Context, now: () => number = Date.now) 
   const dirty = new Set<SessionId>()
   const chargedActivations = new Set<string>()
   const accepted = new Map<string, Set<string>>()
-  const liveCursors = new WeakMap<Session, number>()
+  const cursorKey = history.cache.define('reminder-shared-claim-cursor',
+    'Native Session identity and successful shared-claim replay cursor.', () => ({ through: 0 }))
 
   function record(sessionId: string, value: unknown, status: 'reserved' | 'consumed') {
     if (Owner.safeParse(value).data?.source.kind !== 'plugin:dsh-context-care:reminder') return
@@ -100,7 +101,8 @@ export function createSessionClaims(ctx: Context, now: () => number = Date.now) 
     let inboxChanged = false
     let processed = 0
     const live = ctx.sessions.get(id)
-    const fromSeq = live ? liveCursors.get(live) ?? 0 : 0
+    const cursor = live ? history.cache.use(live, cursorKey) : undefined
+    const fromSeq = cursor?.through ?? 0
     for (const event of log.select(['user/message', 'agent/inbox/spliced'], fromSeq)) {
       if (event.type === 'user/message') record(String(id), event.data, 'consumed')
       else if (event.type === 'agent/inbox/spliced' && event.data.inserted.some(message =>
@@ -111,7 +113,7 @@ export function createSessionClaims(ctx: Context, now: () => number = Date.now) 
     }
     // Use the live inbox when available. A dormant log with no reminder insertion
     // cannot own a pending reservation and needs no detached full Session replay.
-    if (live) { readInbox(live, String(id)); liveCursors.set(live, log.length) }
+    if (live && cursor) { readInbox(live, String(id)); cursor.through = log.length }
     else if (inboxChanged) readInbox(log.prepare(), String(id))
   }
 
@@ -173,6 +175,7 @@ export function createSessionClaims(ctx: Context, now: () => number = Date.now) 
       closed = true
       await lane
       book = { buckets: [] }; dirty.clear(); chargedActivations.clear(); accepted.clear()
+      history.cache.clear(cursorKey)
     },
   }
 }

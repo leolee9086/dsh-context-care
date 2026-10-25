@@ -3876,6 +3876,6 @@ export declare function createReminderRuntime({ config: input, entries, sessionA
         };
     }[]>;
     rollback(sessionId: string, messages: MessageView[]): Promise<void>;
-    filterMessages<Message extends MessageView>(sessionId: string, visible: MessageView[], messages: Message[], agentPreset?: string, queued?: boolean): Promise<Message[]>;
+    filterMessages<Message extends MessageView>(sessionId: string, visible: readonly MessageView[], messages: Message[], agentPreset?: string, queued?: boolean): Promise<Message[]>;
     close(): Promise<void>;
 };

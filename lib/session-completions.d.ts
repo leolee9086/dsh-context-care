@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { Session } from '@deepseek-ai/dsh-session';
+import type { SessionLog } from './session-log.js';
 interface Route {
     provider: string;
     model: string;
@@ -32,6 +33,7 @@ export interface CompletionSegment extends Route {
     text: string;
 }
 interface Options {
+    logs: SessionLog;
     sessions: Pick<Context['sessions'], 'get' | 'list' | 'flush'>;
     cooldownMs: number;
     maxObservedChars: number;

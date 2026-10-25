@@ -10,6 +10,7 @@ import { dictionaries } from '../src/client-view.js'
 import { createUserMessage } from '../src/message.js'
 import { createActionRecords } from '../src/action-records.js'
 import { careStreamFixture, turn } from './fixtures/care-stream.js'
+import { eventLog } from './fixtures/event-log.js'
 const blocks = text => [{ type: 'text', text }]
 const requestRecord = data => ({ kind: 'request', at: 100, data })
 
@@ -28,8 +29,7 @@ test('prompt catalog restores all insertion paths, exact bodies, selected source
     sourceSeqs: [1, 3, 4, 5, 6, 7, 8, 10], requestSourceSeqs: [1, 3], careInstructions: [{ kind: 'guidance', text: GUIDANCE, sourceSeq: 1 },
       { kind: 'summary-instruction', text: 'Exact auxiliary instruction', sourceSeqs: [2, 4] }] }),
     { kind: 'maintenance', data: { action: 'summary', compactionId: 'own' } }]
-  const session = { snapshotEvents: () => events }
-  const prompts = contextCarePrompts(records, session)
+  const prompts = contextCarePrompts(records, undefined, eventLog(events))
   assert.equal(prompts.length, 10)
   assert.equal(prompts.filter(prompt => prompt.kind === 'guidance').length, 1)
   assert.equal(prompts.find(prompt => prompt.seq === 1).text, GUIDANCE)
@@ -43,7 +43,7 @@ test('prompt catalog restores all insertion paths, exact bodies, selected source
   assert.equal(prompt.sources[0].truncated, true)
   assert.deepEqual(prompts.find(prompt => prompt.kind === 'summary-instruction').sources.map(source => source.seq), [2, 4])
   assert.doesNotMatch(JSON.stringify(prompts), /Private prefix|Private suffix|Foreign prompt|Foreign checkpoint/)
-  assert.deepEqual(contextCarePrompts(JSON.parse(JSON.stringify(records)), { snapshotEvents: () => JSON.parse(JSON.stringify(events)) }), prompts)
+  assert.deepEqual(contextCarePrompts(JSON.parse(JSON.stringify(records)), undefined, eventLog(JSON.parse(JSON.stringify(events)))), prompts)
   for (const locale of ['zh', 'en']) {
     const markup = renderToStaticMarkup(React.createElement(PromptDetails, { value: { status: 'ready', prompts }, selectedSeq: 11,
       t: key => { assert.ok(dictionaries[locale][key], key); return dictionaries[locale][key] } }))
@@ -61,7 +61,7 @@ test('rule evidence joins only a persisted stable evaluation identity and legacy
   const records = ['wanted', 'unrelated'].map(id => ({ key: id, kind: 'maintenance', at: 1,
     data: { action: 'rule-evaluation', ruleId: 'r', evaluationId: id, facts: { fatigue: 80 } } }))
   records.push(requestRecord({ callId: 'old', promptDecision: { segments: [{ ruleId: 'r', text: 'retained segment' }] } }))
-  const prompts = contextCarePrompts(records, { snapshotEvents: () => [prompt] })
+  const prompts = contextCarePrompts(records, undefined, eventLog([prompt]))
   assert.deepEqual(prompts.find(item => item.seq === 5).evaluations.map(item => item.key), ['wanted'])
   const legacy = prompts.find(item => item.id === 'request:old')
   assert.equal(legacy.bodyStatus, 'segments-only')
@@ -84,7 +84,7 @@ test('identification never expands a system marker into unrelated instructions',
 
 test('journal-only request decision restores exact prompt without inventing a reconstructed wrapper', () => {
   const prompts = contextCarePrompts([requestRecord({ callId: 'cold', dispatched: false, promptDecision: { seq: 20,
-    message: { content: blocks('<exact>retained text</exact>') }, segments: [{ ruleId: 'static', text: 'segment' }] } })])
+    message: { content: blocks('<exact>retained text</exact>') }, segments: [{ ruleId: 'static', text: 'segment' }] } })], undefined, eventLog([]))
   assert.equal(prompts[0].text, '<exact>retained text</exact>')
   assert.equal(prompts[0].calls[0].dispatched, false)
 })

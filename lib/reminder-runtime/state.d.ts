@@ -1550,17 +1550,6 @@ export type Work = {
         rules: BatchRuleInput[];
     };
 };
-export interface NativeRecoverySelection {
-    tools: boolean;
-    beforeTools: boolean;
-    outputs: boolean;
-    sessionEvents: readonly string[];
-    /** Alias policy changes must invalidate a scan even when the native names stay the same. */
-    sessionAliases?: readonly {
-        name: string;
-        nativeEvent: string;
-    }[];
-}
 export interface HandoffRule {
     sourceId: string;
     ruleId: string;
@@ -1649,14 +1638,14 @@ export interface RequestInput {
     sessionId: string;
     agentPreset?: string;
     events: HistoryView;
-    visible?: MessageView[];
+    visible?: readonly MessageView[];
     accepted?: MessageView[];
     signal?: AbortSignal;
 }
 export interface CollectInput {
     sessionId: string;
     agentPreset?: string;
-    visible: MessageView[];
+    visible: readonly MessageView[];
     accepted?: MessageView[];
     committedIds?: string[];
     candidateIds?: string[];

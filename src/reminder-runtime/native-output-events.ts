@@ -2,24 +2,21 @@ import type { AssistantStreamRecord, StreamChunk, TimedStreamChunk } from '@deep
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { OutputConfig, OutputEvent } from './output-stream.js'
 import { createOutputProjection } from './output-projection.js'
+import type { SessionLogRead } from '../session-log.js'
 
 type Terminal = Extract<SessionEvent, { type: 'assistant/message' | 'assistant/attempt' }>
 
 /**
  * Name an attempt by its preceding native step/attempt, not an Agent-lifecycle counter.
  * @param session - Session whose next or committed stream is being observed.
+ * @param log - shared native event index for this immutable cut.
  * @param before - exclusive event cursor; a terminal event excludes itself.
  * @returns the same key before streaming and after replaying its committed terminal.
  */
-export function nativeOutputAttempt(session: Pick<Session, 'id' | 'seq' | 'eventAt'>, before: number = session.seq): string {
-  for (let cursor = before - 1; cursor >= 0; cursor--) {
-    const event = session.eventAt(cursor as SessionEvent['seq'])
-    if (!event) throw new Error('reminder-native-output-event-missing')
-    if (event.type === 'step/start' || event.type === 'assistant/message' || event.type === 'assistant/attempt') {
-      return `session:${session.id}:output:${event.seq + 1}`
-    }
-  }
-  throw new Error('reminder-native-output-boundary-missing')
+export function nativeOutputAttempt(session: Pick<Session, 'id'>, log: Pick<SessionLogRead, 'length' | 'last'>, before = log.length): string {
+  const event = log.last(['step/start', 'assistant/message', 'assistant/attempt'], before)
+  if (!event) throw new Error('reminder-native-output-boundary-missing')
+  return `session:${session.id}:output:${event.seq + 1}`
 }
 
 /** Read the lossless native compact stream lazily, without copying its whole delta corpus. */
@@ -49,16 +46,16 @@ function* chunks(stream: readonly AssistantStreamRecord[]): Generator<TimedStrea
  * @param report - reports bounded projection failures.
  * @returns ordered output samples with stable identities and recorded clocks.
  */
-export function* replayNativeOutput(config: OutputConfig, session: Pick<Session, 'id' | 'seq' | 'eventAt'>, terminal: Terminal,
+export function* replayNativeOutput(config: OutputConfig, session: Pick<Session, 'id'>, log: Pick<SessionLogRead, 'length' | 'last'>, terminal: Terminal,
   report: (error: unknown) => void): Generator<OutputEvent> {
-  for (const sample of nativeOutputSamples(config, session, terminal, report)) yield sample.event
+  for (const sample of nativeOutputSamples(config, session, log, terminal, report)) yield sample.event
 }
 
 /** Distinguish chunk observations from final samples emitted after native settlement. */
-export function* nativeOutputSamples(config: OutputConfig, session: Pick<Session, 'id' | 'seq' | 'eventAt'>, terminal: Terminal,
+export function* nativeOutputSamples(config: OutputConfig, session: Pick<Session, 'id'>, log: Pick<SessionLogRead, 'length' | 'last'>, terminal: Terminal,
   report: (error: unknown) => void): Generator<{ event: OutputEvent; afterCommit: boolean }> {
   const projection = createOutputProjection(config, { sessionId: String(session.id),
-    attemptId: nativeOutputAttempt(session, terminal.seq), turn: terminal.data.turn, step: terminal.data.step }, report)
+    attemptId: nativeOutputAttempt(session, log, terminal.seq), turn: terminal.data.turn, step: terminal.data.step }, report)
   for (const frame of chunks(terminal.data.stream)) {
     for (const event of projection.push(frame.time, frame.chunk)) yield { event, afterCommit: false }
   }

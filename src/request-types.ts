@@ -34,7 +34,7 @@ export type RequestCall = {
   logRevision: Session['seq']
   generation: Session['surface']['replaceGeneration']
   sourceSeqs: Session['surface']['nodes'][number][]
-  sourceMessages: ReturnType<Session['deriveMessages']>
+  sourceMessages: Readonly<ReturnType<Session['deriveMessages']>>
   original: GenerateOptions
   measurement: ReturnType<Pricing['measure']>
   dispatched: boolean

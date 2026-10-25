@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { parseCompletion } from './completion-observer.js'
 import { createSessionCompletions } from '../lib/session-completions.js'
+import { ensureSessionLog } from '../lib/session-log.js'
 
 /** Completion wording and delivery are projections of the native Session log. */
 export const name = 'context-care-completion'
@@ -24,7 +25,7 @@ export async function openCompletionHost(ctx, config) {
   const sourceId = 'dsh-context-care:completion'
   ctx.effect(() => controls.register({ sourceId, plugin: 'dsh-context-care', registration: 'completion', executor: 'dsh-context-care',
     rules: [{ id: 'completion', title: 'control_completion', actions: [{ id: 'notice', defaultEnabled: config.notifications }] }] }))
-  const service = createSessionCompletions({ sessions: ctx.sessions, ...config, parse: parseCompletion,
+  const service = createSessionCompletions({ sessions: ctx.sessions, logs: ensureSessionLog(ctx), ...config, parse: parseCompletion,
     active: session => controls.enabled(String(session.id), sourceId, 'completion', 'notice'),
     since: session => controls.sinceSeq(String(session.id), sourceId, 'completion') })
   ctx.provide('contextCareCompletion', service)

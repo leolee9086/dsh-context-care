@@ -1,6 +1,6 @@
 import { z } from 'zod';
-import type { Context } from '@deepseek-ai/cordis';
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session';
+import type { SessionLog } from './session-log.js';
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm';
 import type { SessionRequestRecord } from './request-history.js';
 /**
@@ -30,19 +30,21 @@ export declare function requestDecision(event: SessionEvent): {
 /**
  * Reconstruct one settled conversation's input using the native Session surface
  * projection. Only calibration misses need this; no provider or judge is called.
- * @param sessions - the existing detached-session constructor.
+ * @param logs - the Host-owned native log and historical projection service.
  * @param session - the original event log.
  * @param record - the settlement to price.
  * @returns the historical input, including committed request-only changes.
  */
-export declare function replayRequest(sessions: Pick<Context['sessions'], 'prepare'>, session: Session, record: SessionRequestRecord): {
+export declare function replayRequest(logs: SessionLog, session: Session, record: SessionRequestRecord): {
     session: Session;
     request: GenerateOptions;
-    promptDecision: {
+    promptDecision: ({
         [x: string]: unknown;
         callId: string;
         segments: Record<string, z.core.util.JSONType>[];
         message?: import("@deepseek-ai/dsh-llm").RequestMessage | undefined;
-    } | undefined;
+    } & {
+        seq: number;
+    }) | undefined;
     sourceSeqs: import("@deepseek-ai/dsh-session").SessionSeq[];
 };

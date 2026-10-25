@@ -31,24 +31,16 @@ export function lastAssistantMessage(messages) {
  * 从会话里取最近的工具调用记录(名字 + 时间)。
  * 「某个工具多久没被调用了」这个判断用它。
  *
- * 事件在 session.surface.nodes 上,用 session.eventAt 取回来;
- * tool/call 的 data 是 { turn, step, callId, name, arguments },时间在事件信封的 time 上。
+ * 调用方提供 Host 共享 surface 类型索引;时间来自原生事件信封。
  *
  * @param {object} session 会话。
  * @param {object} [options]
  * @param {number} [options.limit] 最多往回看多少条调用;找"最近一次"够用了。
  * @returns {Array<{name: string, at: number}>} 按时间正序。
  */
-export function recentToolCalls(session, { limit = 50 } = {}) {
-  const out = []
-  const nodes = session?.surface?.nodes
-  if (!Array.isArray(nodes)) return out
-  for (let i = nodes.length - 1; i >= 0 && out.length < limit; i -= 1) {
-    const event = session.eventAt(nodes[i])
-    if (event?.type !== 'tool/call') continue
-    out.push({ name: String(event.data?.name ?? ''), at: Number(event.time) })
-  }
-  return out.reverse()
+export function recentToolCalls(session, history, { limit = 50 } = {}) {
+  const events = history.surfaceEvents(session, 'tool/call')
+  return (limit > 0 ? events.slice(Math.max(0, events.length - limit)) : []).map(event => ({ name: String(event.data.name), at: Number(event.time) }))
 }
 
 /**
@@ -58,13 +50,7 @@ export function recentToolCalls(session, { limit = 50 } = {}) {
  * @param {object} session 会话。
  * @returns {string} 文本;没有就空串。
  */
-export function lastAssistantText(session) {
-  const nodes = session?.surface?.nodes
-  if (!Array.isArray(nodes)) return ''
-  for (let i = nodes.length - 1; i >= 0; i -= 1) {
-    const event = session.eventAt(nodes[i])
-    if (event?.type !== 'assistant/message') continue
-    return textOf(event.data)
-  }
-  return ''
+export function lastAssistantText(session, history) {
+  const event = history.lastSurface(session, 'assistant/message')
+  return event ? textOf(history.messageAt(session, event.seq)) : ''
 }

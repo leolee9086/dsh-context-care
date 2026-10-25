@@ -8,14 +8,12 @@
 /** @import {} from '@deepseek-ai/dsh-agent-preset-registry' */
 /** @import {} from '@deepseek-ai/dsh-compaction' */
 import { installContextCare, Config } from './index.js'
-import { contextCareActions } from './action-view-data.js'
-import { contextCarePrompts } from './prompt-view-data.js'
+
 import { installControlRoute } from './control-route.js'
 import { installWorkbenchRoute } from './workbench-route.js'
 import { installDisplayRoute } from './display-route.js'
 import { installChangeRoute } from '../lib/change-route.js'
-import { createCareViewReader } from './care-view-data.js'
-import { ensureSessionLog } from '../lib/session-log.js'
+import { createCareViewReader, createCarePages } from './care-view-data.js'
 
 // 通用入口:挂在 profile 层一次,对所有会话生效。
 //
@@ -53,7 +51,8 @@ export function apply(ctx, config = {}) {
   ctx.effect(() => installWorkbenchRoute(ctx, '/context-care/rule-runtime'))
   const journal = care?.rewriteJournal
   if (journal === undefined) return
-  ctx.effect(() => installChangeRoute(ctx, ctx.contextCareChanges, createCareViewReader(ctx, journal)))
+  const pages = createCarePages(ctx)
+  ctx.effect(() => installChangeRoute(ctx, ctx.contextCareChanges, createCareViewReader(ctx, journal, pages)))
 
   // 两者都已在 inject 里声明,所以直接用属性代理读:**声明的服务用 ctx.<name>,
   // 未声明的可选服务才用 ctx.get**(见 packages/AGENTS.md 的 Optional services 那条)。
@@ -85,18 +84,12 @@ export function apply(ctx, config = {}) {
     try {
       const session = ctx.sessions.get(sessionId)
       if (collection === 'prompts' && !session) { res.writeHead(404); res.end(JSON.stringify({ error: 'session-unavailable' })); return }
-      const records = ctx.contextCareRequests.list(sessionId)
-      /** @param {import('../lib/session-log.js').SessionLogRead | undefined} log */
-      const project = log => {
-        const actions = collection === 'actions' ? contextCareActions(records, session, log) : undefined
-        return { actions, items: actions?.actions ?? contextCarePrompts(records, session, log) }
-      }
-      const { actions, items } = session ? ensureSessionLog(ctx).withLive(session, project) : project(undefined)
       const selectedSeq = query.has('seq') ? Number(query.get('seq')) : undefined
       if (selectedSeq !== undefined && (!Number.isSafeInteger(selectedSeq) || selectedSeq < 0)) { res.writeHead(400); res.end(JSON.stringify({ error: 'invalid-sequence' })); return }
-      const selectedIndex = selectedSeq === undefined ? -1 : items.findIndex(item => item.seq === selectedSeq)
-      const pageOffset = selectedIndex < 0 ? offset : Math.floor(selectedIndex / limit) * limit
-      const page = items.slice(pageOffset, pageOffset + limit)
+      // An unloaded action session has no live diagnostics, preserving the empty response.
+      const { items, admission, ...pagination } = session
+        ? pages(session, collection === 'actions' ? 'actions' : 'prompts', { offset, limit, seq: selectedSeq })
+        : { items: [], admission: undefined, total: 0, offset, selectedFound: selectedSeq === undefined ? undefined : false, nextOffset: null }
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
       const runtime = ctx.get('contextCareWorkbench')?.store.read(sessionId)?.runtime
       const matchingFailures = collection === 'actions' ? (runtime?.runs ?? []).flatMap(run => {
@@ -109,9 +102,8 @@ export function apply(ctx, config = {}) {
       const displayMarkers = collection === 'actions' ? (Array.isArray(markers) && agent && workbench ? markers.flatMap(value =>
         value !== null && typeof value === 'object' && !Array.isArray(value) && typeof value.seq === 'number'
           && value.token === workbench.token(agent, undefined) ? [value.seq] : []) : []) : undefined
-      res.end(JSON.stringify({ admission: actions?.admission, currentState: ctx.contextCareRequests.controls.currentSample(sessionId), matchingFailures, displayMarkers, [collection]: page, total: items.length, offset: pageOffset,
-        selectedFound: selectedSeq === undefined ? undefined : selectedIndex >= 0,
-        nextOffset: pageOffset + page.length < items.length ? pageOffset + page.length : null }))
+      res.end(JSON.stringify({ admission, currentState: ctx.contextCareRequests.controls.currentSample(sessionId), matchingFailures, displayMarkers,
+        [collection]: items, ...pagination }))
     } catch (error) {
       ctx.logger.warn(`context-care: action query failed: ${String(error)}`)
       res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'journal-unavailable', message: error instanceof Error ? error.message : String(error) }))

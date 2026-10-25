@@ -17,7 +17,7 @@ export async function runMaintenance({ requests, session, pricing, action, reaso
   const beforeHeuristic = pricing.measure().nodes.reduce((sum, node) => sum + node.heuristicTokens, 0)
   const facts = () => {
     const measured = pricing.measure()
-    const events = history ? history.withLive(session, log => [...log.range(beforeSeq)]) : session.snapshotEvents(beforeSeq)
+    const events = history.withLive(session, log => [...log.range(beforeSeq)])
     const replacements = events.filter(event => event.surfaceOp?.op === 'replace').map(event => ({
       newSeq: event.seq, oldStartSeq: event.surfaceOp.startSeq, oldEndSeq: event.surfaceOp.endSeq, sourceSeqs: event.sourceEventSeqs ?? [],
     }))

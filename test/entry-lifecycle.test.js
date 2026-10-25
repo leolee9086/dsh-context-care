@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { entryPolicy, deliveredEntry, deactivatedEntry, entryTurn } from '../src/entry-lifecycle.js'
 import { validateDocument } from '../src/workbench-store.js'
 import { createTemplates } from '../src/templates.js'
+import { eventLog } from './fixtures/event-log.js'
 
 const entry = extra => ({ id: 'entry', revision: 1, title: 'Entry', enabledDefault: true, template: 'TEXT',
   activation: { kind: 'constant' }, select: { view: 'model', roles: ['user'], blockTypes: ['text'] }, target: { view: 'model' },
@@ -20,9 +21,9 @@ test('held slices materialize on each request within a turn, a fixed number of r
     assert.equal(entryPolicy(definition, previous, at(3)).reuse, lifetime === 'session')
     assert.equal(previous.materialization.turn, 1)
   }
-  assert.equal(entryTurn({ snapshotEvents: () => [] }), 0)
-  assert.equal(entryTurn({ snapshotEvents: () => [{ type: 'turn/start', seq: 999, data: { turn: 42 } }] }), 42)
-  assert.throws(() => entryTurn({ snapshotEvents: () => [{ type: 'turn/start', data: {} }] }), /entry-turn-unavailable/)
+  assert.equal(entryTurn(undefined, eventLog([])), 0)
+  assert.equal(entryTurn(undefined, eventLog([{ type: 'turn/start', seq: 999, data: { turn: 42 } }])), 42)
+  assert.throws(() => entryTurn(undefined, eventLog([{ type: 'turn/start', seq: 0, data: {} }])), /entry-turn-unavailable/)
 })
 
 test('until-inactive slices release only at deactivation and respect an independent reactivation cooldown', () => {

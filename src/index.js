@@ -118,18 +118,14 @@ export const WATCH_NOTICES = {
 }
 
 /** Read only the latest retained state; no process-local state can leak across sessions. */
-export function previousState(session) {
-  for (let index = session.surface.nodes.length - 1; index >= 0; index--) {
-    const event = session.eventAt(session.surface.nodes[index])
-    if (event?.type === 'user/message' && producedBy(event.data.source, statePlugin)) {
-      return {
-        text: event.data.content.filter(block => block.type === 'text').map(block => block.text).join('\n'),
-        fatigueValue: event.data.source.contextCare?.fatigueValue,
-        wakefulnessValue: event.data.source.contextCare?.wakefulnessValue,
-      }
-    }
-  }
-  return undefined
+export function previousState(session, history) {
+  const values = history.projectSurface(session, previousState, ({ event }) => {
+    if (event.type !== 'user/message' || !producedBy(event.data.source, statePlugin)) return []
+    const message = history.messageAt(session, event.seq)
+    return [{ text: textOf(message), fatigueValue: message.source.contextCare?.fatigueValue,
+      wakefulnessValue: message.source.contextCare?.wakefulnessValue }]
+  }, true)
+  return values.at(-1)
 }
 
 /**
@@ -205,16 +201,16 @@ export function installContextCare(ctx, raw, compactionSource) {
   const compactSummary = createSummaryExecutor({ meter: ctx.tokenMeter, llm: ctx.llm, requests: ctx.contextCareRequests, spec, history,
     eligible: (agent, reason) => reason === 'requested' || enabled(agent.session.id, reason === 'overflow' ? 'overflow' : 'maintenance', 'summary'),
     recover: payload => ctx.waterfall('compaction/summary-error', payload, () => false)
-      || repairSummaryImages(ctx.sessions, payload) })
-  const executeProposal = createProposalExecutor(ctx.contextCareRequests, compactSummary)
-  const propose = (agent, current, allowFallback) => selectMaintenanceRange(agent.session, current.measurement, {
+      || repairSummaryImages(ctx.sessions, payload, history) })
+  const executeProposal = createProposalExecutor(ctx.contextCareRequests, compactSummary, history)
+  const propose = (agent, current, allowFallback) => history.withLive(agent.session, log => selectMaintenanceRange(agent.session, current.measurement, {
     // 容量未知只让压力预估不可用。主动请求仍可按显式尾部设置选区，
     // 缺省保留最近完整单元，再由摘要路由或自定义 provider 处理实际输入。
     retainTokens: current.budget?.retainTail ?? spec.retainTokens ?? 0, minFreshTokens: spec.minFreshTokens, pluginName: name,
     deficitTokens: current.loadTokens === undefined || current.budget?.releaseTarget === undefined
       ? 0 : Math.max(0, current.loadTokens - current.budget.releaseTarget), rangeStrategy: spec.rangeStrategy,
     expectedCheckpointTokens: spec.expectedCheckpointTokens, allowFallback,
-  })
+  }, log))
   const maintain = (session, pricing, action, reason, run) => runMaintenance({ requests: ctx.contextCareRequests, session, pricing, action, reason, run, history })
   const prune = (agent, pricing, reason) => {
     const pruner = resolvePruner(agent)
@@ -319,7 +315,7 @@ export function installContextCare(ctx, raw, compactionSource) {
       rules: sessionId => controlledEngineRules(controls, sessionId, 'transform'),
       cleanPatterns: sessionId => {
         const session = ctx.sessions.get(sessionId)
-        const seq = session?.surface.nodes.findLast(seq => session.eventAt(seq)?.type === 'assistant/message')
+        const seq = session === undefined ? undefined : history.lastSurface(session, 'assistant/message')?.seq
         return LOOP_IDS.filter(id => enabled(sessionId, `loop-${id}`, 'clean')
           && (controls.sinceSeq(sessionId, CARE_SOURCE, `loop-${id}`) < 0 || seq > controls.sinceSeq(sessionId, CARE_SOURCE, `loop-${id}`)))
       },
@@ -425,7 +421,7 @@ export function installContextCare(ctx, raw, compactionSource) {
         noticeSent.add(key)
         // 文案可能需要最近一次状态报告里的数值（上下文焦虑用它给证据）。
         // previousState 只扫 surface 尾部、是同步的；这里不能 await sample()。
-        const state = agent.session === undefined ? undefined : previousState(agent.session)
+        const state = agent.session === undefined ? undefined : previousState(agent.session, history)
         agent.inject(notice(watchPlugin(trigger.id), trigger.id === 'line-repeat' ? loopNoticeText(hit, false) : wording.text(hit, state),
           trigger.id === 'line-repeat' ? 'Output loop detected' : wording.summary, undefined,
           { contextCareTrace: { trigger: 'stream-watch', detector: trigger.id, evidence: hit } }))
@@ -509,7 +505,7 @@ export function installContextCare(ctx, raw, compactionSource) {
 
   async function sample(agent, signal, proposed = [], includeState = false, operation) {
     signal.throwIfAborted()
-    const pricing = operation ?? captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session, requests: ctx.contextCareRequests })
+    const pricing = operation ?? captureInputPricing({ history, meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session, requests: ctx.contextCareRequests })
     const measurement = pricing.measure()
     const config = pricing.pricingBasis.header?.config
     // The first envelope has no routed capacity; final dispatch owns its check.
@@ -522,7 +518,7 @@ export function installContextCare(ctx, raw, compactionSource) {
     // Output accounting is diagnostic only. The meter owns text calibration,
     // including large valid ratios; pending inputs use that same frozen basis.
     const retained = measurement.surfaceTokens
-    const baseRequest = { ...config, purpose: 'conversation', messages: [...agent.session.deriveMessages(), ...proposed],
+    const baseRequest = { ...config, purpose: 'conversation', messages: [...history.messages(agent.session), ...proposed],
       tools: pricing.pricingBasis.header?.tools }
     const preview = ctx.contextCareRequests.preview?.(agent.session, baseRequest).request ?? baseRequest
     const promptCost = pricing.priceRequest(preview) - pricing.priceRequest(baseRequest)
@@ -531,7 +527,7 @@ export function installContextCare(ctx, raw, compactionSource) {
       const capacity = Math.min(...[physicalCapacity, policy.contextBudgetTokens].filter(value => value !== undefined))
       const state = calculateState(load, retained, Number.isFinite(capacity) ? capacity : undefined, spec)
       const text = stateText(agent, state)
-      if (text && shouldNotify(previousState(agent.session), text, state)) load = Math.ceil(load + pricing.priceMessages([notice(statePlugin, text, 'Context state', state)]))
+      if (text && shouldNotify(previousState(agent.session, history), text, state)) load = Math.ceil(load + pricing.priceMessages([notice(statePlugin, text, 'Context state', state)]))
     }
     const budget = contextBudget({ inputTokens: load, physicalCapacity, policyCapacity: policy.contextBudgetTokens,
       billingInputCeilingTokens: policy.billingInputCeilingTokens, maxTokens: config.maxTokens, defaultMaxTokens: info.defaultMaxTokens,
@@ -656,7 +652,7 @@ export function installContextCare(ctx, raw, compactionSource) {
         adapterDefaults: call.session.requestHeader()?.adapterDefaults }
       // Bind the final route's attachment prices, including an explicitly absent
       // projection. Middleware route changes cannot reuse the previous route.
-      const pricing = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: call.session, header,
+      const pricing = captureInputPricing({ history, meter: ctx.tokenMeter, llm: ctx.llm, session: call.session, header,
         imageRequestPricing: ready.imageRequestPricing, requests: ctx.contextCareRequests })
       const inputTokens = pricing.priceRequest(request)
       const policy = budgetPolicy(spec, request, request.purpose ?? 'conversation')
@@ -674,7 +670,8 @@ export function installContextCare(ctx, raw, compactionSource) {
   ctx.on('agent/status', ({ agent, status }) => { if (status === 'idle') overflowRetries.delete(agent) })
   ctx.on('agent/assistant-stream', ({ agent, frame }) => {
     if (frame.type !== 'end' || frame.outcome.kind !== 'committed') return
-    const event = agent.session.eventAt(frame.outcome.seq)
+    const outcome = frame.outcome
+    const event = history.withLive(agent.session, log => log.at(outcome.seq))
     if (event?.type === 'assistant/message' && !event.data.interrupted) overflowRetries.delete(agent)
   })
   ctx.on('agent/request-error', async ({ agent, failure, signal }, next) => {
@@ -697,9 +694,9 @@ export function installContextCare(ctx, raw, compactionSource) {
         const compaction = resolveCompaction(agent)
         if (compaction !== undefined && enabled(session.id, 'overflow', 'summary')) {
           const measured = failed.dispatchPricing.measure()
-          const range = selectRestRange(session, measured, 0, 0, name)
+          const range = history.withLive(session, log => selectRestRange(session, measured, 0, 0, name, log))
           if (range !== null) await compactSummary(compaction, { ...range, minFreshTokens: 0 }, agent, signal, failed.dispatchPricing,
-            { ...failed.ready.request, messages: session.deriveMessages() }, { reason: 'overflow', callId: failed.callId })
+            { ...failed.ready.request, messages: history.messages(session) }, { reason: 'overflow', callId: failed.callId })
         }
       } catch (error) {
         if (signal.aborted) throw error
@@ -707,11 +704,11 @@ export function installContextCare(ctx, raw, compactionSource) {
         ctx.logger.warn(`context-care: overflow maintenance failed: ${error instanceof Error ? error.message : String(error)}`)
       }
       signal.throwIfAborted()
-      const proof = history.withLive(session, log => recoveryProof(session, failed, failed.dispatchPricing.priceMessages, log))
+      const proof = history.withLive(session, log => recoveryProof(session, failed, failed.dispatchPricing.priceMessages, log, history.messages(session)))
       if (!proof.progressed) return delegated
       // Keep the exact dispatched one-shot system/tools and replace the
       // logged history, including its system head, just as the Agent does.
-      const after = failed.dispatchPricing.priceRequest({ ...failed.ready.request, messages: session.deriveMessages() })
+      const after = failed.dispatchPricing.priceRequest({ ...failed.ready.request, messages: history.messages(session) })
       if (failure.code === 'REQUEST_BUDGET_EXCEEDED' && after > failed.dispatchBudget.hardInput) return delegated
       return enabled(session.id, 'overflow', 'retry') ? { kind: 'retry' } : delegated
       })
@@ -728,9 +725,9 @@ export function installContextCare(ctx, raw, compactionSource) {
     const reminders = ctx.get('reminderRules')
     if (reminders) {
       try {
-        const sessionId = String(agent.session.id), visible = agent.session.deriveMessages()
+        const sessionId = String(agent.session.id), visible = history.messages(agent.session)
         // Presence reads only the recent log tail; it does not materialize a full-session snapshot.
-        const recent = { length: agent.session.seq, at: index => agent.session.eventAt(index) }
+        const recent = history.live(agent.session)
         await reminders.prepareRequest?.({ sessionId, events: recent, visible, accepted, signal })
         const collected = await reminders.collect({ sessionId, visible, accepted, signal })
         const replacements = new Map(collected.map(message => [message.id, message]))
@@ -753,7 +750,7 @@ export function installContextCare(ctx, raw, compactionSource) {
       const user = lastUserMessage(accepted)
       const assistant = lastAssistantMessage(accepted)
       const notices = await noticeChannel.collect({ agentId: agent.id,
-        userText: user === undefined ? '' : textOf(user), assistantText: assistant === undefined ? lastAssistantText(agent.session) : textOf(assistant), signal }, {
+        userText: user === undefined ? '' : textOf(user), assistantText: assistant === undefined ? lastAssistantText(agent.session, history) : textOf(assistant), signal }, {
           enabled: (sourceId, ruleId) => controls.enabled(String(agent.session.id), sourceId, ruleId, 'notice'),
           epoch: (sourceId, ruleId) => controls.epoch(String(agent.session.id), sourceId, ruleId),
           sinceSeq: (sourceId, ruleId) => controls.sinceSeq(String(agent.session.id), sourceId, ruleId),
@@ -764,10 +761,10 @@ export function installContextCare(ctx, raw, compactionSource) {
       if (signal.aborted) throw error
       ctx.logger.warn(`context-care: 通知通道没有跑起来: ${error instanceof Error ? error.message : String(error)}`)
     }
-    const assistantSeq = agent.session.surface.nodes.findLast(seq => agent.session.eventAt(seq)?.type === 'assistant/message')
+    const assistantSeq = history.lastSurface(agent.session, 'assistant/message')?.seq
     const loop = detectLoop(agent.session, LOOP_IDS.filter(id => enabled(agent.session.id, `loop-${id}`, 'notice')
-      && assistantSeq > controls.sinceSeq(String(agent.session.id), CARE_SOURCE, `loop-${id}`)))
-    if (loopNeedsReminder(loop, loop !== undefined && enabled(agent.session.id, `loop-${loop.pattern}`, 'clean')) && !alreadyWarned(agent.session, loopPlugin)) messages.push(notice(loopPlugin, loopNoticeText(loop), 'Output loop detected', undefined,
+      && assistantSeq > controls.sinceSeq(String(agent.session.id), CARE_SOURCE, `loop-${id}`)), -1, history)
+    if (loopNeedsReminder(loop, loop !== undefined && enabled(agent.session.id, `loop-${loop.pattern}`, 'clean')) && !alreadyWarned(agent.session, loopPlugin, history)) messages.push(notice(loopPlugin, loopNoticeText(loop), 'Output loop detected', undefined,
       { contextCareTrace: { trigger: 'loop-guard', evidence: loop } }))
     return messages
   }
@@ -805,7 +802,7 @@ export function installContextCare(ctx, raw, compactionSource) {
       // before freezing maintenance prices; ready-time checks would be too late
       // to plan this boundary with the previous completed request's scale.
       await ctx.contextCareRequests.flush?.(agent.session.id)
-      const operation = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session, requests: ctx.contextCareRequests })
+      const operation = captureInputPricing({ history, meter: ctx.tokenMeter, llm: ctx.llm, session: agent.session, requests: ctx.contextCareRequests })
       current = await sample(agent, signal, messages, false, operation)
       messages = await collectInputs(agent, signal, decision.messages, current)
       current = await sample(agent, signal, messages, true, operation)
@@ -848,7 +845,7 @@ export function installContextCare(ctx, raw, compactionSource) {
         } else if (deep) {
           // 清空不经过 compaction provider：替换物是模型自己写的那条消息，
           // 不需要另起一次 LLM 调用，也就没有"摘要不可能比区间小"那道墙。
-          const range = selectClearRange(agent.session)
+          const range = history.withLive(agent.session, log => selectClearRange(agent.session, log))
           if (range === null) {
             outcome = '没有执行——系统提示词之外没有可清空的内容'
           } else {
@@ -887,7 +884,7 @@ export function installContextCare(ctx, raw, compactionSource) {
     const reminderService = ctx.get('reminderRules')
     if (reminderService) {
       for (;;) {
-        const filtered = await reminderService.filterMessages(String(agent.session.id), agent.session.deriveMessages(), messages)
+        const filtered = await reminderService.filterMessages(String(agent.session.id), history.messages(agent.session), messages)
         const denied = messages.filter(message => !filtered.includes(message))
         messages = filtered
         if (!denied.length) break
@@ -899,7 +896,7 @@ export function installContextCare(ctx, raw, compactionSource) {
 
     controls.sample(String(agent.session.id), current.state)
     const text = stateText(agent, current.state, outcome, requested)
-    const previous = previousState(agent.session)
+    const previous = previousState(agent.session, history)
     if (!text || (!requested && !shouldNotify(previous, text, current.state))) {
       // 即便状态没变，只要循环提醒挂上了就得把消息带回去。
       return messages.length === decision.messages.length && messages.every((message, index) => message === decision.messages[index])

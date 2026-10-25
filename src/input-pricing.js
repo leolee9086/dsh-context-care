@@ -1,4 +1,6 @@
 /** Operation-local input prices built solely from injected public services. */
+// Definition only: the Host manager owns the projected attachment values.
+const fileAttachmentsKey = {}
 
 /**
  * Capture one text scale and attachment projection for maintenance or dispatch.
@@ -7,7 +9,7 @@
  * @returns process-local pricing functions; only pricingBasis is serializable.
  */
 export function captureInputPricing(options) {
-  const { meter, llm, session, header = session.requestHeader() } = options
+  const { meter, llm, session, history, header = session.requestHeader() } = options
   // Official rc.2 exposes only the fixed estimator. Input calibration belongs
   // to this plugin's completed-request journal, never to output-token pressure.
   const initial = { logRevision: session.seq, pricingBasis: Object.freeze({
@@ -69,14 +71,22 @@ export function captureInputPricing(options) {
   }
   function measure() {
     const seqs = [...session.surface.nodes]
-    const messages = seqs.map(seq => session.deriveEventMessage(session.eventAt(seq)))
+    const messages = seqs.map(seq => history.messageAt(session, seq) ?? null)
     const tokens = prices(messages)
     const nodes = seqs.map((seq, index) => ({ seq, tokens: tokens[index], heuristicTokens: messages[index] === null ? 0 : meter.estimateMessage(messages[index]) }))
     const surfaceTokens = tokens.reduce((sum, value) => sum + value, 0)
     const toolsTokens = schemaTokens(basis.header?.tools)
     return { logRevision: session.seq, pricingBasis: basis, nodes, surfaceTokens, toolsTokens, inputTokens: surfaceTokens + toolsTokens }
   }
-  // Prewarm file handles before any maintenance replaces the selected input.
-  prices(session.deriveMessages())
+  // Freeze path-dependent file text before maintenance replaces any selected
+  // input. Text/image pricing is not needed for prewarming and used to traverse
+  // the entire surface a second time at every operation capture. The shared
+  // projection revisits only appended messages or native content invalidations.
+  const attachments = history.projectSurface(session, fileAttachmentsKey, ({ event }) =>
+    history.messageAt(session, event.seq)?.content.filter(block => block.type === 'file').map(block => block.attachment) ?? [], true)
+  for (const attachment of attachments) {
+    const key = JSON.stringify(attachment)
+    if (!fileHandles.has(key)) fileHandles.set(key, fileText(attachment))
+  }
   return Object.freeze({ pricingBasis: basis, initial, priceMessages, priceRequest, decomposeRequest, measure })
 }

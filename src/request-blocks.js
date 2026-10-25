@@ -2,46 +2,23 @@ import { extractRawBlocks, walkContentBlocks, parseToolArguments } from '@leolee
 
 /** Durable turn identities come from turn/start events, including inherited events after forks. */
 export function sessionTurn(session, log) {
-  const event = log ? log.last('turn/start') : session.snapshotEvents().findLast(event => event.type === 'turn/start')
+  const event = log.last('turn/start')
   return event ? `${session.id}:turn:${event.data.turn ?? event.seq}` : `${session.id}:seed`
 }
-function surfaceEvents(session, log) {
-  if (!log) {
-    const active = new Set(session.surface.nodes)
-    return session.snapshotEvents().filter(event => event.type === 'turn/start' || active.has(event.seq))
-  }
-  return [...log.select(['turn/start']), ...session.surface.nodes.map(seq => log.at(seq))]
-    .sort((a, b) => a.seq - b.seq)
-}
-/** Borrow chronological raw blocks from the Host projection when supplied. */
-export function originalSessionBlocks(session, log, history) {
-  if (history) return history.projectSurface(session, originalSessionBlocks, ({ event, turnId }) =>
+/** Borrow chronological raw blocks from the Host's shared surface projection. */
+export function originalSessionBlocks(session, history) {
+  return history.projectSurface(session, originalSessionBlocks, ({ event, turnId }) =>
     event.type === 'turn/start' ? [] : extractRawBlocks(event, { sessionId: String(session.id), turnId }))
-  let turnId = `${session.id}:seed`
-  const blocks = []
-  for (const event of surfaceEvents(session, log)) {
-    if (event.type === 'turn/start') { turnId = `${session.id}:turn:${event.data.turn ?? event.seq}`; continue }
-    blocks.push(...extractRawBlocks(event, { sessionId: String(session.id), turnId }))
-  }
-  return blocks
 }
-/** Associate model messages by their public message id; transient request-only input never receives an invented committed seq. */
-export function modelRequestBlocks(session, request, requestId, log, history) {
-  const shared = history?.origins(session)
-  const origins = shared?.byId ?? new Map()
-  let turnId = `${session.id}:seed`
-  for (const event of shared ? [] : surfaceEvents(session, log)) {
-    if (event.type === 'turn/start') { turnId = `${session.id}:turn:${event.data.turn ?? event.seq}`; continue }
-    const message = session.deriveEventMessage(event)
-    if (message) origins.set(message.id, { event, turnId, message })
-  }
+/** Traverse request data using already indexed native origins; never interpret a Session here. */
+export function modelRequestBlocks(sessionId, request, requestId, shared, currentTurn) {
+  const origins = shared.byId
   const blocks = []
-  const currentTurn = sessionTurn(session, log)
   function append(message, messageIndex, origin) {
     const appendBlock = (raw, ref) => {
       const text = ['text', 'reasoning'].includes(ref.type) && typeof raw.text === 'string' ? raw.text : undefined
-      blocks.push({ ...ref, id: origin ? `${session.id}#${origin.event.seq}#${ref.path}` : `${session.id}#request:${requestId}#${messageIndex}#${ref.path}`,
-        sessionId: String(session.id), seq: origin?.event.seq, messageId: message.id ?? `request:${requestId}:${messageIndex}`,
+      blocks.push({ ...ref, id: origin ? `${sessionId}#${origin.event.seq}#${ref.path}` : `${sessionId}#request:${requestId}#${messageIndex}#${ref.path}`,
+        sessionId: String(sessionId), seq: origin?.event.seq, messageId: message.id ?? `request:${requestId}:${messageIndex}`,
         turnId: origin?.turnId ?? currentTurn, role: message.role, view: 'model', text, raw: structuredClone(raw),
         ...(ref.type === 'tool-call' ? parseToolArguments(raw.arguments) : {}),
         signed: ref.type === 'reasoning' && (raw.signature !== undefined || raw.opaque !== undefined || raw.encrypted !== undefined || message.source?.replayState !== undefined),
@@ -52,8 +29,7 @@ export function modelRequestBlocks(session, request, requestId, log, history) {
     walkContentBlocks(message.content, appendBlock, '', message.toolCallId)
   }
   if (typeof request.system === 'string' && request.system.length) {
-    const origin = shared ? shared.system : [...origins.values()].find(value => value.message.role === 'system')
-    append({ role: 'system', id: 'request-system', content: [{ type: 'text', text: request.system }] }, -1, origin)
+    append({ role: 'system', id: 'request-system', content: [{ type: 'text', text: request.system }] }, -1, shared.system)
   }
   request.messages.forEach((message, i) => append(message, i, origins.get(message.id)))
   return blocks

@@ -17,27 +17,10 @@ import { CHECKPOINT_KIND } from './producer-source.js'
 
 /** 会话当前的边界状态，全部由日志推出，不依赖任何 compaction 服务。 */
 export function inspectSession(session, log) {
-  if (log) {
-    const turn = log.last('turn/start'), turnEnd = log.last('turn/end')
-    const compact = log.last('compaction/start'), compactEnd = log.last('compaction/end')
-    return { openTurn: turn && (!turnEnd || turn.seq > turnEnd.seq) ? turn.data.turn : null,
-      unmatchedCompactionStart: compact && (!compactEnd || compact.seq > compactEnd.seq) ? compact.seq : undefined }
-  }
-  let openTurn = null
-  let unmatchedCompactionStart
-  const events = session.snapshotEvents()
-  for (const event of events) {
-    if (event.type === 'turn/start') {
-      openTurn = event.data.turn
-    } else if (event.type === 'turn/end') {
-      openTurn = null
-    } else if (event.type === 'compaction/start') {
-      unmatchedCompactionStart = event.seq
-    } else if (event.type === 'compaction/end') {
-      unmatchedCompactionStart = undefined
-    }
-  }
-  return { openTurn, unmatchedCompactionStart }
+  const turn = log.last('turn/start'), turnEnd = log.last('turn/end')
+  const compact = log.last('compaction/start'), compactEnd = log.last('compaction/end')
+  return { openTurn: turn && (!turnEnd || turn.seq > turnEnd.seq) ? turn.data.turn : null,
+    unmatchedCompactionStart: compact && (!compactEnd || compact.seq > compactEnd.seq) ? compact.seq : undefined }
 }
 
 /** 交接消息在 surface 上的来源标记；与 DSH 的 checkpoint 约定一致（V3 的 `compact` 迁移后就是它）。 */

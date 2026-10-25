@@ -7,7 +7,7 @@ import { CHECKPOINT_KIND } from './producer-source.js'
 import { inspectSession } from './deep-rest.js'
 import { rebaseSummaryRepair } from './summary-repair.js'
 import { checkpointCoverage } from './checkpoint-coverage.js'
-import { buildSummaryRequest, frameSummary, summaryCandidates, summaryConfig, summaryPricing } from './summary-request.js'
+import { buildSummaryRequest, frameSummary, summaryRanges, summaryConfig, summaryPricing } from './summary-request.js'
 import { summaryProposalRecord } from '../lib/summary-proposal-history.js'
 
 function failure(message, code) { return Object.assign(new Error(message), { code }) }
@@ -49,7 +49,7 @@ async function collectSummary(stream, signal) {
  */
 export function createSummaryExecutor({ meter, llm, requests, spec, history, recover = () => false, eligible = () => true }) {
   const active = new WeakMap()
-  const read = (session, consume) => history ? history.withLive(session, consume) : consume(undefined)
+  const read = (session, consume) => history.withLive(session, consume)
   async function run(service, range, agent, signal, operation, envelope, audit = {}) {
     const session = agent.session
     const assertEligible = () => {
@@ -64,15 +64,15 @@ export function createSummaryExecutor({ meter, llm, requests, spec, history, rec
     const { openTurn, unmatchedCompactionStart } = read(session, log => inspectSession(session, log))
     if (unmatchedCompactionStart !== undefined) throw failure('context-care: another compaction is already open', 'COMPACTION_BUSY')
     let surface = [...session.surface.nodes]
-    let messages = structuredClone(session.deriveMessages())
+    let messages = history.messages(session)
     const header = structuredClone(session.requestHeader())
     function assertStable() {
       signal.throwIfAborted()
-      if (!isDeepStrictEqual(session.surface.nodes, surface) || !isDeepStrictEqual(session.deriveMessages(), messages)
+      if (!isDeepStrictEqual(session.surface.nodes, surface) || !isDeepStrictEqual(history.messages(session), messages)
         || !isDeepStrictEqual(session.requestHeader(), header)) throw failure('context-care: summary input changed before commit', 'SUMMARY_SURFACE_CHANGED')
     }
     let measured = operation.measure()
-    let candidates = summaryCandidates(session, range, measured, range.minFreshTokens ?? spec.minFreshTokens, 'dsh-context-care')
+    let candidates = read(session, log => summaryRanges(session, range, measured, range.minFreshTokens ?? spec.minFreshTokens, 'dsh-context-care', log))
     const original = envelope ?? { messages, tools: operation.pricingBasis.header?.tools }
     const pending = original.messages.slice(messages.length)
     const before = operation.priceRequest(original)
@@ -96,10 +96,10 @@ export function createSummaryExecutor({ meter, llm, requests, spec, history, rec
         let request
         try {
           assertStable()
-          auxiliary = summaryPricing({ meter, llm, session, prepared, spec, requests })
+          auxiliary = summaryPricing({ meter, llm, session, prepared, spec, requests, history })
           for (; candidateIndex < candidates.length; candidateIndex++) {
-            seqs = candidates[candidateIndex]
-            request = buildSummaryRequest(session, seqs, prepared.config, signal)
+            seqs = surface.slice(candidates[candidateIndex].from, candidates[candidateIndex].to)
+            request = buildSummaryRequest(session, seqs, prepared.config, signal, history)
             const budget = auxiliary.budgetFor(request)
             if (budget.hardInput === undefined || budget.inputTokens <= budget.hardInput) break
           }
@@ -110,8 +110,9 @@ export function createSummaryExecutor({ meter, llm, requests, spec, history, rec
           throw error
         }
         const selectedPrice = auxiliary.pricing.priceRequest(request)
+        const selected = new Set(seqs)
         const repairSnapshot = { seqs, surface: [...surface], header, revision: session.seq,
-          outsideMessages: surface.filter(seq => !seqs.includes(seq)).map(seq => structuredClone(session.deriveEventMessage(session.eventAt(seq)))) }
+          outsideMessages: surface.filter(seq => !selected.has(seq)).map(seq => structuredClone(history.messageAt(session, seq))) }
         let result
         try {
           assertEligible()
@@ -137,14 +138,14 @@ export function createSummaryExecutor({ meter, llm, requests, spec, history, rec
           }
           if (recovered) {
             signal.throwIfAborted()
-            const rebased = read(session, log => rebaseSummaryRepair(session, repairSnapshot, log))
+            const rebased = read(session, log => rebaseSummaryRepair(session, repairSnapshot, log, history))
             if (rebased === null) throw error
-            const repaired = buildSummaryRequest(session, rebased, prepared.config, signal)
+            const repaired = buildSummaryRequest(session, rebased, prepared.config, signal, history)
             if (auxiliary.pricing.priceRequest(repaired) >= selectedPrice) throw error
             surface = [...session.surface.nodes]
-            messages = structuredClone(session.deriveMessages())
+            messages = history.messages(session)
             measured = operation.measure()
-            candidates = summaryCandidates(session, { start: rebased[0], end: rebased.at(-1) }, measured, 0, 'dsh-context-care')
+            candidates = read(session, log => summaryRanges(session, { start: rebased[0], end: rebased.at(-1) }, measured, 0, 'dsh-context-care', log))
             candidateIndex = 0
             repairs++
             try {
@@ -171,14 +172,13 @@ export function createSummaryExecutor({ meter, llm, requests, spec, history, rec
         const afterMessages = surface.flatMap((seq, index) => {
           if (index === from) return [replacement]
           if (index > from && index <= to) return []
-          const message = session.deriveEventMessage(session.eventAt(seq))
-          return message === null ? [] : [message]
+          const message = history.messageAt(session, seq)
+          return message === undefined ? [] : [message]
         })
         // Pending inputs and one-shot system/tools occur on both sides. Keep them
         // when the caller supplied a fuller final envelope than retained history.
         const after = operation.priceRequest({ ...original, messages: [...afterMessages, ...pending] })
         if (after >= before) throw failure(`context-care: framed summary does not reduce complete input (${after} >= ${before})`, 'SUMMARY_NOT_SMALLER')
-        const selected = new Set(seqs)
         const shadowedTokenCount = measured.nodes.filter(node => selected.has(node.seq)).reduce((sum, node) => sum + node.heuristicTokens, 0)
         const shadowedRange = { start: seqs[0], end: seqs.at(-1) }
         await recordAction({ action: 'summary', phase: 'prepared', compactionId, callId: prepared.callId,

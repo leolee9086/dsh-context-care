@@ -5,7 +5,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { CLEANABLE_IDS, describeHit, detectDegradation } from '../src/loop-patterns.js'
-import { detectLoop, loopNeedsReminder, loopNoticeText } from '../src/loop-guard.js'
+import { detectLoop as readLoop, loopNeedsReminder, loopNoticeText } from '../src/loop-guard.js'
+
+// Pure tests supply only their immutable event and interpreted message.
+const detectLoop = session => readLoop(session, undefined, -1, {
+  lastSurface: owner => owner.eventAt(), messageAt: owner => owner.eventAt().data.message,
+})
 
 /** 把一段助手文本包成 detectLoop 认得的 session。 */
 function assistantSession(text) {

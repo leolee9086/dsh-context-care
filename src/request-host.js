@@ -93,17 +93,20 @@ export async function openRequestHost(ctx, config = {}) {
       changes.changed(id, ['prompts'])
     } else if (event.type === 'compaction/summary') changes.changed(id, ['actions', 'prompts'])
   })
-  const journal = await openRequestJournal({ sessions: ctx.sessions, changed: (id, record) => {
+  const history = ensureSessionLog(ctx)
+  const journal = await openRequestJournal({ sessions: ctx.sessions, logs: history, changed: (id, record) => {
     if (record.kind === 'request') changes.changed(id, record.data.budget === undefined ? ['prompts'] : ['actions', 'prompts'])
     else if (record.data.action === 'request-rewrite') changes.changed(id, ['rewrites'])
     else if (record.data.action === 'rule-evaluation') changes.changed(id, ['prompts'])
     else changes.changed(id, ['actions', 'prompts'])
-  }, measureInput: (session, request) => captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session }).decomposeRequest(request) })
+  }, measurementDependencies: header => [ctx.tokenMeter, ctx.tokenMeter.estimateMessage, ctx.llm, ctx.llm.fileRequestText,
+    header === undefined ? undefined : ctx.llm.imageRequestPricing(header.config.provider, header.config.model)],
+    measureInput: (session, request) => captureInputPricing({ history, meter: ctx.tokenMeter, llm: ctx.llm, session }).decomposeRequest(request) })
   /** @type {Awaited<ReturnType<typeof openRuleControls>> | undefined} */
   let controls
   /** @type {Awaited<ReturnType<typeof openOutputFeedback>>} */
   let feedback
-  try { feedback = await openOutputFeedback({ sessions: ctx.sessions,
+  try { feedback = await openOutputFeedback({ sessions: ctx.sessions, logs: history,
     rulesFor: id => ownerFor(ctx.agents.get(/** @type {SessionId} */ (id)))?.promptRulesFor?.(/** @type {SessionId} */ (id)) ?? [],
     revision: id => controls?.revision(id) ?? 0,
     eligible: /** @param {string} id @param {string} ruleId @param {number[]} seqs */ (id, ruleId, seqs) => controls === undefined
@@ -135,8 +138,7 @@ export async function openRequestHost(ctx, config = {}) {
   ctx.provide('contextCareWorkbench', workbench)
   ctx.effect(() => () => workbench.close())
   await ensureReminderService(ctx, Config.parse(config).reminders, controls)
-  const history = ensureSessionLog(ctx)
-  const proposals = createSummaryProposalHistory({ readSession: id => history.read(id) })
+  const proposals = createSummaryProposalHistory({ readSession: id => history.read(id) }, history)
   ctx.on('session/event', (session, event) => proposals.observe(session, event))
   ctx.effect(() => () => proposals.close())
   let dispatchOrder = 0
@@ -239,7 +241,8 @@ export async function openRequestHost(ctx, config = {}) {
     const call = [...calls.values()].findLast(call => call.agent === agent && call.attemptId === frame.attemptId)
     if (call === undefined) return
     call.settled = true
-    const event = frame.outcome.kind === 'committed' ? agent.session.eventAt(frame.outcome.seq) : undefined
+    const outcome = frame.outcome
+    const event = outcome.kind === 'committed' ? history.withLive(agent.session, log => log.at(outcome.seq)) : undefined
     const completed = event?.type === 'assistant/message' && !event.data.interrupted
     void recordPhase(call, 'settled', { attemptId: frame.attemptId,
       outcome: completed ? 'completed' : event?.type === 'assistant/attempt' ? 'failed' : 'interrupted',
@@ -261,11 +264,11 @@ export async function openRequestHost(ctx, config = {}) {
     if (owner === undefined || agent === undefined) { yield* delegated; return }
     const session = agent.session
     const handle = preparedRequests.get(request)
-    const pricing = captureInputPricing({ meter: ctx.tokenMeter, llm: ctx.llm, session, requests: service })
+    const pricing = captureInputPricing({ history, meter: ctx.tokenMeter, llm: ctx.llm, session, requests: service })
     /** @type {RequestCall} */
     const call = { callId: handle?.callId ?? randomUUID(), owner, agent, session,
       logRevision: session.seq, generation: session.surface.replaceGeneration,
-      sourceSeqs: [...session.surface.nodes], sourceMessages: session.deriveMessages(), original: request,
+      sourceSeqs: [...session.surface.nodes], sourceMessages: history.messages(session), original: request,
       measurement: pricing.measure(), dispatched: false,
       attemptId: ['conversation', undefined].includes(request.purpose) ? attempts.get(agent) : undefined }
     calls.set(call.callId, call)
@@ -322,7 +325,7 @@ export async function openRequestHost(ctx, config = {}) {
       call.dispatchPricing = admission.pricing
       const careInstructions = requestCareInstructions(composed)
       const summaryInstruction = careInstructions.find(instruction => instruction.kind === 'summary-instruction')
-      const systemSeq = call.sourceSeqs.find(seq => session.eventAt(seq)?.type === 'system/message')
+      const systemSeq = history.withLive(session, log => call.sourceSeqs.find(seq => log.at(seq)?.type === 'system/message'))
       await recordPhase(call, 'ready', { route: { provider: composed.provider, model: composed.model, maxTokens: composed.maxTokens,
         reasoningEffort: composed.reasoningEffort, temperature: composed.temperature },
         inputHash: requestFingerprint({ system: composed.system, messages: composed.messages, tools: composed.tools }),

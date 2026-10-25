@@ -70,7 +70,7 @@ export function humanActivity(events: HistoryView, now: number, withinMs: number
   return null
 }
 
-export function requestContext(visible: MessageView[], config: { maxContextChars: number; maxContextMessages: number }) {
+export function requestContext(visible: readonly MessageView[], config: { maxContextChars: number; maxContextMessages: number }) {
   let chars = config.maxContextChars
   const messages: { role: string; text: string; truncated: boolean }[] = []
   for (const message of (config.maxContextMessages ? visible.slice(-config.maxContextMessages) : []).reverse()) {

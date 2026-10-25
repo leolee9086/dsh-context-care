@@ -1,10 +1,11 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Session, SessionId, EpochHeader } from '@deepseek-ai/dsh-session'
 import type { LlmCallConfig, GenerateOptions } from '@deepseek-ai/dsh-llm'
-import { createHash } from 'node:crypto'
 import { replayRequest } from './request-replay.js'
 import { z } from 'zod'
-import { createRequestHistory } from './request-history.js'
+import { createRequestHistory, type SessionRequestRecord } from './request-history.js'
+import type { SessionLog } from './session-log.js'
+import type { CacheKey } from './session-cache.js'
 
 const JsonRecord = z.record(z.string(), z.json())
 type Data = Readonly<Record<string, unknown>>
@@ -24,13 +25,33 @@ interface SessionCache {
   recent: Map<string, CacheRecord>
   revision: number
   listed?: { count: number; revision: number; rows: CacheRecord[] }
+  publicRows: Map<SessionRequestRecord, { diagnostic?: CacheRecord; value: CacheRecord }>
 }
 interface Options {
+  logs: SessionLog
   sessions: Pick<Context['sessions'], 'get' | 'list' | 'flush' | 'prepare'>
   measureInput: (session: Session, request: GenerateOptions) => { textTokens: number; visualTokens: number }
+  /** Current estimator/provider capability identities used by measureInput. */
+  measurementDependencies?: (header: EpochHeader | undefined) => readonly unknown[]
   now?: () => number
   /** Publish the admitted record, so observers invalidate its own view only. */
   changed?: (sessionId: string, record: CacheRecord) => void
+}
+interface MeasuredInput {
+  rawInput: { textTokens: number; visualTokens: number }
+  calibrationHeaderKey: string
+}
+interface CalibrationInput {
+  dependencies?: readonly unknown[]
+  seq?: number
+  value?: MeasuredInput
+}
+// Calibration values stay under one Host-managed Session entry. Weak function
+// keys allow closed facades and temporary meters to be collected independently.
+const calibrationInputKey: CacheKey<Session, WeakMap<Options['measureInput'], CalibrationInput>> = {
+  name: 'request-calibration-input',
+  validity: 'Native Session identity and exact input-measurement function identity.',
+  create: () => new WeakMap(),
 }
 
 /**
@@ -39,30 +60,27 @@ interface Options {
  * @param options - the live Session service and optional observation clock.
  * @returns the request query facade and its process-local recorder.
  */
-export function createRequestCache({ sessions, measureInput, now = Date.now, changed = () => {} }: Options) {
-  const history = createRequestHistory()
-  let measurements = new WeakMap<Session, Map<number, { rawInput: ReturnType<Options['measureInput']>; calibrationHeaderKey: string }>>()
-  let caches = new WeakMap<Session, SessionCache>()
-  let headerKeys = new WeakMap<EpochHeader, string>()
-  // Native request headers are immutable, so hashing each large tool catalog
-  // once is enough even when hundreds of settlements reference that header.
-  const headerKey = (value: EpochHeader | undefined): string => {
-    const cached = value === undefined ? undefined : headerKeys.get(value)
-    if (cached !== undefined) return cached
-    const key = createHash('sha256').update(JSON.stringify({ config: value?.config, tools: value?.tools })).digest('hex')
-    if (value !== undefined) headerKeys.set(value, key)
-    return key
+export function createRequestCache({ sessions, logs, measureInput, measurementDependencies, now = Date.now, changed = () => {} }: Options) {
+  const history = createRequestHistory(logs)
+  const cacheKey: CacheKey<Session, SessionCache> = logs.cache.define('request-cache',
+    'Native Session identity; transient diagnostic revisions advance only after accepted writes.',
+    () => ({ active: new Map(), recent: new Map(), revision: 0, publicRows: new Map() }))
+  function measuredFor(session: Session, header = session.requestHeader()): CalibrationInput {
+    const values = logs.cache.use(session, calibrationInputKey)
+    const dependencies = measurementDependencies?.(header) ?? []
+    let value = values.get(measureInput)
+    if (!value || value.dependencies?.length !== dependencies.length
+      || !dependencies.every((dependency, index) => Object.is(value?.dependencies?.[index], dependency))) {
+      value = { dependencies: [...dependencies] }; values.set(measureInput, value)
+    }
+    return value
   }
   const getSession = (id: string) => sessions.get(id as SessionId)
-  function cacheOf(session: Session): SessionCache {
-    let cache = caches.get(session)
-    if (!cache) { cache = { active: new Map(), recent: new Map(), revision: 0 }; caches.set(session, cache) }
-    return cache
-  }
+  function cacheOf(session: Session): SessionCache { return logs.cache.use(session, cacheKey) }
   function listOne(session: Session): CacheRecord[] {
     // The immutable Session rows win if a live diagnostic disagrees about settlement.
     const committed = history.read(session)
-    const cache = cacheOf(session)
+    const cache = cacheOf(session), rowsBySource = cache.publicRows
     // The native fold appends immutable rows; unrelated events cannot change an
     // existing settlement. Keep one list until a settlement or live fact changes.
     if (cache.listed?.count === committed.length && cache.listed.revision === cache.revision) return cache.listed.rows
@@ -73,6 +91,8 @@ export function createRequestCache({ sessions, measureInput, now = Date.now, cha
       .map(row => [row.data.compactionId, row]))
     const rows: CacheRecord[] = committed.map(row => {
       const diagnostic = byEvent.get(row.data.eventSeq) ?? (row.data.compactionId ? byCompaction.get(row.data.compactionId) : undefined)
+      const cached = rowsBySource.get(row)
+      if (cached && cached.diagnostic === diagnostic) return cached.value
       // Keep the header by reference inside the private fold. Repeating its
       // entire tool schema in every public row is not request evidence.
       const { sourceHeader: _sourceHeader, ...facts } = row.data
@@ -80,7 +100,9 @@ export function createRequestCache({ sessions, measureInput, now = Date.now, cha
       // Deep JSON validation here used to traverse every historical request diff
       // on every read, blocking unrelated Host HTTP handlers in the same process.
       const data = { ...diagnostic?.data, ...facts }
-      return { ...row, data }
+      const value = { ...row, data }
+      rowsBySource.set(row, { diagnostic, value })
+      return value
     })
     const settled = new Set(committed.map(row => row.data.eventSeq as number))
     const compactions = new Set(committed.map(row => row.data.compactionId).filter(id => id !== undefined))
@@ -108,8 +130,10 @@ export function createRequestCache({ sessions, measureInput, now = Date.now, cha
         && typeof raw.textTokens === 'number' && typeof raw.visualTokens === 'number') {
         // Reuse the actual hot-path measurement. Cold recovery computes the same
         // two scalars from the logged input instead of restoring a second ledger.
-        measurements.set(session, new Map([[data.eventSeq, { rawInput: { textTokens: raw.textTokens, visualTokens: raw.visualTokens },
-          calibrationHeaderKey: data.calibrationHeaderKey }]]))
+        const measured = measuredFor(session)
+        measured.seq = data.eventSeq
+        measured.value = { rawInput: { textTokens: raw.textTokens, visualTokens: raw.visualTokens },
+          calibrationHeaderKey: data.calibrationHeaderKey }
       }
       if (kind === 'request' && data.phase !== 'settled' && data.phase !== 'failed') {
         cache.active.set(key, value)
@@ -154,20 +178,13 @@ export function createRequestCache({ sessions, measureInput, now = Date.now, cha
     previousRoute(session: Session, purpose: string): LlmCallConfig | undefined {
       // Route selection needs one scalar from the newest dispatched request. It
       // must not materialize all historical diagnostics or copy their input diffs.
-      const committed = history.read(session)
-      let previous: CacheRecord | undefined
-      for (let index = committed.length - 1; index >= 0; index--) {
-        const row = committed[index]
-        if (row.data.dispatched === true && row.data.purpose === purpose) { previous = row; break }
-      }
-      const cache = caches.get(session)
-      for (const rows of [cache?.recent.values(), cache?.active.values()]) for (const row of rows ?? []) {
+      let previous: CacheRecord | undefined = history.previous(session, purpose)
+      const cache = cacheOf(session)
+      for (const rows of [cache.recent.values(), cache.active.values()]) for (const row of rows ?? []) {
         if (row.kind !== 'request' || row.data.dispatched !== true || row.data.purpose !== purpose) continue
         // A live diagnostic must never override the route of its own settlement.
         // Only an operation absent from the native committed index is transient.
-        if (committed.some(settled => settled.key === row.key
-          || typeof row.data.eventSeq === 'number' && settled.data.eventSeq === row.data.eventSeq
-          || typeof row.data.compactionId === 'string' && settled.data.compactionId === row.data.compactionId)) continue
+        if (history.contains(session, row)) continue
         if (!previous || row.at >= previous.at) previous = row
       }
       const route = previous?.data.route
@@ -179,36 +196,30 @@ export function createRequestCache({ sessions, measureInput, now = Date.now, cha
     settled: history.read,
     /** Reprice a logged input only once per settlement; no cached row is required after restart. */
     calibrationRecords(session: Session, header: EpochHeader | undefined): CacheRecord[] {
-      const records = history.read(session)
-      const expected = headerKey(header)
-      let sample: (typeof records)[number] | undefined
-      for (let index = records.length - 1; index >= 0; index--) {
-        const record = records[index]
-        if (record.data.purpose !== 'conversation' || record.data.outcome !== 'completed'
-          || record.data.usage?.inputTokens === undefined) continue
-        const source = record.data.sourceHeader
-        // A different route cannot share a calibration. Reject it before hashing
-        // a dormant epoch's potentially large tool schema.
-        if (source?.config.provider === header?.config.provider && source?.config.model === header?.config.model
-          && headerKey(source) === expected) { sample = record; break }
+      const sample = history.calibration(session, header)
+      if (!sample) {
+        const latest = history.read(session).at(-1)
+        return latest ? [latest] : []
       }
-      if (!sample) return records.length ? [{ ...records[records.length - 1], data: { ...records[records.length - 1].data } }] : []
-      let values = measurements.get(session)
-      if (!values) { values = new Map(); measurements.set(session, values) }
-      let measured = values.get(sample.data.eventSeq)
-      if (!measured) {
-        const replay = replayRequest(sessions, session, sample)
-        measured = { rawInput: measureInput(replay.session, replay.request), calibrationHeaderKey: expected }
-        values.clear(); values.set(sample.data.eventSeq, measured)
+      const expected = history.headerKey(header)
+      const measured = measuredFor(session, header)
+      if (measured.seq !== sample.data.eventSeq || measured.value?.calibrationHeaderKey !== expected) {
+        const replay = replayRequest(logs, session, sample)
+        // Publish only after successful reconstruction and measurement. A failed
+        // attempt leaves the prior immutable sample intact and retries naturally.
+        const value = { rawInput: measureInput(replay.session, replay.request), calibrationHeaderKey: expected }
+        measured.seq = sample.data.eventSeq; measured.value = value
+        logs.cache.worked(calibrationInputKey)
       }
-      return [{ ...sample, data: { ...sample.data, ...measured } }]
+      if (!measured.value) throw new Error('context-care: calibration measurement missing')
+      return [{ ...sample, data: { ...sample.data, ...measured.value } }]
     },
     /** Idle/unloaded Agents retain no unfinished request objects. */
     release(session: Session) {
-      const cache = caches.get(session)
+      const cache = logs.cache.peek(session, cacheKey)
       if (cache?.active.size) { cache.active.clear(); cache.revision++ }
     },
-    /** Forgetting the cache does not modify any Session or existing storage files. */
-    async close() { history.clear(); caches = new WeakMap(); measurements = new WeakMap(); headerKeys = new WeakMap() },
+    /** Forgetting transient diagnostics does not modify Session or storage. */
+    async close() { logs.cache.clear(cacheKey) },
   }
 }

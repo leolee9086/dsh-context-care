@@ -1,7 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { summaryCandidates, summaryConfig, maintenancePassLimit, buildSummaryRequest, SUMMARY_INSTRUCTION } from '../src/summary-request.js'
+import { summaryRanges, summaryConfig, maintenancePassLimit, buildSummaryRequest, SUMMARY_INSTRUCTION } from '../src/summary-request.js'
 import { resolveConfig } from '../src/policy.js'
+import { eventLog } from './fixtures/event-log.js'
 
 function history(events) {
   return { surface: { nodes: events.map(event => event.seq) }, eventAt: seq => events.find(event => event.seq === seq),
@@ -26,16 +27,18 @@ test('summary candidates retain entire tool batches in surface order with fresh 
     user(15), user(20, 'plugin:dsh-context-care:state')]
   const session = history(events)
   const measure = { nodes: events.map(event => ({ seq: event.seq, tokens: 100 })) }
-  assert.deepEqual(summaryCandidates(session, { start: 40, end: 15 }, measure, 100, 'dsh-context-care'), [[40, 2, 7, 9, 15], [40, 2, 7, 9], [40]])
-  assert.deepEqual(summaryCandidates(session, { start: 20, end: 20 }, measure, 1, 'dsh-context-care'), [])
-  assert.throws(() => summaryCandidates(session, { start: 40, end: 7 }, measure, 100, 'dsh-context-care'), /inside a tool batch/)
-  assert.throws(() => summaryCandidates(session, { start: 7, end: 15 }, measure, 100, 'dsh-context-care'), /inside a tool batch/)
+  const log = eventLog(events)
+  const candidates = range => summaryRanges(session, range, measure, 100, 'dsh-context-care', log).map(item => session.surface.nodes.slice(item.from, item.to))
+  assert.deepEqual(candidates({ start: 40, end: 15 }), [[40, 2, 7, 9, 15], [40, 2, 7, 9], [40]])
+  assert.deepEqual(summaryRanges(session, { start: 20, end: 20 }, measure, 1, 'dsh-context-care', log), [])
+  assert.throws(() => candidates({ start: 40, end: 7 }), /inside a tool batch/)
+  assert.throws(() => candidates({ start: 7, end: 15 }), /inside a tool batch/)
 })
 
 test('one summary builder includes only system head, selected prefix, tools and final directive', () => {
   const session = history([{ seq: 0, type: 'system/message', data: { message: { role: 'system', content: [{ type: 'text', text: 'Base identity' }] } } }, user(1), user(2)])
   const signal = new AbortController().signal
-  const request = buildSummaryRequest(session, [1], { provider: 'summary', model: 'small', maxTokens: 100 }, signal)
+  const request = buildSummaryRequest(session, [1], { provider: 'summary', model: 'small', maxTokens: 100 }, signal, { messageAt: (session, seq) => session.deriveEventMessage(session.eventAt(seq)), tools: session => session.toolHistory() })
   assert.deepEqual(request.messages.map(message => message.content[0].text), ['Base identity', 'Item 1', SUMMARY_INSTRUCTION])
   assert.equal(request.signal, signal)
   assert.equal(request.purpose, 'compaction')

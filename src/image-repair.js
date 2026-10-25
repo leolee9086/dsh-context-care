@@ -6,7 +6,7 @@
  * @param payload public summary-error payload
  * @returns true only after recording a new selected-span image omission
  */
-export function repairSummaryImages(sessions, { session, sourceEventSeqs, error, signal }) {
+export function repairSummaryImages(sessions, { session, sourceEventSeqs, error, signal }, history) {
   const failure = error?.failure
   if (failure?.code !== 'IMAGE_OFFLOAD_REQUIRED' || error.code !== failure.code
     || !Number.isSafeInteger(failure.offloadImages) || failure.offloadImages <= 0
@@ -16,9 +16,9 @@ export function repairSummaryImages(sessions, { session, sourceEventSeqs, error,
   const targets = []
   for (const seq of sourceEventSeqs) {
     if (remaining === 0) break
-    const event = session.eventAt(seq)
+    const event = history.withLive(session, log => log.at(seq))
     if (!['user/message', 'tool/result'].includes(event.type)) continue
-    const message = session.deriveEventMessage(event)
+    const message = history.messageAt(session, event.seq)
     const imageIndexes = []
     let index = 0
     for (const block of message.content) {
