@@ -708,6 +708,21 @@ registerSessionLogCases({ async open(t) {
   return ctx
 } })
 
+// Count only the synchronous control selector, not the engine, templates or Host.
+// Array.prototype cannot be mocked by node:test; always restore before returning.
+function countControlIdentityFinds(t, controls) {
+  let finds = 0
+  const originalBatch = controls.withDecisions
+  t.mock.method(controls, 'withDecisions', function (sessionId, run) {
+    return originalBatch.call(this, sessionId, select => run((...keys) => {
+      const originalFind = Array.prototype.find
+      Array.prototype.find = function (...args) { finds++; return Reflect.apply(originalFind, this, args) }
+      try { return select(...keys) } finally { Array.prototype.find = originalFind }
+    }))
+  })
+  return () => finds
+}
+
 registerWorkbenchPerformanceCases({ async open(t) {
   const owned = await fixture(t, false), ctx = await owned.open(), service = ctx.contextCareWorkbench
   const agent = await ctx.agentLoop.create('workbench-performance', { provider: 'care-test', model: 'care-test' })
@@ -718,11 +733,12 @@ registerWorkbenchPerformanceCases({ async open(t) {
   const publicSerializations = t.mock.method(JSON, 'stringify')
   const localeComparisons = t.mock.method(String.prototype, 'localeCompare')
   const collators = t.mock.method(Intl, 'Collator')
+  const controlIdentityFinds = countControlIdentityFinds(t, ctx.contextCareControls)
   let catalogReads = 0
   t.after(ctx.contextCareControls.registerProvider(id => { if (id === agent.id) catalogReads++; return [] }))
   const { base, cookie } = await controlCookie(ctx)
   ctx.llm.registerAdapter(['care-test'], new CompletionAdapter([{ blocks: [{ type: 'text', text: 'Independent workbench probe completed.' }] }]))
-  return { session: agent.session, tokenReads: () => policyTokenReads.mock.calls.filter(call => call.arguments[0] === agent.id).length, catalogReads: () => catalogReads, recordReads: () => recordReads.mock.calls.filter(call => call.arguments[0] === agent.id).length,
+  return { session: agent.session, controlIdentityFinds, tokenReads: () => policyTokenReads.mock.calls.filter(call => call.arguments[0] === agent.id).length, catalogReads: () => catalogReads, recordReads: () => recordReads.mock.calls.filter(call => call.arguments[0] === agent.id).length,
     pauseFilter: paused => ctx.contextCareControls.patch(agent.id, { revision: ctx.contextCareControls.revision(agent.id),
       sourceId: 'context-care:document:workbench-performance', ruleId: 'filter-pairs', paused }).then(() => undefined),
     preview: request => service.preview(agent, request), cacheNames: () => ensureSessionLog(ctx).cache.report().map(row => row.name),
@@ -3393,6 +3409,7 @@ test('Workbench action dependency structure builds once per rule across 128 evid
     rules: [{ schemaVersion: 2, id: 'chain', revision: 1, on: ['request.assemble'], select: { view: 'model', roles: ['user'], blockTypes: ['text'] },
       match: { kind: 'regex', pattern: '^DEPENDENCY' }, actions }] } })
   const cache = ensureSessionLog(ctx).cache, worked = t.mock.method(cache, 'worked')
+  const controlIdentityFinds = countControlIdentityFinds(t, ctx.contextCareControls)
   const work = () => worked.mock.calls.filter(call => call.arguments[0].name === 'request-plan-actions').reduce((sum, call) => sum + call.arguments[1], 0)
   const native = t.mock.method(agent.session, 'eventAt'), snapshots = t.mock.method(agent.session, 'snapshotEvents')
   const request = { messages }, before = structuredClone(request), storeBefore = service.store.read(agent.id)
@@ -3426,6 +3443,7 @@ test('Workbench action dependency structure builds once per rule across 128 evid
   assert.deepEqual(request, before); assert.deepEqual(freshPaused, pausedBefore); assert.deepEqual(freshResumed, resumedBefore)
   assert.equal(native.mock.callCount(), nativeReads + 256, 'only the two newly appended batches are read')
   assert.equal(snapshots.mock.callCount(), 0)
+  assert.equal(controlIdentityFinds(), 0, 'all 32-action dependency selections over four previews use exact identity directories, not recursive array searches')
   assert.ok(!cache.report().some(row => row.name.startsWith('request-plan-') || row.name === 'request-model-projection'))
 })
 

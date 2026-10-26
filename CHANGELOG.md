@@ -1,5 +1,15 @@
 # 更新记录
 
+## v0.14.14
+
+**2026-10-26：控制决策复用同步身份目录，保留实时依赖与故障判断。**
+
+- 第43轮沿已定位rule-controls逐decision规则/动作/偏好find及validate依赖查找局部。新TS control-decision-index在同步catalog内按实际访问延迟建立规则和动作目录，保留first-id语义/来源边界，共享rule对象跨来源不串身份；未访问source/action树不物化，不增加第二长期缓存。validate的v2动作对应与依赖visit复用同首id目录，duplicate/missing/cycle仍原顺序拒绝。
+- 偏好目录仅由本同步作用域持有，按精确[source,rule]tuple索引ACK record、first duplicate不变，ACK identity变化重建、构建失败不发布可retry。嵌套不同会话恢复父目录，结束/异常/async逃逸finally释放；snapshot与单独decision也只本栈复用。不缓存enabled、available、依赖结果或跨await政策，storage/source/paused/action-disabled/available/requires原判断顺序保持。
+- 新6单元覆盖延迟目录/1000动作10000lookup不增读取/来源alias/首匹配/精确tuple、ACK变化与失败重建、零线性身份搜索、nested sessions、实时available开关/同步close、storage失败优先于missing与移除。原CAS/ACK/retry/来源依赖校验保持。初测试因Node不支持mock Array.prototype而失败，仅改同步计数finally恢复，未改生产逻辑。
+- 真实Host128证据32动作四preview新增control identity find0，原旧历史排除/新证据依赖跳过/恢复/native只增量/源不变/cache释放保持；500证据过滤find0，actionWork2/numeric0/collator1/catalog3/record14/token5/native500保持。8实质Host+5空suite通过。后CPU单工具543.19ms/HTTP104.78ms/另一Agent114.43ms/CPU875+297ms/loop173.02ms，不编整体加速比。完整门禁、桌面及独立包见验收记录。
+- 未改Harness/Worker预算时钟取消阈值，无脚本批改/Git回滚/any，未代装启用重启；原依赖递归仍现场计算，独立CAS patch的一次定位仍保留，不把必要运行检查冒充重复缓存成本。goal active，同GUI/14规则验收尚未现场。
+
 ## v0.14.13
 
 **2026-10-26：统一操作域复用动作依赖结构，逐证据决策和结果保持独立。**

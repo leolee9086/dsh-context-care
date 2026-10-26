@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { normalizeRule, normalizeRuleV2 } from '@leolee9086/dsh-rule-engine'
 import { recordSecondaryFailure } from './secondary-failure.js'
 import { ReminderScope } from './reminder-runtime/index.js'
+import { indexFirstControlIds, indexControlSources, createControlPreferenceIndex } from '../lib/control-decision-index.js'
 
 const Id = z.string().min(1).max(256)
 const Action = z.object({ id: Id, title: z.string().optional(), defaultEnabled: z.boolean().default(true),
@@ -50,6 +51,7 @@ export function createRuleControls({ entries = [], save, boundary = () => -1, ch
     for (const rule of value.rules) {
       if (ids.has(rule.id)) throw new Error(`context-care: duplicate rule ${rule.id}`)
       ids.add(rule.id)
+      const actions = indexFirstControlIds(rule.actions)
       // Definitions delegated to our rule engine must fail during registration,
       // before the sidebar can describe a malformed rule as executable.
       if (rule.definition?.action?.by === 'context-care') normalizeRule({ ...rule.definition, id: rule.id }, 0)
@@ -57,11 +59,10 @@ export function createRuleControls({ entries = [], save, boundary = () => -1, ch
         const definition = normalizeRuleV2(rule.definition)
         if (definition.sourceId !== value.sourceId || definition.id !== rule.id) throw new Error('context-care: v2 definition identity mismatch')
         if (definition.actions.length !== rule.actions.length || definition.actions.some(action => {
-          const control = rule.actions.find(item => item.id === action.id)
+          const control = actions.get(action.id)
           return !control || control.defaultEnabled !== action.enabledDefault || JSON.stringify(control.requires) !== JSON.stringify(action.dependsOn)
         })) throw new Error('context-care: v2 action controls mismatch')
       }
-      const actions = new Set(rule.actions.map(action => action.id))
       if (rule.definition?.action?.by === 'context-care' && !actions.has(rule.definition.action.kind)) {
         throw new Error(`context-care: missing control action ${rule.definition.action.kind} in ${rule.id}`)
       }
@@ -74,7 +75,7 @@ export function createRuleControls({ entries = [], save, boundary = () => -1, ch
         visiting.add(action.id)
         for (const required of action.requires) {
           if (!actions.has(required)) throw new Error(`context-care: unknown action dependency ${required}`)
-          visit(rule.actions.find(item => item.id === required))
+          visit(actions.get(required))
         }
         visiting.delete(action.id); visited.add(action.id)
       }
@@ -93,50 +94,66 @@ export function createRuleControls({ entries = [], save, boundary = () => -1, ch
     }
     return result
   }
-  function preference(sessionId, sourceId, ruleId) {
-    return stored(sessionId).preferences.find(item => item.sourceId === sourceId && item.ruleId === ruleId)
+  // Only a synchronous caller may borrow this identity directory. Nesting a
+  // different session restores its parent; finally releases all borrowed data.
+  let preferenceBatch
+  function withPreferences(sessionId, run) {
+    if (preferenceBatch?.sessionId === sessionId) return run()
+    const previous = preferenceBatch
+    const index = createControlPreferenceIndex(() => records.get(sessionId))
+    preferenceBatch = { sessionId, index }
+    try { return run() }
+    finally { index.clear(); preferenceBatch = previous }
   }
-  function decisionFor(sessionId, source, ruleId, actionId) {
+  function preference(sessionId, sourceId, ruleId) {
+    return preferenceBatch?.sessionId === sessionId ? preferenceBatch.index.get(sourceId, ruleId)
+      : stored(sessionId).preferences.find(item => item.sourceId === sourceId && item.ruleId === ruleId)
+  }
+  function decisionFor(sessionId, rule, actionId) {
     if (!sessionId || closed || failures.has(sessionId)) return { enabled: false, reason: 'storage-unavailable' }
-    const sourceId = source?.sourceId
-    const rule = source?.rules.find(item => item.id === ruleId)
-    const action = rule?.actions.find(item => item.id === actionId)
+    const action = rule?.actions.get(actionId)
     if (!action) return { enabled: false, reason: 'source-unavailable' }
-    const pref = preference(sessionId, sourceId, ruleId)
+    const pref = preference(sessionId, rule.sourceId, rule.id)
     if (pref?.paused) return { enabled: false, reason: 'rule-paused' }
     if (!(pref?.actions[actionId] ?? action.defaultEnabled ?? true)) return { enabled: false, reason: 'action-disabled' }
     if (action.available === false) return { enabled: false, reason: action.reason ?? 'executor-unavailable' }
     for (const required of action.requires) {
-      if (!decisionFor(sessionId, source, ruleId, required).enabled) return { enabled: false, reason: 'dependency-disabled' }
+      if (!decisionFor(sessionId, rule, required).enabled) return { enabled: false, reason: 'dependency-disabled' }
     }
     return { enabled: true, reason: 'enabled' }
   }
   function decision(sessionId, sourceId, ruleId, actionId) {
-    return decisionFor(sessionId, catalog(sessionId).find(item => item.sourceId === sourceId), ruleId, actionId)
+    const directory = indexControlSources(catalog(sessionId))
+    try { return withPreferences(sessionId, () => decisionFor(sessionId, directory.get(sourceId, ruleId), actionId)) }
+    finally { directory.clear() }
   }
   /** Borrow one validated catalog only inside a synchronous planning pass, never across await. */
   function withDecisions(sessionId, run) {
-    const bySource = new Map(catalog(sessionId).map(source => [source.sourceId, source])), capturedRemoval = removed
-    let active = true
-    try {
-      const result = run((sourceId, ruleId, actionId) => {
-        if (!active) throw new Error('control-decision-batch-closed')
-        if (capturedRemoval !== removed) return decisionFor(sessionId, undefined, ruleId, actionId)
-        return decisionFor(sessionId, bySource.get(sourceId), ruleId, actionId)
-      })
-      if (result && typeof result.then === 'function') throw new Error('control-decision-batch-must-be-synchronous')
-      return result
-    } finally { active = false; bySource.clear() }
+    const bySource = indexControlSources(catalog(sessionId)), capturedRemoval = removed
+    return withPreferences(sessionId, () => {
+      let active = true
+      try {
+        const result = run((sourceId, ruleId, actionId) => {
+          if (!active) throw new Error('control-decision-batch-closed')
+          if (capturedRemoval !== removed) return decisionFor(sessionId, undefined, actionId)
+          return decisionFor(sessionId, bySource.get(sourceId, ruleId), actionId)
+        })
+        if (result && typeof result.then === 'function') throw new Error('control-decision-batch-must-be-synchronous')
+        return result
+      } finally { active = false; bySource.clear() }
+    })
   }
   function snapshot(sessionId) {
-    const record = stored(sessionId)
-    return { sessionId, revision: record.revision, storageError: failures.has(sessionId) ? 'storage-unavailable' : undefined,
-      sample: samples.get(sessionId), sources: catalog(sessionId).map(source => ({ ...source, rules: source.rules.map(rule => {
-        const pref = preference(sessionId, source.sourceId, rule.id)
-        return { ...rule, definition: undefined, paused: pref?.paused ?? false, actions: rule.actions.map(action => ({ ...action,
-          selected: pref?.actions[action.id] ?? action.defaultEnabled ?? true,
-          ...decisionFor(sessionId, source, rule.id, action.id) })) }
-      }) })) }
+    return withPreferences(sessionId, () => {
+      const record = stored(sessionId), current = catalog(sessionId), indexed = indexControlSources(current)
+      try { return { sessionId, revision: record.revision, storageError: failures.has(sessionId) ? 'storage-unavailable' : undefined,
+        sample: samples.get(sessionId), sources: current.map(source => ({ ...source, rules: source.rules.map(rule => {
+          const pref = preference(sessionId, source.sourceId, rule.id)
+          return { ...rule, definition: undefined, paused: pref?.paused ?? false, actions: rule.actions.map(action => ({ ...action,
+            selected: pref?.actions[action.id] ?? action.defaultEnabled ?? true,
+            ...decisionFor(sessionId, indexed.get(source.sourceId, rule.id), action.id) })) }
+        }) })) } } finally { indexed.clear() }
+    })
   }
   function patch(sessionId, input) {
     const change = ControlPatch.parse(input)

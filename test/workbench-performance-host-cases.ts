@@ -7,7 +7,7 @@ import { createMessage, createToolResultMessage, ToolCallId, type GenerateOption
 
 interface Harness {
   open(t: test.TestContext): Promise<{ session: Session; configure(filters?: boolean | 'cascade'): Promise<void>; display(seq: number): Promise<unknown>;
-    preview(request: GenerateOptions): Promise<{ request: GenerateOptions; applied: unknown[]; records: { cascadePass?: number }[] }>; cacheNames(): string[]; projectionWork(): number; actionWork(): number; byteSerializations(request: GenerateOptions): number; numericComparisons(): number; removalCollators(): number; catalogReads(): number; recordReads(): number; tokenReads(): number; pauseFilter(paused: boolean): Promise<void>;
+    preview(request: GenerateOptions): Promise<{ request: GenerateOptions; applied: unknown[]; records: { cascadePass?: number }[] }>; cacheNames(): string[]; projectionWork(): number; actionWork(): number; controlIdentityFinds(): number; byteSerializations(request: GenerateOptions): number; numericComparisons(): number; removalCollators(): number; catalogReads(): number; recordReads(): number; tokenReads(): number; pauseFilter(paused: boolean): Promise<void>;
     reconcile(): Promise<void>; http(): Promise<void>; probe(): Promise<void>; runs(): number; displayCalls(): number }>
 }
 
@@ -72,6 +72,8 @@ export function registerWorkbenchPerformanceCases(harness: Harness): void {
     const [planned, http, other] = await Promise.all([timed(() => fixture.preview(request)), timed(fixture.http), timed(fixture.probe)])
     const result = planned.value as Awaited<ReturnType<typeof fixture.preview>>
     assert.equal(result.applied.length, 500, 'both matching child occurrences retain their action records')
+    const controlIdentityFinds = fixture.controlIdentityFinds()
+    assert.equal(controlIdentityFinds, 0, '500 live control selections do not recursively search rule/action arrays')
     const numericComparisons = fixture.numericComparisons() - beforeNumeric, removalCollators = fixture.removalCollators() - beforeCollators
     assert.equal(numericComparisons, 0, 'native filtering no longer configures numeric locale options for each comparison')
     assert.equal(removalCollators, 1, 'all selected removal paths share one local numeric collator')
@@ -92,7 +94,7 @@ export function registerWorkbenchPerformanceCases(harness: Harness): void {
     assert.equal(snapshots.mock.callCount(), 0); assert.equal(fullMessages.mock.callCount(), 0)
     assert.ok(!fixture.cacheNames().some(name => name === 'request-plan-analysis' || name === 'request-plan-block-index' || name === 'request-model-projection'))
     await yieldToHost(); loop.disable(); const cpu = process.cpuUsage(cpuStart)
-    t.diagnostic(`workbench-tool-filter ${JSON.stringify({ events: session.seq, messages: request.messages.length, matchedChildren: 500, actionWork, numericComparisons, removalCollators, catalogReads, recordReads, tokenReads, planMs: planned.ms, httpMs: http.ms, otherAgentMs: other.ms, cpuUserMs: cpu.user / 1000, cpuSystemMs: cpu.system / 1000, loopMaxMs: loop.max / 1e6, nativeReads: reads.mock.callCount() })}`)
+    t.diagnostic(`workbench-tool-filter ${JSON.stringify({ events: session.seq, messages: request.messages.length, matchedChildren: 500, actionWork, controlIdentityFinds, numericComparisons, removalCollators, catalogReads, recordReads, tokenReads, planMs: planned.ms, httpMs: http.ms, otherAgentMs: other.ms, cpuUserMs: cpu.user / 1000, cpuSystemMs: cpu.system / 1000, loopMaxMs: loop.max / 1e6, nativeReads: reads.mock.callCount() })}`)
     assert.ok(planned.ms < 5000 && http.ms < 1000 && other.ms < 1500 && loop.max / 1e6 < 1000)
     await fixture.pauseFilter(true)
     const paused = await fixture.preview(request)
