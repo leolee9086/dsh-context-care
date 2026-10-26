@@ -1,5 +1,29 @@
 # 诊断查询与数据推送验收
 
+## v0.14.15：工具配对与显式注入锚点（2026-10-26）
+
+第45轮完成未提交的 request-pairs：顶层 tool-call / tool result 一次读取，保留原 Set 的缺失 ID、重复、空值、顺序和稀疏内容语义。统一 request-plan-pairs 按最后写后的请求身份复用；request-plan-pair-messages 按不可变消息记录惰性 clone ancestry，只借原始键，非原始 ID 读真正 clone。changed 脱离旧 ancestry，关闭操作清域。完整配对断言、预算和可写请求复制不变。
+
+显式注入锚点原逐动作 writableBlocks.find，现同一块索引内按需建立 firstModel 首 ID 目录；与 patch 的 byId 末匹配分开，首 synthetic / 不可用位置保持原跳过和依赖结果，不寻找后一个替代。没有显式锚点不构造目录。新增单位回归覆盖一万次查询读数不增、model/original alias、首 synthetic、独立 preview、缺失锚点与依赖；13 项规划/索引/配对定向通过。
+
+真实 Loader 1000 原生消息/500 注入的两次 preview 已实测 1000 次精确锚点查询、0 次 model 数组 find、原生读取1000且第二次不增，无 snapshot 或旁路 derive；独立可写输出和 close 清除保持。一次并发旧测试运行时 loop1003.49ms 超过原1000ms上限，因此该次不计性能通过。最初观测误用 Node22 不支持的 mock.method(Array)，导致另一 Agent 失败；现只对生产索引方法委托观测，数组 own find 委托原方法并恢复，未替代查询或修改 Harness。首规划单元用重复 ID 引发另一个补丁归并，改为独立 synthetic anchor，并将重复优先级留给索引单元；不改生产语义。
+
+最终源码 Host 222/222、0 skip、exit0（round45-host-final.log，18:00前收取）。1000消息锚点plan1573.05ms/鉴权HTTP139.61ms/另一Agent171.17ms/两preview CPU1859+266ms/loop791.15ms，原生1000、anchor1000/find0；级联project1003/byte4/pairBuild4/work4006/message1003，plan1356.72ms/HTTP66.71ms/另一Agent84.70ms/loop214.70ms；工具过滤plan1573.17ms/HTTP105.63ms/另一Agent135.73ms/loop756.55ms，pairBuild4/work3000/message2000，原生500。长2012事件显示cold910.81ms/warm28.43ms/reconcile2004.78ms/warm14.95ms；4002事件冷提醒historyReads0/collect7.63ms/warm0.34ms。只说明各场景实际计数与响应，不编整体加速比。
+
+完整 release:check 两次出现原 Worker 50ms / work-timeout（第一轮543项中541通过），独立 detectors 一次11/13；这些失败保留。2026-10-26 17:49后只读采样整机CPU99%（内核40%），没有本阶段残留测试进程，未停止其它应用、修改Worker/预算/时钟/超时或取消。随后将相同自动发现的全部单元以 --test-concurrency=1 单次串行运行，543/543、0 skip、exit0；严格类型/104 JS源码、62项事件目录及完整Host/Client构建通过（round45-serial-check/unit、round45-build-final.log，18:02收取）。这是同套测试的低竞争执行，不把前两次 release:check 命令改称成功。
+
+客户端首次因执行命令未传 DSH_TEST_CHECKOUT 而未启动，不计测试失败或通过；补齐显式输入后源码客户端24/24通过。部署Electron+ASAR实际服务22/22、0 skip、exit0、空stderr（round45-desktop-final.log/.err，2026-10-26 18:03收取）。桌面锚点plan486.56ms/鉴权HTTP105.99ms/另一Agent114.17ms/两preview CPU641+187ms/loop130.15ms，1000查找/0 find/native1000；级联project1003/byte4/pairBuild4/work4006/message1003；工具过滤pairBuild4/work3000/message2000/native500，plan442.44ms/HTTP49.32ms/另一Agent57.05ms/loop104.92ms。桌面范围含固定切面/替换/继承/取消/原生释放/JSONL冷恢复及新配对锚点，未将源码Host伪装为桌面证据。普通全新消费者 .local/consumer-final-v0.14.15-20261026 用 pnpm12.6.0 的 add --offline 安装唯一新tgz，53项依赖，无 allowBuilds/ignore-scripts/exotic豁免、无开发node_modules junction。只执行已安装模块的8公开入口/Client factory/真实Worker/可写规划/精确字节预算/控制目录及新pair切面与changed/close/锚点首匹配一万次查询，229个src/lib JS和声明逐字节一致；exit0。安装插件的真实Host定向6项实质用例通过（报告11含5空suite，不能称11项业务通过），覆盖原生释放、冷读/取消/修订、真实JSONL与3个长规划；锚点1000lookup/0find，原生1000，pair级联4/4006/1003、过滤4/3000/2000。归档 artifacts/final-v01415-round45/dsh-context-care-0.14.15.tgz，952668字节，SHA256 A44FDA28F2A51B52C0BB7AFA464B15F2C7B2DB372E1F5B28F927AF6D6BE07F66。原v0.14.14 tag object cc04720fdb4947b4ca2ecb994eb8a2355ac9f365、commit45b8f2562bf10360cb0d9e8e4006f500a3b2ce1b及旧归档SHA256 820DFDF60F67D348DD86144ED6D292DD4490E2748093DB3F8E44A41900D15DF2均未变化（18:06远端核对）。适用代码门禁已完成，本轮交付包含源码/产物/文档与新annotated tag，不覆盖旧标签；实际提交和标签指纹以Git引用为准。未自动安装/启用/重启，同GUI和14条规则现场验收仍未完成，不宣称整体清理结束。
+
+## 日志测试证据纠正（纳入 v0.14.15，2026-10-26）
+
+`test/fixtures/event-log.js` 已删除。它与生产 SessionLogRead 不等价，依赖它的 11 个测试文件此前的通过结果无效，不能为固定切面、继承、取消、释放、原生准备或统一缓存提供依据。下列历史版本的总数保留为当时运行记录，不表示这些错误用例已验证了生产实现；独立真实 Host 的证据只适用于其实际覆盖场景。
+
+相关用例改为真实 Context、SessionStore、Session 与 createSessionLog；组合 helper 不接收事件数组，不实现 at/range/select/all。测试使用实际连续 append、原生 replace 和继承，不修改 surface 或维护一份旁路查询数组。直接日志回归检查旧切面固定、顺序、边界与独立释放；Loader + JSONL 回归检查空缓存提案拒绝、显式工具重试的原始参数/历史上下文、后续替换与旧 lease，不创建 live Session。该持久化回归曾因缺失 turn/step 和工具广告被真实验证器拒绝，随后补齐原生生命周期；未改验证器。中断尾部被原生补全的事实不当成日志长度错误。
+
+最终纠错门禁（2026-10-26 17:29 +08:00 收取）：release:check 的严格类型、104 个 JS 源码、62 项事件目录、541/541 单元与 Host/Client 构建通过；完整源码 Host 221/221、客户端 24/24 通过。部署桌面 Electron + ASAR 的实际服务定向 16/16、0 skip、空 stderr，通过共享读取、取消/重试、固定切面、原生释放、真实 JSONL 与级联规划回归。第一次直接调用返回 0 但日志为空，不计通过；随后等待进程的第一次调用因预加载路径不是 file URL 失败，修正后才取得上述非空 16 项报告。
+
+未发布归档位于 artifacts/native-log-correction-20261026；公开 ESM 入口、客户端 factory 和 src/lib 相对依赖检查通过。该 pack-smoke 使用开发依赖 junction，不冒充全新消费者独立安装验收；它也不是已发布 v0.14.14 的原归档。纠错阶段没有递增版本或覆盖旧归档/标签；这些改动后续与配对、锚点优化合入上节 v0.14.15 候选。该旧纠错验证包不作为正式新版交付，正式新版归档与门禁见上节。未自动安装、启用或重启，同一 GUI 与 14 条思源规则现场验收仍未完成，整体优化目标未标完成。
+
 ## v0.14.14：控制身份目录按同步作用域复用（2026-10-26）
 
 第43轮只沿已读rule-controls decisionFor逐层rule/action/pref.find与validate依赖actions.find。新TS control-decision-index按同步catalog身份与实际访问source/rule延迟建目录，未访问来源不展开actions；source+rule隔离即使同rule对象alias也不串归属。first-id与精确[source,rule]tuple保留Array.find首匹配。偏好目录按ACK record identity复用，记录变更重建、失败不发布retry；withPreferences同步动态作用域，nested session恢复parent、同session借用，finally释放。withDecisions/单独decision/snapshot没有第二长期缓存或跨await policy，不存enabled/依赖结果。原storage优先于missing、paused/action-disabled/available/requires首失败递归保持；同action available同步改变、立即close、来源移除仍现场生效。validate中v2一致性和依赖visit复用同首id目录，原duplicate/missing/cycle拒绝不改。

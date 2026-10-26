@@ -2,7 +2,10 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { Context } from '@deepseek-ai/cordis'
 import { SessionId, deriveEventMessage, type SessionSeq, type EpochHeader } from '@deepseek-ai/dsh-session'
-import { createUserMessage, createMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, createMessage, createToolResultMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { CompactionId } from '@deepseek-ai/dsh-compaction'
+import { createSummaryProposalHistory, summaryProposalRecord } from '../lib/summary-proposal-history.js'
+import { createToolEvents } from '../lib/reminder-runtime/tool-events.js'
 import { ensureSessionLog } from '../lib/session-log.js'
 import { createRequestCache } from '../lib/request-cache.js'
 import { createSessionDeliveries } from '../lib/reminder-runtime/session-deliveries.js'
@@ -619,5 +622,54 @@ export function registerSessionLogCases(harness: Harness): void {
     assert.equal(next.length, 2, 'later reads check the native persistence revision even while an old lease exists')
     assert.equal(same.length, 1); assert.equal(same.at(1), undefined)
     assert.notEqual(next.prepare(), same.prepare(), 'a changed revision cannot reuse a stale prepared Session')
+  })
+
+  test('native JSONL consumers restore proposal rejection and anchored tool context without live Sessions', async t => {
+    const ctx = await harness.open(t), logs = ensureSessionLog(ctx)
+    const seed = ctx.sessions.prepare(SessionId('persisted-consumer-reads'))
+    seed.append('turn/start', { turn: 1 }); seed.append('step/start', { turn: 1, step: 1 })
+    const early = seed.append('user/message', message('before the actual result'), { surfaceOp: 'append' })
+    const callId = ToolCallId('persisted-consumer-call')
+    seed.append('assistant/message', { turn: 1, step: 1, stream: [],
+      message: createMessage({ role: 'assistant', source: { kind: 'model', provider: 'p', model: 'm' },
+        content: [{ type: 'tool-call', id: callId, name: 'read', arguments: '{"file_path":"original.ts"}' }] }) }, { surfaceOp: 'append' })
+    const call = seed.append('tool/call', { turn: 1, step: 1, callId, name: 'read', arguments: '{"file_path":"original.ts"}' })
+    const terminal = seed.append('tool/result', { turn: 1, step: 1,
+      message: createToolResultMessage({ callId, isError: false, content: [{ type: 'text', text: 'actual result' }] }),
+    }, { surfaceOp: 'append', sourceEventSeqs: [call.seq] })
+    const id = CompactionId('persisted-rejected')
+    seed.append('compaction/start', { compactionId: id, turn: 1, ...summaryProposalRecord('too-large') })
+    seed.append('compaction/end', { compactionId: id, turn: 1, error: 'replacement grew', ...summaryProposalRecord('too-large', 'SUMMARY_NOT_SMALLER') })
+    seed.append('step/end', { turn: 1, step: 1 }); seed.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    const handle = await ctx.sessionPersistence.create(seed.header, { inheritedEventCount: seed.inheritedEventCount }); t.after(() => handle.close())
+    await handle.append(logs.withLive(seed, log => [...log.range(0)])); await handle.flush()
+    using old = await logs.read(seed.id)
+    assert.equal(old.length, seed.seq)
+    const prepared = old.prepare()
+    const proposals = createSummaryProposalHistory({ readSession: id => logs.read(id) }, logs); t.after(() => proposals.close())
+    const tools = createToolEvents({ maxContextChars: 256, maxContextMessages: 8, maxQueued: 2, maxConcurrent: 1 },
+      { logs, sessions: ctx.sessions, readSession: (id, signal) => logs.read(id, signal) }); t.after(() => tools.close())
+    assert.equal(await proposals.has(prepared, 'too-large'), true); assert.equal(await proposals.has(prepared, 'other'), false)
+    const anchor = { sessionId: String(seed.id), callId: 'forged', rootCallId: 'forged', origin: 'human' as const, facts: {},
+      arguments: { file_path: 'forged.ts' }, native: { type: 'tool-result' as const, seq: terminal.seq } }
+    const found = await tools.resolve(anchor)
+    assert.equal(found.callId, callId); assert.deepEqual(found.arguments, { file_path: 'original.ts' })
+    assert.equal(found.context?.messages[0]?.text, 'before the actual result')
+    assert.equal(found.context?.messages.length, 2)
+    assert.equal(found.context?.messages[1]?.role, 'assistant')
+    const replacement = seed.append('user/message', message('later replacement'),
+      { surfaceOp: { op: 'replace', startSeq: early.seq, endSeq: early.seq }, sourceEventSeqs: [early.seq] })
+    await handle.append([replacement]); await handle.flush()
+    using current = await logs.read(seed.id)
+    assert.equal(current.length, old.length + 1); assert.equal(old.at(replacement.seq), undefined)
+    assert.equal(current.at(replacement.seq)?.type, 'user/message')
+    assert.deepEqual(current.select(['compaction/end', 'user/message', 'compaction/start']).map(event => event.seq),
+      [early.seq, terminal.seq + 1, terminal.seq + 2, replacement.seq])
+    assert.deepEqual([...current.range(-4, early.seq + 1)].map(event => event.seq), [0, 1, early.seq])
+    assert.equal(current.last('compaction/end', current.length + 100)?.seq, terminal.seq + 2)
+    assert.deepEqual(await tools.resolve(anchor), found, 'later replacement cannot change the historical trigger context')
+    old[Symbol.dispose](); assert.throws(() => old.prepare(), /session-log-closed/)
+    assert.equal(current.at(early.seq)?.type, 'user/message', 'disposing an old reader keeps the new lease usable')
+    assert.equal(ctx.sessions.get(seed.id), undefined, 'native inspection never enters the prepared Session into the live store')
   })
 }

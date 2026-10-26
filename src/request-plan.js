@@ -4,15 +4,11 @@ import { setRequestBlock } from './request-blocks.js'
 import { estimateInjection, requestImpact } from './request-impact.js'
 import { indexRequestBlocks, filteredAncestor, orderRequestRemovals } from '../lib/request-block-index.js'
 import { indexRequestActions } from '../lib/request-action-order.js'
+import { indexRequestPairs } from '../lib/request-pairs.js'
 
 function ownedRequest(request) {
   // Cancellation and prepared-call handles stay native. Clone only the JSON request payload.
   return { ...request, messages: structuredClone(request.messages) }
-}
-function pairedIds(request) {
-  const calls = new Set(request.messages.flatMap(message => message.content.filter(block => block.type === 'tool-call').map(block => block.id)))
-  const results = new Set(request.messages.filter(message => message.role === 'tool').map(message => message.toolCallId))
-  return { calls, results }
 }
 function patchArguments(argumentsValue, pointer, value) {
   const out = structuredClone(argumentsValue)
@@ -57,13 +53,13 @@ function planRequest({ request, blocks, rules, events, templates, snapshot, deci
   const writable = () => {
     if (next === request) {
       next = ownedRequest(request)
-      analysis?.modelProjection?.cloned(request.messages, next.messages)
+      analysis?.cloned(request.messages, next.messages)
     }
     return next
   }
   const writeBlock = (block, value) => {
     const owned = writable()
-    if (block.messageIndex >= 0) analysis?.modelProjection?.changed(owned.messages[block.messageIndex])
+    if (block.messageIndex >= 0) analysis?.changed(owned.messages[block.messageIndex])
     // Cached bodies are immutable; rewritten requests retain independently writable JSON.
     setRequestBlock(owned, block, value === undefined ? undefined : structuredClone(value))
   }
@@ -154,7 +150,7 @@ function planRequest({ request, blocks, rules, events, templates, snapshot, deci
           }
           at = next.messages.length - target.depth
         } else {
-          const anchor = target.anchor === 'matched' ? block : writableBlocks.find(value => value.id === target.anchor)
+          const anchor = target.anchor === 'matched' ? block : indexed.firstModel(target.anchor)
           if (!anchor || anchor.messageIndex < 0) {
             record.status = 'skipped'; record.reason = 'injection-anchor-unavailable'; outcomes.set(action.id, false); continue
           }
@@ -191,7 +187,7 @@ function planRequest({ request, blocks, rules, events, templates, snapshot, deci
   // Deletions run deepest and rightmost first so they never shift an outstanding path.
   for (const block of orderRequestRemovals(writableBlocks, filters)) {
     if (block.path === '$result') {
-      const owned = writable(); analysis?.modelProjection?.changed(owned.messages[block.messageIndex])
+      const owned = writable(); analysis?.changed(owned.messages[block.messageIndex])
       owned.messages[block.messageIndex].content = []; continue
     }
     if (filteredAncestor(block, removedPaths)) continue
@@ -211,7 +207,8 @@ function planRequest({ request, blocks, rules, events, templates, snapshot, deci
   }
   if (next !== request || (analysis ? analysis.read(request).hasEmptyMessages : request.messages.some(message => !message.content.length))) {
     writable().messages = next.messages.filter(message => message.content.length > 0)
-    const beforePairs = pairedIds(request); const afterPairs = pairedIds(next)
+    const beforePairs = analysis ? analysis.pairIndex(request) : indexRequestPairs(request)
+    const afterPairs = analysis ? analysis.pairIndex(next) : indexRequestPairs(next)
     for (const id of beforePairs.calls) if (beforePairs.results.has(id) && afterPairs.calls.has(id) !== afterPairs.results.has(id)) throw new Error('tool-call-result-pair-broken')
   }
   const impact = analysis ? analysis.impact(impactBaseline, next) : requestImpact(impactBaseline, next)

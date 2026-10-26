@@ -19,7 +19,19 @@ export function indexRequestBlocks<B extends RequestBlock>(blocks: readonly B[])
       group.push(block)
     }
   }
-  return { model, byId, byCall }
+  let anchors: Map<string, B> | undefined
+  return { model, byId, byCall,
+    /** Explicit injection anchors used Array.find, unlike patches whose byId
+     * keeps the last id. Build only when requested; preserve the first model
+     * block and never borrow a same-named block from another view. */
+    firstModel(id: string): B | undefined {
+      if (!anchors) {
+        anchors = new Map()
+        for (const block of model) if (!anchors.has(block.id)) anchors.set(block.id, block)
+      }
+      return anchors.get(id)
+    },
+  }
 }
 
 /** Preserve the existing stable rightmost-first order without rebuilding ICU

@@ -11,6 +11,10 @@ export declare function indexRequestBlocks<B extends RequestBlock>(blocks: reado
     model: B[];
     byId: Map<string, B>;
     byCall: Map<string, B[]>;
+    /** Explicit injection anchors used Array.find, unlike patches whose byId
+     * keeps the last id. Build only when requested; preserve the first model
+     * block and never borrow a same-named block from another view. */
+    firstModel(id: string): B | undefined;
 };
 /** Preserve the existing stable rightmost-first order without rebuilding ICU
  * collation options for every path comparison. Keep the collator local: each

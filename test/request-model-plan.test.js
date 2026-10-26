@@ -8,6 +8,36 @@ import { planRequestV2 } from '../src/request-plan.js'
 import { createTemplates } from '../src/templates.js'
 import { normalizeRuleV2, detectRulesV2 } from '@leolee9086/dsh-rule-engine'
 
+test('explicit model anchors keep first-match placement and unavailable anchors skip dependent actions', t => {
+  const cache = createSessionCache(); t.after(() => cache.close())
+  const analysis = createRequestPlanCache(requestImpact, cache, projectRequestMessage); t.after(() => analysis.close())
+  const request = { messages: [{ role: 'user', content: [{ type: 'text', text: 'MATCH' }] }, { role: 'user', content: [{ type: 'text', text: 'END' }] }] }
+  const blocks = modelRequestBlocks('s', request, 'anchors', { byId: new Map() }, 'turn', analysis.modelProjection)
+  const anchor = blocks[1].id
+  const rule = normalizeRuleV2({ schemaVersion: 2, sourceId: 'test', id: 'anchor', revision: 1, title: 'Anchor', on: ['request.assemble'],
+    select: { view: 'model', roles: ['user'], blockTypes: ['text'] }, match: { kind: 'regex', pattern: '^MATCH$' },
+    actions: [{ id: 'inject', kind: 'inject', stage: 'request.assemble', enabledDefault: true, template: 'PIN',
+      target: { view: 'model', role: 'user', anchor, position: 'before' } },
+    { id: 'dependent', kind: 'notify', stage: 'request.assemble', enabledDefault: true, template: 'NOTICE', dependsOn: ['inject'] }] })
+  const events = detectRulesV2({ rules: [rule], blocks, stage: 'request.assemble' })
+  const input = { request, blocks, rules: [rule], events, templates: createTemplates(), snapshot: {}, decision: () => ({ enabled: true }) }
+  for (const scoped of [undefined, analysis]) {
+    const placed = planRequestV2({ ...input, analysis: scoped })
+    assert.deepEqual(placed.request.messages.map(message => message.content[0].text), ['MATCH', 'PIN', 'END'])
+    // Duplicate-id precedence is covered by the index test. Here use a real
+    // synthetic-position anchor so patch merging is not the behavior under test.
+    const first = { ...blocks[1], id: 'synthetic-anchor', messageIndex: -1 }
+    const unavailable = { ...rule, actions: rule.actions.map(action => action.id === 'inject'
+      ? { ...action, target: { ...action.target, anchor: first.id } } : action) }
+    const skipped = planRequestV2({ ...input, rules: [unavailable], blocks: [first, ...blocks], analysis: scoped })
+    assert.equal(skipped.request, request)
+    assert.deepEqual(skipped.records.map(record => record.reason), ['injection-anchor-unavailable', 'dependency-not-planned'])
+    const missing = planRequestV2({ ...input, blocks: blocks.slice(0, 1), analysis: scoped })
+    assert.equal(missing.request, request); assert.equal(missing.records[0].reason, 'injection-anchor-unavailable')
+  }
+  assert.equal(request.messages.length, 2)
+})
+
 test('cached tool arguments invalidate only their message and paired filtering preserves old cuts', t => {
   const cache = createSessionCache(); t.after(() => cache.close())
   const analysis = createRequestPlanCache(requestImpact, cache, projectRequestMessage); t.after(() => analysis.close())
@@ -53,6 +83,7 @@ test('cache-budget replanning does not reproject unchanged messages or leak muta
     decision: () => ({ enabled: true }), analysis, maxCacheChangedBytes: 0 })
   assert.equal(result.request, request); assert.ok(result.records.some(row => row.reason === 'request-cache-change-budget-exceeded'))
   assert.equal(cache.report().find(row => row.name === 'request-plan-actions')?.work, 1, 'budget replanning shares only the immutable action structure')
+  assert.equal(cache.report().find(row => row.name === 'request-plan-pairs')?.work, 3, 'one baseline and one final two-message candidate are indexed, not every retry')
   assert.equal(cache.report().find(row => row.name === 'request-model-projection')?.work, 1)
 })
 

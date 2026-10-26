@@ -1,5 +1,6 @@
 import type { SessionCache } from './session-cache.js';
 import { type RequestBlock } from './request-block-index.js';
+import { type RequestPairs } from './request-pairs.js';
 import { type RequestActionDependency, type RequestActionStages } from './request-action-order.js';
 interface Payload {
     messages: readonly {
@@ -28,10 +29,14 @@ export declare function createRequestPlanCache<R extends Payload, I, B = unknown
         close(): void;
     } | undefined;
     actionIndex: <A extends RequestActionDependency>(actions: readonly A[]) => RequestActionStages<A>;
+    pairIndex: (request: R) => RequestPairs;
+    cloned: (before: R["messages"], after: R["messages"]) => void;
+    changed: (message: R["messages"][number]) => void;
     blockIndex: (blocks: readonly RequestBlock[]) => {
         model: RequestBlock[];
         byId: Map<string, RequestBlock>;
         byCall: Map<string, RequestBlock[]>;
+        firstModel(id: string): RequestBlock | undefined;
     };
     impact: (before: R, after: R) => I;
     close: () => void;

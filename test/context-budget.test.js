@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import { contextBudget, resolveBudgetConfig, budgetPolicy } from '../src/context-budget.js'
 import { createMaintenanceController } from '../src/maintenance-policy.js'
 import { recoveryProof } from '../src/recovery-proof.js'
-import { eventLog } from './fixtures/event-log.js'
+import { nativeSession } from './fixtures/native-session.ts'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 
 const deployment = { physicalCapacity: 1048576, policyCapacity: 262144, maxTokens: 8192, safetyTokens: 2048, burstTokens: 8192, releaseMarginTokens: 4096, softRatio: 0.8, retainRatio: 0.16 }
 test('combined policy limits preserve actual capacity and reserve output once', () => {
@@ -41,24 +42,20 @@ test('exact route and purpose policies reject duplicate declarations', () => {
   assert.equal(budgetPolicy(spec, route, 'compaction').contextBudgetTokens, undefined)
   assert.equal(budgetPolicy(spec, { provider: 'other', model: 'm' }).contextBudgetTokens, undefined)
 })
-test('recovery requires a retained replacement after the failed revision, source coverage and a frozen-price decrease', () => {
-  const failed = { logRevision: 10, sourceSeqs: [1, 2], sourceMessages: [{ cost: 100 }] }
-  let event = { seq: 11, sourceEventSeqs: [1], surfaceOp: { op: 'replace' } }
-  let cost = 50
-  let ancestors = []
-  const session = { surface: { nodes: [11, 2] }, deriveMessages: () => [{ cost }] }
-  const price = messages => messages.reduce((sum, value) => sum + value.cost, 0)
-  assert.equal(recoveryProof(session, failed, price, eventLog([event, ...ancestors]), session.deriveMessages()).progressed, true)
-  event = { ...event, sourceEventSeqs: [10] }
-  ancestors = [{ seq: 10, sourceEventSeqs: [1] }]
-  assert.equal(recoveryProof(session, failed, price, eventLog([event, ...ancestors]), session.deriveMessages()).progressed, true, 'Summary of a pruned replacement retains transitive failed-source coverage')
-  ancestors = []
-  event = { ...event, sourceEventSeqs: [1] }
-  cost = 100
-  assert.equal(recoveryProof(session, failed, price, eventLog([event, ...ancestors]), session.deriveMessages()).progressed, false)
-  cost = 50
-  event = { ...event, seq: 9 }
-  assert.equal(recoveryProof(session, failed, price, eventLog([event, ...ancestors]), session.deriveMessages()).progressed, false)
-  event = { ...event, seq: 11, sourceEventSeqs: [7] }
-  assert.equal(recoveryProof(session, failed, price, eventLog([event, ...ancestors]), session.deriveMessages()).progressed, false)
+test('recovery requires a retained replacement after the failed revision, source coverage and a frozen-price decrease', t => {
+  const { sessions, logs } = nativeSession(t), session = sessions.create()
+  const message = text => createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text }] })
+  const first = session.append('user/message', message('x'.repeat(100)), { surfaceOp: 'append' })
+  const second = session.append('user/message', message('y'.repeat(100)), { surfaceOp: 'append' })
+  const failed = { logRevision: session.seq, sourceSeqs: [first.seq, second.seq], sourceMessages: logs.messages(session) }
+  const price = messages => messages.reduce((sum, value) => sum + value.content.reduce((n, block) => n + (block.text?.length ?? 0), 0), 0)
+  const proof = (failure = failed, prices = price) => logs.withLive(session, log => recoveryProof(session, failure, prices, log, logs.messages(session)))
+  assert.equal(proof().progressed, false)
+  const replacement = session.append('user/message', message('small'), { surfaceOp: { op: 'replace', startSeq: first.seq, endSeq: first.seq }, sourceEventSeqs: [first.seq] })
+  assert.equal(proof().progressed, true)
+  session.append('user/message', message('tiny'), { surfaceOp: { op: 'replace', startSeq: replacement.seq, endSeq: replacement.seq }, sourceEventSeqs: [replacement.seq] })
+  assert.equal(proof().progressed, true, 'a summary of a replacement retains transitive failed-source coverage')
+  assert.equal(proof(failed, () => 100).progressed, false, 'no frozen-price decrease')
+  assert.equal(proof({ ...failed, logRevision: session.seq }).progressed, false, 'replacement predates failed revision')
+  assert.equal(proof({ ...failed, sourceSeqs: [999] }).progressed, false, 'unrelated source cannot establish progress')
 })

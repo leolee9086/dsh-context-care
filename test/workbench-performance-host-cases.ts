@@ -6,13 +6,50 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import { createMessage, createToolResultMessage, ToolCallId, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 
 interface Harness {
-  open(t: test.TestContext): Promise<{ session: Session; configure(filters?: boolean | 'cascade'): Promise<void>; display(seq: number): Promise<unknown>;
-    preview(request: GenerateOptions): Promise<{ request: GenerateOptions; applied: unknown[]; records: { cascadePass?: number }[] }>; cacheNames(): string[]; projectionWork(): number; actionWork(): number; controlIdentityFinds(): number; byteSerializations(request: GenerateOptions): number; numericComparisons(): number; removalCollators(): number; catalogReads(): number; recordReads(): number; tokenReads(): number; pauseFilter(paused: boolean): Promise<void>;
+  open(t: test.TestContext): Promise<{ session: Session; anchorLookups(): number; anchorScans(): number; configureAnchors(anchor: string): Promise<void>; configure(filters?: boolean | 'cascade'): Promise<void>; display(seq: number): Promise<unknown>;
+    preview(request: GenerateOptions): Promise<{ request: GenerateOptions; applied: unknown[]; records: { cascadePass?: number }[] }>; cacheNames(): string[]; projectionWork(): number; pairBuilds(): number; pairWork(): number; pairMessages(): number; actionWork(): number; controlIdentityFinds(): number; byteSerializations(request: GenerateOptions): number; numericComparisons(): number; removalCollators(): number; catalogReads(): number; recordReads(): number; tokenReads(): number; pauseFilter(paused: boolean): Promise<void>;
     reconcile(): Promise<void>; http(): Promise<void>; probe(): Promise<void>; runs(): number; displayCalls(): number }>
 }
 
 /** Run in the real Loader composition; spy methods delegate to native Session. */
 export function registerWorkbenchPerformanceCases(harness: Harness): void {
+  test('long native explicit anchors preserve placement without per-action block scans', { timeout: 120000 }, async t => {
+    const fixture = await harness.open(t), { session } = fixture
+    const request: GenerateOptions = { provider: 'care-test', model: 'care-test', messages: [] }
+    let anchor = ''
+    for (let index = 0; index < 1000; index++) {
+      const message = createMessage({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text',
+        text: `${index < 500 ? 'ANCHOR_MATCH' : 'KEEP'} ${index} ` + 'x'.repeat(256) }] })
+      const event = session.append('user/message', message, { surfaceOp: 'append' })
+      request.messages.push(message); anchor = `${session.id}#${event.seq}#0`
+    }
+    await fixture.configureAnchors(anchor)
+    const before = structuredClone(request), reads = t.mock.method(session, 'eventAt')
+    const snapshots = t.mock.method(session, 'snapshotEvents'), derive = t.mock.method(session, 'deriveMessages')
+    const loop = monitorEventLoopDelay({ resolution: 10 }); loop.enable(); t.after(() => loop.disable())
+    await yieldToHost(); const cpuStart = process.cpuUsage()
+    const timed = async (run: () => Promise<unknown>) => { const start = performance.now(); const value = await run(); return { ms: performance.now() - start, value } }
+    const [planned, http, other] = await Promise.all([timed(() => fixture.preview(request)), timed(fixture.http), timed(fixture.probe)])
+    const result = planned.value as Awaited<ReturnType<typeof fixture.preview>>
+    assert.equal(result.applied.length, 500); assert.equal(result.request.messages.length, 1500)
+    assert.deepEqual(result.request.messages.slice(0, 999), before.messages.slice(0, 999))
+    assert.deepEqual(result.request.messages.at(-1), before.messages.at(-1))
+    assert.ok(result.request.messages.slice(999, 1499).every(message => message.content[0].type === 'text' && message.content[0].text === 'PINNED'))
+    assert.deepEqual(request, before)
+    const warmReads = reads.mock.callCount(), again = await fixture.preview(request)
+    assert.deepEqual(again.request, result.request); assert.equal(reads.mock.callCount(), warmReads)
+    assert.equal(warmReads, 1000); assert.equal(snapshots.mock.callCount(), 0); assert.equal(derive.mock.callCount(), 0)
+    assert.equal(fixture.anchorLookups(), 1000, 'two real previews each resolve 500 exact anchors')
+    assert.equal(fixture.anchorScans(), 0, 'no injection action calls the model block array find')
+    assert.ok(!fixture.cacheNames().some(name => name.startsWith('request-plan-') || name === 'request-model-projection'))
+    const first = result.request.messages[0].content[0]
+    if (first.type === 'text') first.text = 'INDEPENDENT'
+    assert.deepEqual(request, before); assert.deepEqual(again.request.messages[0], before.messages[0])
+    await yieldToHost(); loop.disable(); const cpu = process.cpuUsage(cpuStart)
+    t.diagnostic(`workbench-explicit-anchors ${JSON.stringify({ messages: 1000, injections: 500, nativeReads: warmReads, anchorLookups: fixture.anchorLookups(), anchorScans: fixture.anchorScans(), planMs: planned.ms, httpMs: http.ms, otherAgentMs: other.ms, cpuUserMs: cpu.user / 1000, cpuSystemMs: cpu.system / 1000, loopMaxMs: loop.max / 1e6 })}`)
+    assert.ok(planned.ms < 5000 && http.ms < 1000 && other.ms < 1500 && loop.max / 1e6 < 1000)
+  })
+
   test('long native cascade projects each unchanged message body once and only adds new injected bodies', { timeout: 120000 }, async t => {
     const fixture = await harness.open(t), { session } = fixture
     const request: GenerateOptions = { provider: 'care-test', model: 'care-test', system: 'SYSTEM', messages: [] }
@@ -35,6 +72,10 @@ export function registerWorkbenchPerformanceCases(harness: Harness): void {
     assert.deepEqual(result.request.messages.slice(-3).map(message => message.content[0]).map(block => block.type === 'text' ? block.text : ''), ['SECOND_LINK', 'THIRD_LINK', 'FINAL_LINK'])
     const byteSerializations = fixture.byteSerializations(request)
     assert.equal(byteSerializations, 4, 'complete baseline plus three distinct cascade candidates are each serialized once')
+    const pairBuilds = fixture.pairBuilds(), pairWork = fixture.pairWork(), pairMessages = fixture.pairMessages()
+    assert.equal(pairBuilds, 4, 'baseline and three final cascade candidates each build one pair cut')
+    assert.equal(pairWork, 4006, '1000+1001+1002+1003 message contributions, not each candidate twice as output then input')
+    assert.equal(pairMessages, 1003, '1000 input bodies and three injections, never the unchanged cloned history again')
     const projected = fixture.projectionWork() - workBefore
     assert.equal(projected, 1003, '1000 input messages + one system + two newly inspected injections, never the cloned historical bodies again')
     assert.deepEqual(request, before); assert.equal(Object.isFrozen(request.messages[0].content[0]), initiallyFrozen)
@@ -45,7 +86,7 @@ export function registerWorkbenchPerformanceCases(harness: Harness): void {
     assert.equal(nativeReads.mock.callCount(), 1000)
     assert.ok(!fixture.cacheNames().some(name => name.startsWith('request-plan-') || name === 'request-model-projection'))
     await yieldToHost(); loop.disable(); const cpu = process.cpuUsage(cpuStart)
-    t.diagnostic(`workbench-model-cascade ${JSON.stringify({ events: session.seq, messages: 1000, bodyProjections: projected, byteSerializations, planMs: planned.ms, httpMs: http.ms, otherAgentMs: other.ms, cpuUserMs: cpu.user / 1000, cpuSystemMs: cpu.system / 1000, loopMaxMs: loop.max / 1e6, wallMs: performance.now() - began })}`)
+    t.diagnostic(`workbench-model-cascade ${JSON.stringify({ events: session.seq, messages: 1000, bodyProjections: projected, byteSerializations, pairBuilds, pairWork, pairMessages, planMs: planned.ms, httpMs: http.ms, otherAgentMs: other.ms, cpuUserMs: cpu.user / 1000, cpuSystemMs: cpu.system / 1000, loopMaxMs: loop.max / 1e6, wallMs: performance.now() - began })}`)
     assert.ok(planned.ms < 5000 && http.ms < 1000 && other.ms < 1500 && loop.max / 1e6 < 1000)
   })
 
@@ -86,22 +127,31 @@ export function registerWorkbenchPerformanceCases(harness: Harness): void {
     assert.ok(result.request.messages.filter(message => message.role === 'tool').every(message => message.content.every(block => block.type === 'text' && block.text.startsWith('KEEP'))))
     assert.deepEqual(request, before, 'planned result cannot mutate the source request')
     assert.equal(fixture.actionWork() - beforeActionWork, 1, '500 evidence occurrences share one immutable single-action dependency index')
+    assert.equal(fixture.pairBuilds(), 2, 'one baseline and one final filtered candidate, never a cut per occurrence')
+    assert.equal(fixture.pairWork(), 1500, 'all 1000 baseline messages and all 500 final messages are checked')
     const beforeWarm = reads.mock.callCount(), again = await fixture.preview(request)
     const actionWork = fixture.actionWork() - beforeActionWork
     assert.equal(actionWork, 2, 'independent second preview owns exactly one new action structure')
+    const pairBuilds = fixture.pairBuilds(), pairWork = fixture.pairWork(), pairMessages = fixture.pairMessages()
+    assert.equal(pairBuilds, 4, 'independent previews build their own pair cuts, not a mutable-identity cross-operation cache')
+    assert.equal(pairWork, 3000)
+    assert.equal(pairMessages, 2000, 'each independent preview reads 1000 source messages once; unchanged KEEP clones borrow metadata')
     assert.deepEqual(again.request, result.request)
     assert.equal(reads.mock.callCount(), beforeWarm, 'repeat preview borrows the existing native cut')
     assert.equal(snapshots.mock.callCount(), 0); assert.equal(fullMessages.mock.callCount(), 0)
-    assert.ok(!fixture.cacheNames().some(name => name === 'request-plan-analysis' || name === 'request-plan-block-index' || name === 'request-model-projection'))
+    assert.ok(!fixture.cacheNames().some(name => name.startsWith('request-plan-') || name === 'request-model-projection'))
     await yieldToHost(); loop.disable(); const cpu = process.cpuUsage(cpuStart)
-    t.diagnostic(`workbench-tool-filter ${JSON.stringify({ events: session.seq, messages: request.messages.length, matchedChildren: 500, actionWork, controlIdentityFinds, numericComparisons, removalCollators, catalogReads, recordReads, tokenReads, planMs: planned.ms, httpMs: http.ms, otherAgentMs: other.ms, cpuUserMs: cpu.user / 1000, cpuSystemMs: cpu.system / 1000, loopMaxMs: loop.max / 1e6, nativeReads: reads.mock.callCount() })}`)
+    t.diagnostic(`workbench-tool-filter ${JSON.stringify({ events: session.seq, messages: request.messages.length, matchedChildren: 500, actionWork, pairBuilds, pairWork, pairMessages, controlIdentityFinds, numericComparisons, removalCollators, catalogReads, recordReads, tokenReads, planMs: planned.ms, httpMs: http.ms, otherAgentMs: other.ms, cpuUserMs: cpu.user / 1000, cpuSystemMs: cpu.system / 1000, loopMaxMs: loop.max / 1e6, nativeReads: reads.mock.callCount() })}`)
     assert.ok(planned.ms < 5000 && http.ms < 1000 && other.ms < 1500 && loop.max / 1e6 < 1000)
     await fixture.pauseFilter(true)
     const paused = await fixture.preview(request)
     assert.equal(paused.applied.length, 0); assert.deepEqual(paused.request, request)
+    assert.equal(fixture.pairBuilds(), pairBuilds, 'unchanged notification-free plan does not build any pair cut')
     await fixture.pauseFilter(false)
     const resumed = await fixture.preview(request)
     assert.equal(resumed.applied.length, 500); assert.deepEqual(resumed.request, result.request)
+    assert.equal(fixture.pairBuilds(), pairBuilds + 2, 'new enabled plan gets fresh immutable pair cuts')
+    assert.ok(!fixture.cacheNames().some(name => name.startsWith('request-plan-') || name === 'request-model-projection'))
     assert.equal(reads.mock.callCount(), beforeWarm, 'new policy batches reuse native reads but never stale action controls')
   })
 

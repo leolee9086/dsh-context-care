@@ -727,7 +727,23 @@ registerWorkbenchPerformanceCases({ async open(t) {
   const owned = await fixture(t, false), ctx = await owned.open(), service = ctx.contextCareWorkbench
   const agent = await ctx.agentLoop.create('workbench-performance', { provider: 'care-test', model: 'care-test' })
   const displayCalls = t.mock.method(service, 'display')
-  const projectionCalls = t.mock.method(ensureSessionLog(ctx).cache, 'worked')
+  const planCache = ensureSessionLog(ctx).cache, originalUse = planCache.use.bind(planCache)
+  const observedIndexes = new WeakSet(), anchors = []; let anchorScans = 0
+  t.mock.method(planCache, 'use', (owner, key, dependencies) => {
+    const value = originalUse(owner, key, dependencies)
+    if (key.name === 'request-plan-block-index' && !observedIndexes.has(value)) {
+      observedIndexes.add(value)
+      // Delegate to the production index; never provide a replacement lookup.
+      anchors.push(t.mock.method(value, 'firstModel'))
+      // Node 22 MockTracker rejects array receivers. Delegate the own method
+      // directly and restore its descriptor after this isolated composition.
+      const model = value.model, originalFind = model.find, descriptor = Object.getOwnPropertyDescriptor(model, 'find')
+      Object.defineProperty(model, 'find', { configurable: true, value: function (...args) { anchorScans++; return Reflect.apply(originalFind, this, args) } })
+      t.after(() => { if (descriptor) Object.defineProperty(model, 'find', descriptor); else delete model.find })
+    }
+    return value
+  })
+  const projectionCalls = t.mock.method(planCache, 'worked')
   const recordReads = t.mock.method(service.store, 'read')
   const policyTokenReads = t.mock.method(service.store, 'token')
   const publicSerializations = t.mock.method(JSON, 'stringify')
@@ -738,16 +754,28 @@ registerWorkbenchPerformanceCases({ async open(t) {
   t.after(ctx.contextCareControls.registerProvider(id => { if (id === agent.id) catalogReads++; return [] }))
   const { base, cookie } = await controlCookie(ctx)
   ctx.llm.registerAdapter(['care-test'], new CompletionAdapter([{ blocks: [{ type: 'text', text: 'Independent workbench probe completed.' }] }]))
-  return { session: agent.session, controlIdentityFinds, tokenReads: () => policyTokenReads.mock.calls.filter(call => call.arguments[0] === agent.id).length, catalogReads: () => catalogReads, recordReads: () => recordReads.mock.calls.filter(call => call.arguments[0] === agent.id).length,
+  return { session: agent.session, controlIdentityFinds, anchorLookups: () => anchors.reduce((sum, spy) => sum + spy.mock.callCount(), 0),
+    anchorScans: () => anchorScans, tokenReads: () => policyTokenReads.mock.calls.filter(call => call.arguments[0] === agent.id).length, catalogReads: () => catalogReads, recordReads: () => recordReads.mock.calls.filter(call => call.arguments[0] === agent.id).length,
     pauseFilter: paused => ctx.contextCareControls.patch(agent.id, { revision: ctx.contextCareControls.revision(agent.id),
       sourceId: 'context-care:document:workbench-performance', ruleId: 'filter-pairs', paused }).then(() => undefined),
     preview: request => service.preview(agent, request), cacheNames: () => ensureSessionLog(ctx).cache.report().map(row => row.name),
     numericComparisons: () => localeComparisons.mock.calls.filter(call => call.arguments[2]?.numeric).length,
     removalCollators: () => collators.mock.callCount(),
     byteSerializations: request => publicSerializations.mock.calls.filter(call => call.arguments[0]?.messages?.[0]?.id === request.messages[0].id).length,
+    pairMessages: () => projectionCalls.mock.calls.filter(call => call.arguments[0].name === 'request-plan-pair-messages').reduce((sum, call) => sum + (call.arguments[1] ?? 1), 0),
+    pairBuilds: () => projectionCalls.mock.calls.filter(call => call.arguments[0].name === 'request-plan-pairs').length,
+    pairWork: () => projectionCalls.mock.calls.filter(call => call.arguments[0].name === 'request-plan-pairs').reduce((sum, call) => sum + (call.arguments[1] ?? 1), 0),
     actionWork: () => projectionCalls.mock.calls.filter(call => call.arguments[0].name === 'request-plan-actions').reduce((sum, call) => sum + (call.arguments[1] ?? 1), 0),
     projectionWork: () => projectionCalls.mock.calls.filter(call => call.arguments[0].name === 'request-model-projection')
       .reduce((sum, call) => sum + (call.arguments[1] ?? 1), 0),
+    configureAnchors: anchor => service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: {
+      schemaVersion: 2, id: 'workbench-anchors', revision: 1, title: 'Explicit anchors', entries: [], rules: [{
+        schemaVersion: 2, id: 'anchored-injection', revision: 1, on: ['request.assemble'],
+        select: { view: 'model', roles: ['user'], blockTypes: ['text'] }, match: { kind: 'regex', pattern: '^ANCHOR_MATCH' },
+        actions: [{ id: 'pin', kind: 'inject', stage: 'request.assemble', template: 'PINNED', enabledDefault: true,
+          target: { view: 'model', role: 'user', anchor, position: 'before' } }],
+      }],
+    } }).then(() => undefined),
     configure: filters => service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: {
       schemaVersion: 2, id: 'workbench-performance', revision: 1, title: 'Performance',
       entries: filters === 'cascade' ? [
@@ -781,7 +809,8 @@ registerWorkbenchPerformanceCases({ async open(t) {
       const other = await ctx.agentLoop.create('workbench-other-agent', { provider: 'care-test', model: 'care-test' })
       await completionTurn(ctx, other, 'Answer independently of the workbench query.')
       assert.ok(other.session.deriveMessages().some(message => message.role === 'assistant'
-        && message.content.some(block => block.type === 'text' && block.text === 'Independent workbench probe completed.')))
+        && message.content.some(block => block.type === 'text' && block.text === 'Independent workbench probe completed.')),
+        ensureSessionLog(ctx).withLive(other.session, log => JSON.stringify(log.last('turn/end')?.data)))
     }, runs: () => service.store.read(agent.id).runtime.runs.length, displayCalls: () => displayCalls.mock.callCount(),
   }
 } })

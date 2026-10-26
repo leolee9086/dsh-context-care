@@ -2,6 +2,7 @@ import type { SessionCache, CacheKey } from './session-cache.js'
 import { indexRequestBlocks, type RequestBlock } from './request-block-index.js'
 import { createRequestModelProjection } from './request-model-projection.js'
 import { publicRequestBytes } from './request-impact-bytes.js'
+import { createRequestPairProjection, type RequestPairs } from './request-pairs.js'
 import { indexRequestActions, type RequestActionDependency, type RequestActionStages } from './request-action-order.js'
 
 interface Payload { messages: readonly { content: readonly unknown[] }[] }
@@ -20,6 +21,7 @@ export function createRequestPlanCache<R extends Payload, I, B = unknown>(measur
   let closed = false
   const active = () => { if (closed) throw new Error('request-plan-cache-closed') }
   const modelProjection = project && createRequestModelProjection(cache, project)
+  const pairProjection = createRequestPairProjection(cache)
   // Candidates are measured only after their last write. A cascade or budget
   // retry clones before editing, so each identity is an immutable byte cut for
   // this operation. Retain full bytes, not a size-only estimate or a truncation.
@@ -43,12 +45,21 @@ export function createRequestPlanCache<R extends Payload, I, B = unknown>(measur
     'Stable dependency structure of one immutable rule action array within this operation; never evidence outcomes.', actions => {
       const value = indexRequestActions(actions); cache.worked(actionsKey, actions.length); return value
     })
+  // Pair cuts share the same final-write boundary as bytes. A later cascade
+  // may borrow a prior candidate as input, but edits always own a new request.
+  const pairsKey = cache.define<R, RequestPairs>('request-plan-pairs',
+    'Top-level call/result identities of a final immutable request within this operation.', request => {
+      const value = pairProjection.read(request); cache.worked(pairsKey, request.messages.length); return value
+    })
+  const pairIndex = (request: R): RequestPairs => { active(); return cache.use(request, pairsKey) }
   const actionIndex = <A extends RequestActionDependency>(actions: readonly A[]): RequestActionStages<A> => {
     active()
     // This namespace preserves the exact action objects owned by this array.
     return cache.use(actions, actionsKey) as RequestActionStages<A>
   }
   const read = (request: R): Analysis<I> => { active(); return cache.use(request, key) }
-  return { read, modelProjection, actionIndex, blockIndex: (blocks: readonly RequestBlock[]) => { active(); return cache.use(blocks, blocksKey) }, impact: (before: R, after: R): I => { active(); return before === after ? read(before).impact : measure(before, after, readBytes) },
-    close: () => { if (!closed) { closed = true; cache.clear(key); cache.clear(blocksKey); cache.clear(bytesKey); cache.clear(actionsKey); modelProjection?.close() } } }
+  return { read, modelProjection, actionIndex, pairIndex,
+    cloned: (before: R['messages'], after: R['messages']) => { active(); modelProjection?.cloned(before, after); pairProjection.cloned(before, after) },
+    changed: (message: R['messages'][number]) => { active(); modelProjection?.changed(message); pairProjection.changed(message) }, blockIndex: (blocks: readonly RequestBlock[]) => { active(); return cache.use(blocks, blocksKey) }, impact: (before: R, after: R): I => { active(); return before === after ? read(before).impact : measure(before, after, readBytes) },
+    close: () => { if (!closed) { closed = true; cache.clear(key); cache.clear(blocksKey); cache.clear(bytesKey); cache.clear(actionsKey); cache.clear(pairsKey); pairProjection.close(); modelProjection?.close() } } }
 }

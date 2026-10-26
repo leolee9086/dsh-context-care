@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { entryPolicy, deliveredEntry, deactivatedEntry, entryTurn } from '../src/entry-lifecycle.js'
 import { validateDocument } from '../src/workbench-store.js'
 import { createTemplates } from '../src/templates.js'
-import { eventLog } from './fixtures/event-log.js'
+import { nativeSession } from './fixtures/native-session.ts'
 
 const entry = extra => ({ id: 'entry', revision: 1, title: 'Entry', enabledDefault: true, template: 'TEXT',
   activation: { kind: 'constant' }, select: { view: 'model', roles: ['user'], blockTypes: ['text'] }, target: { view: 'model' },
@@ -11,7 +11,7 @@ const entry = extra => ({ id: 'entry', revision: 1, title: 'Entry', enabledDefau
 const at = (turn, matches = false, now = 1000) => ({ turnId: `session:turn:${turn}`, turn, matches, now })
 const activate = (definition, turn = 1) => deliveredEntry(definition, undefined, entryPolicy(definition, undefined, at(turn, true)), 'literal {{not-a-template}}', at(turn, true))
 
-test('held slices materialize on each request within a turn, a fixed number of real turns, or the complete session', () => {
+test('held slices materialize on each request within a turn, a fixed number of real turns, or the complete session', t => {
   for (const lifetime of ['turn', 'turns', 'session']) {
     const definition = entry({ lifetime, ...(lifetime === 'turns' ? { lifetimeTurns: 2 } : {}), cooldownMs: 99999 })
     const previous = activate(definition)
@@ -21,9 +21,14 @@ test('held slices materialize on each request within a turn, a fixed number of r
     assert.equal(entryPolicy(definition, previous, at(3)).reuse, lifetime === 'session')
     assert.equal(previous.materialization.turn, 1)
   }
-  assert.equal(entryTurn(undefined, eventLog([])), 0)
-  assert.equal(entryTurn(undefined, eventLog([{ type: 'turn/start', seq: 999, data: { turn: 42 } }])), 42)
-  assert.throws(() => entryTurn(undefined, eventLog([{ type: 'turn/start', seq: 0, data: {} }])), /entry-turn-unavailable/)
+  const { sessions, logs } = nativeSession(t), session = sessions.create()
+  logs.withLive(session, log => assert.equal(entryTurn(undefined, log), 0))
+  session.append('turn/start', { turn: 42 })
+  logs.withLive(session, log => assert.equal(entryTurn(undefined, log), 42))
+  const previous = logs.live(session); t.after(() => previous[Symbol.dispose]())
+  session.append('turn/start', { turn: 43 })
+  assert.equal(entryTurn(undefined, previous), 42, 'a retained cut cannot acquire the later turn')
+  logs.withLive(session, log => assert.equal(entryTurn(undefined, log), 43))
 })
 
 test('until-inactive slices release only at deactivation and respect an independent reactivation cooldown', () => {

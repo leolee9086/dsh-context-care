@@ -1,7 +1,30 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { orderRequestRemovals } from '../lib/request-block-index.js'
+import { indexRequestBlocks, orderRequestRemovals } from '../lib/request-block-index.js'
 import { indexFirstRules } from '../lib/request-rule-index.js'
+
+test('explicit anchors lazily retain the first model id without changing last-id patch lookup', () => {
+  let reads = 0
+  const blocks = Array.from({ length: 1000 }, (_, index) => ({
+    get id() { reads++; return `block:${index}` }, view: 'model', messageIndex: index, path: '0',
+  }))
+  const first = { id: 'duplicate', view: 'model', messageIndex: -1, path: '0' }
+  const later = { id: 'duplicate', view: 'model', messageIndex: 1001, path: '0' }
+  const otherView = { id: 'block:999', view: 'original', messageIndex: 1002, path: '0' }
+  const indexed = indexRequestBlocks([first, ...blocks, later, otherView])
+  const built = reads
+  assert.equal(indexed.byId.get('duplicate'), later)
+  assert.equal(reads, built, 'patch access does not build injection anchors')
+  assert.equal(indexed.firstModel('duplicate'), first, 'a synthetic first match is not replaced by a later usable anchor')
+  const anchorReads = reads
+  assert.ok(anchorReads > built)
+  for (let repeat = 0; repeat < 10; repeat++) for (let index = 0; index < blocks.length; index++) {
+    assert.equal(indexed.firstModel(`block:${index}`), blocks[index])
+  }
+  assert.equal(reads, anchorReads, '10,000 exact anchors do not rescan block ids')
+  assert.equal(indexed.firstModel('missing'), undefined)
+  assert.equal(indexed.firstModel('block:999'), blocks[999], 'original-view aliases are never eligible')
+})
 
 test('removal ordering matches the original numeric locale comparator and retains source identities', t => {
   const paths = ['0', '1', '2', '10', '12', '2.0', '2.1', '2.10', '2.10.0', '$result', '01', '1', '0.12.2', '0.12.10']
