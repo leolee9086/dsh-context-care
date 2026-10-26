@@ -1,5 +1,25 @@
 # 诊断查询与数据推送验收
 
+## v0.14.16：来源目录与条目确认同步切面（2026-10-26）
+
+第46轮沿实际 workbench-host 消费者修复：来源目录原每个文档重新读取/校验文档、归一化全部规则再筛选，且可用性逐动作复制全部 store；现一个同步来源调用只读一次状态和文档，规则单次归一化后按 sourceId 分组，保留全部规则及来源顺序。分组1000个来源键仅读1000次，640次分组访问不增加读取，重复/分隔符身份不丢。没有新增跨调用长期文档缓存，目录输出仍独立，注册移除立即生效。规划/模板准备共享本次已校验文档。
+
+严格 entry matcher await 后新读一次 ACK 状态，避免逐entry复制全部 store。失活结算使用最终 applied 键集及现有 withDecisions/withPlanningToken 同步批次，仍逐动作现场检查变更/控制/去重/冷却；不跨 await 留目录，真实投递再次校验。原生 reserve/dispatched 的事务中按精确 event/action 对建 scheduled 成员索引，再一次读取条目身份目录，不按动作扫描全部任务或复制全部文档。held slice、失败持久化、rollback/unknown/handoff/settled 流程不改。显示选择和 await 后显示规划分别使用新同步目录，工具前置选择同批目录与首规则身份索引；工具实际拒绝仍实时检查，无相关规则不额外建目录。
+
+新增真实Loader用例：32文档/128动作来源目录每次stateReads=1、1000原生日志零新增读取；调用方修改输出不污染下次目录，撤销来源立即消失。1000消息/32失活条目使用原生depth最近1条匹配，真实预约和持久化确认先激活33项；预览不改变状态，暂停保留held文本，其余31项只在ACK后清除并settled；恢复不补跑旧证据，新append仅增加一次原生读取，真实冷却保持。32工具动作选择只1次目录，真实工具被拒绝、暂停后执行；原显示回归断言选择/await后规划共2目录。最终定向7项实质通过（报告12含5空suite，不能称12项业务），strict/104JS通过。该次条目recordReads9/catalogReads4、plan289.37ms/鉴权HTTP231.83ms/另一Agent241.89ms/CPU1578+31ms/loop214.96ms；目录catalog10.86ms/HTTP85.62ms/另一Agent107.51ms/loop33.95ms。
+
+新增测试失败如实保留：第一次GenerateOptions缺provider/model类型检查退出2、Host未启动；补全后32条无depth规则匹配1000消息超过原match budget，改测试规则为正常depth最近1条，不提高Worker/引擎预算；恢复开关后原错误预期2项而实际1项，原因是旧证据准入，现明确验证旧证据不补跑并append新证据再验证复用，不改生产准入。round46-check-entry、host-entry-retry、entry-diagnostic、host-entry-depth日志均保留。
+
+完整 pnpm release:check 单次exit0：严格类型/104JS/62事件目录、544/544单元0skip（21537.995ms）及Host/Client构建。唯一归档 artifacts/final-v01416-round46/dsh-context-care-0.14.16.tgz，954572字节，SHA256 647B9DF66EC1C6563AE470CAF15937136CC409AB6DE4E42C64FFC1CA22E12CC8。全新 .local/consumer-final-v0.14.16-20261026 普通 pnpm12.6.0 add --offline 安装53项，无allowBuilds/ignore-scripts/exotic豁免或开发junction。只执行已安装模块的8入口/Client factory/真实Worker、原配对/锚点/控制/精确字节预算/可写输出及新增source分组1000读取后一万访问不增、重复保序通过，229个src/lib JS和声明逐字一致、exit0。旧v0.14.15与v0.14.14标签对象/peeled和归档SHA256在18:41核对未变。本轮后续完整门禁均已收取，结果如下。
+
+完整源码Host225/225、0skip、exit0（309450.6786ms）；Client24/24、3文件、exit0（4.73s）。完整Host条目plan377.38ms/HTTP268.09ms/另一Agent289.83ms/CPU1625+16ms/loop219.41ms，state9/catalog4/暖原生仅新事件+1；目录10.22ms/state1/HTTP72.76ms/另一Agent81.91ms/loop32.75ms。1000消息显式锚点plan804.85ms/HTTP57.15ms/另一Agent67.61ms/loop429.92ms，lookup1000/find0/native1000；级联body1003/byte4/pairBuild4/work4006/message1003、plan832.89ms/HTTP57.68ms/另一Agent67.61ms/loop146.41ms；工具过滤500原生事件、actionWork2/catalog3/record7/token5/controlFind0/pairBuild4/work3000/message2000、plan810.78ms/HTTP50.91ms/另一Agent66.04ms/loop357.83ms。2012事件显示cold453.09ms/warm6.87ms、reconcile752.82ms/warm3.27ms、并发鉴权HTTP45.61ms/另一Agent61.33ms/loop99.94ms。
+
+桌面真实Electron/ASAR原生运行首轮57/57、0skip、exit0/空stderr（64475.8297ms）；Windows Start-Process对含空格的test-name-pattern拆分，实际覆盖变宽，故不以首轮代替精确选择。改用无空格正则参数补跑28/28实质用例、0skip、exit0/空stderr（27353.9016ms）：条目plan118.20ms/HTTP83.73ms/另一Agent89.66ms/CPU813+47ms/loop73.20ms，state9/catalog4；目录4.64ms/state1/HTTP46.95ms/另一Agent53.54ms/loop16.06ms；2012事件显示361.01/2.93ms、reconcile635.27/2.20ms、HTTP23.93ms/另一Agent32.30ms/loop34.70ms。包含显示当前偏好、失败ACK、原生旧cut/增量/取消/JSONL以及实际工具控制。隔离ASAR仍不冒充同GUI现场。
+
+唯一归档全新安装后的真实Host13项实质加5空suite全部exit0（报告18，26689.3085ms），包括冷会话/取消/JSONL、32条目真实确认、目录、显式锚点/级联/配对、显示、失败ACK与工具控制。安装态条目plan312.78ms/HTTP239.61ms/另一Agent247.41ms/CPU1735+31ms/loop209.06ms；目录6.01ms/state1/HTTP74.83ms/另一Agent87.28ms/loop33.29ms。包后仅编辑本不打包验收文档，runtime/README/CHANGELOG不变；归档未重打，保留唯一指纹。
+
+整体目标未完成。display-plan 内逐事件规则、依赖与块/锚点查找仍是已读待处理路径，本轮不宣称所有代码侧清理完成；同GUI实际加载版本/性能与14条规则真实时钟现场验收仍待哥哥安装后继续。未代装/启用/重启、未改Harness/Worker时钟/取消阈值，未读业务长日志。
+
 ## v0.14.15：工具配对与显式注入锚点（2026-10-26）
 
 第45轮完成未提交的 request-pairs：顶层 tool-call / tool result 一次读取，保留原 Set 的缺失 ID、重复、空值、顺序和稀疏内容语义。统一 request-plan-pairs 按最后写后的请求身份复用；request-plan-pair-messages 按不可变消息记录惰性 clone ancestry，只借原始键，非原始 ID 读真正 clone。changed 脱离旧 ancestry，关闭操作清域。完整配对断言、预算和可写请求复制不变。

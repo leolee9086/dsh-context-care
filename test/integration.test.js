@@ -768,6 +768,28 @@ registerWorkbenchPerformanceCases({ async open(t) {
     actionWork: () => projectionCalls.mock.calls.filter(call => call.arguments[0].name === 'request-plan-actions').reduce((sum, call) => sum + (call.arguments[1] ?? 1), 0),
     projectionWork: () => projectionCalls.mock.calls.filter(call => call.arguments[0].name === 'request-model-projection')
       .reduce((sum, call) => sum + (call.arguments[1] ?? 1), 0),
+    configureEntries: count => service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: {
+      schemaVersion: 2, id: 'entry-batch', revision: 1, title: 'Entry batch', variables: [{ name: 'active', scope: 'session', type: 'boolean', default: true }],
+      entries: [...Array.from({ length: count }, (_, index) => ({ id: `held-${index}`, revision: 1, title: `Held ${index}`, enabledDefault: true,
+        template: `HELD_${index}`, lifetime: 'until-inactive', activationCooldownMs: 86400000,
+        activation: { kind: 'condition', condition: { kind: 'compare', field: 'vars.active', op: 'eq', value: true } },
+        select: { view: 'model', roles: ['user'], blockTypes: ['text'], depth: { unit: 'message', limit: 1 } }, target: { view: 'model' } })),
+        { id: 'constant', revision: 1, title: 'Constant', enabledDefault: true, template: 'CONSTANT', activation: { kind: 'constant' },
+          select: { view: 'model', roles: ['user'], blockTypes: ['text'], depth: { unit: 'message', limit: 1 } }, target: { view: 'model' } }] } }).then(() => undefined),
+    setEntriesActive: value => service.store.edit(agent.id, { revision: service.store.read(agent.id).revision, operation: 'set-variable', variable: 'active', value }).then(() => undefined),
+    entryState: () => service.store.read(agent.id).runtime.state,
+    confirm: async planned => { await service.reserve(agent, planned, 'entry-batch-confirm'); await service.dispatched(agent, planned, 'entry-batch-confirm') },
+    pauseEntry: paused => ctx.contextCareControls.patch(agent.id, { revision: ctx.contextCareControls.revision(agent.id),
+      sourceId: 'context-care:document:entry-batch', ruleId: 'entry:held-0', paused }).then(() => undefined),
+    configureCatalog: count => {
+      const documents = Array.from({ length: count }, (_, index) => ({ schemaVersion: 2, id: `catalog-${index}`, revision: 1, title: `Catalog ${index}`,
+        rules: Array.from({ length: 4 }, (_, rule) => ({ schemaVersion: 2, id: `r:${rule}`, revision: 1, title: `Rule ${index}:${rule}`, on: ['request.assemble'],
+          select: { view: 'model', roles: ['user'], blockTypes: ['text'] }, match: { kind: 'regex', pattern: '^CATALOG_PROBE' },
+          actions: [{ id: 'notice', kind: 'notify', stage: 'request.assemble', enabledDefault: true, template: `Notice ${index}:${rule}` }] })) }))
+      const dispose = service.register({ plugin: 'catalog-owner', registrationId: 'catalog-cut', sessionId: agent.id, documents })
+      t.after(dispose); return dispose
+    },
+    catalog: () => service.sources(agent.id),
     configureAnchors: anchor => service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: {
       schemaVersion: 2, id: 'workbench-anchors', revision: 1, title: 'Explicit anchors', entries: [], rules: [{
         schemaVersion: 2, id: 'anchored-injection', revision: 1, on: ['request.assemble'],
@@ -4277,7 +4299,10 @@ test('Workbench v2 display compares pure copies and re-renders history with curr
   const before = structuredClone(agent.session.snapshotEvents()); const runtime = service.store.read(agent.id)
   const request = { messages: agent.session.deriveMessages().filter(message => message.role !== 'system') }
   const originalPlan = await service.preview(agent, request)
+  let catalogReads = 0
+  t.after(ctx.contextCareControls.registerProvider(id => { if (id === agent.id) catalogReads++; return [] }))
   const copy = await service.display(agent, event.seq)
+  assert.equal(catalogReads, 2, 'selection and post-await planning each borrow one synchronous catalog')
   assert.equal(copy.changed, true)
   assert.deepEqual(copy.before.map(block => block.text), ['ARCHIVE', 'REMOVE'])
   assert.deepEqual(copy.after.map(block => block.text), ['CLEAN', 'Copy of ARCHIVE'])
@@ -4511,6 +4536,44 @@ test('real concurrent display timeouts cannot consume request matching admission
   assert.equal(service.matcherStats().display.active, 0)
   assert.equal(service.matcherStats().processing.active, 0)
   for (const agent of agents) assert.equal(service.store.read(agent.id).runtime.runs.find(run => run.kind === 'matching').status, 'failed')
+})
+
+test('native workbench tool selection borrows one catalog for many actions and keeps real denial controls', async t => {
+  const owned = await fixture(t, false), ctx = await owned.open(), service = ctx.contextCareWorkbench
+  let executions = 0
+  ctx.effect(() => ctx.tools.register({ name: 'catalog_tool_probe', description: 'Count native tool execution',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+    output: { schema: { type: 'object' }, render: () => [{ type: 'text', text: 'Executed' }] },
+    async execute() { executions++; return { summary: 'Executed' } } }))
+  ctx.llm.registerAdapter(['care-test'], new CompletionAdapter([
+    { blocks: [{ type: 'tool-call', id: 'catalog-tool-first', name: 'catalog_tool_probe', arguments: '{}' }] },
+    { blocks: [{ type: 'text', text: 'Denial observed.' }] },
+    { blocks: [{ type: 'tool-call', id: 'catalog-tool-next', name: 'catalog_tool_probe', arguments: '{}' }] },
+    { blocks: [{ type: 'text', text: 'Paused control observed.' }] },
+  ]))
+  const agent = await ctx.agentLoop.create('catalog-tool-actions', { provider: 'care-test', model: 'care-test' })
+  await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'tool-catalog', revision: 1, title: 'Tool catalog',
+    rules: [{ schemaVersion: 2, id: 'block', revision: 1, on: ['tool.before-execute'],
+      select: { view: 'original', roles: ['assistant'], blockTypes: ['tool-call'] }, match: { kind: 'always' },
+      actions: Array.from({ length: 32 }, (_, index) => ({ id: `deny:${index}`, kind: 'filter', stage: 'tool.before-execute', enabledDefault: true })) }] } })
+  let catalogs = 0, selectionCatalogs = 0, observingSelection = false
+  t.after(ctx.contextCareControls.registerProvider(id => { if (id === agent.id) catalogs++; return [] }))
+  const withDecisions = ctx.contextCareControls.withDecisions.bind(ctx.contextCareControls)
+  t.mock.method(ctx.contextCareControls, 'withDecisions', (id, run) => {
+    if (!observingSelection || id !== agent.id) return withDecisions(id, run)
+    const before = catalogs, result = withDecisions(id, run); selectionCatalogs += catalogs - before; return result
+  })
+  const beforeExecute = service.beforeExecute.bind(service)
+  t.mock.method(service, 'beforeExecute', async exec => { observingSelection = true; try { return await beforeExecute(exec) } finally { observingSelection = false } })
+  await completionTurn(ctx, agent)
+  assert.equal(executions, 0); assert.equal(selectionCatalogs, 1, '32 action selections share one real catalog')
+  const denied = agent.session.snapshotEvents().find(event => event.type === 'tool/result')
+  assert.match(JSON.stringify(denied.data), /Context rule.*deny:0.*blocked/)
+  assert.equal(service.store.read(agent.id).runtime.state[JSON.stringify(['context-care:document:tool-catalog', 'block', 1, 'deny:0'])].occurrenceId.length > 0, true)
+  await ctx.contextCareControls.patch(agent.id, { revision: ctx.contextCareControls.revision(agent.id), sourceId: 'context-care:document:tool-catalog', ruleId: 'block', paused: true })
+  selectionCatalogs = 0; await completionTurn(ctx, agent)
+  assert.equal(executions, 1); assert.equal(selectionCatalogs, 1, 'paused rules still use one fresh selection catalog')
+  assert.equal(agent.session.snapshotEvents().findLast(event => event.type === 'turn/end').data.reason.kind, 'completed')
 })
 
 test('real tool matcher timeout rejects only that tool assessment and the conversation continues', async t => {

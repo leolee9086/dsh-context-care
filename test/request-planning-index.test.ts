@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { indexRequestBlocks, orderRequestRemovals } from '../lib/request-block-index.js'
-import { indexFirstRules } from '../lib/request-rule-index.js'
+import { groupRulesBySource, indexFirstRules } from '../lib/request-rule-index.js'
 
 test('explicit anchors lazily retain the first model id without changing last-id patch lookup', () => {
   let reads = 0
@@ -46,6 +46,23 @@ test('removal ordering matches the original numeric locale comparator and retain
   assert.deepEqual(orderRequestRemovals(blocks, new Set([blocks[0].id])), [blocks[0]])
   assert.equal(collators.mock.callCount(), 1, 'zero or one selected item needs no collator')
   orderRequestRemovals(blocks, filters); assert.equal(collators.mock.callCount(), 2, 'another sort has its own current-default-locale collator')
+})
+
+test('catalog grouping reads sources once and retains every duplicate in order', () => {
+  let reads = 0
+  const rules = Array.from({ length: 1000 }, (_, index) => ({ get sourceId() { reads++; return `source:${index % 64}` }, id: `r:${index}` }))
+  const grouped = groupRulesBySource(rules), afterBuild = reads
+  assert.equal(afterBuild, 1000, 'each source id is read once while building groups')
+  for (let repeat = 0; repeat < 10; repeat++) for (let source = 0; source < 64; source++) {
+    const group = grouped.get(`source:${source}`)
+    assert.equal(group?.[0], rules[source])
+    assert.equal(group?.length, rules.filter((_, index) => index % 64 === source).length)
+  }
+  assert.equal(reads, afterBuild, 'reading 640 source groups does not scan rule source ids')
+  const duplicate = { sourceId: 'a:b', id: 'c' }, another = { sourceId: 'a', id: 'b:c' }
+  const exact = groupRulesBySource([duplicate, another, duplicate])
+  assert.deepEqual(exact.get('a:b'), [duplicate, duplicate]); assert.deepEqual(exact.get('a'), [another])
+  assert.equal(exact.get('missing'), undefined)
 })
 
 test('cascade rule index preserves first identity match and exact source boundaries with one input pass', () => {

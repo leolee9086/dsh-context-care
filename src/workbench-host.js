@@ -14,7 +14,7 @@ import { planRequestV2 } from './request-plan.js'
 import { requestImpact } from './request-impact.js'
 import { createRequestPlanCache } from '../lib/request-plan-cache.js'
 import { withPlanningToken } from '../lib/planning-token.js'
-import { indexFirstRules } from '../lib/request-rule-index.js'
+import { groupRulesBySource, indexFirstRules } from '../lib/request-rule-index.js'
 import { entryTurn as readEntryTurn, entryPolicy, deliveredEntry, deactivatedEntry } from './entry-lifecycle.js'
 import { releaseResources } from './resource-cleanup.js'
 import { importWorkbench } from './workbench-import.js'
@@ -77,13 +77,13 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
   }
   const presetId = agent => agent ? ctx.get('agentPresets')?.composedPreset(agent.ctx) : undefined
   const record = agent => store.read(String(agent.session.id), { presetId: presetId(agent) })
-  function documents(agent) {
-    const docs = [...record(agent).documents, ...externalDocuments(String(agent.session.id))]
+  function documents(agent, state = record(agent)) {
+    const docs = [...state.documents, ...externalDocuments(String(agent.session.id))]
     validateDocumentSet(docs, templates)
     return docs
   }
-  function definitions(agent) {
-    return documents(agent).flatMap(document => [...document.rules.map(rule => normalizeRuleV2({ ...rule, sourceId: `context-care:document:${document.id}` })),
+  function definitions(agent, docs = documents(agent)) {
+    return docs.flatMap(document => [...document.rules.map(rule => normalizeRuleV2({ ...rule, sourceId: `context-care:document:${document.id}` })),
       ...document.entries.map(entry => entryRule(document, entry))])
   }
   function ruleAdmissions(agent, rules, docs = documents(agent), state = record(agent)) {
@@ -95,10 +95,10 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
       return [rule, Math.max(seq, controls.sinceSeq(id, rule.sourceId, rule.id))]
     }))
   }
-  function availability(action, agent, rule) {
+  function availability(action, agent, rule, state) {
     if (fileFailure) return { available: false, reason: `rule-file-load-failed: ${fileFailure.message}` }
     if (rule?.match.kind === 'detector' && !detectors.available(rule, String(agent.session.id), action.stage)) return { available: false, reason: 'detector-unavailable' }
-    const held = rule && record(agent).runtime.state[dispatchKey({ sourceId: rule.sourceId, ruleId: rule.id, ruleRevision: rule.revision }, action)]
+    const held = rule && state.runtime.state[dispatchKey({ sourceId: rule.sourceId, ruleId: rule.id, ruleRevision: rule.revision }, action)]
     if (held?.status === 'unknown') return { available: false, reason: held.reason }
     if (action.stage === 'display.render') {
       if (rule?.select.view === 'model' || rule?.select.crossBlock) return { available: false, reason: 'display-requires-single-original-or-display-block' }
@@ -118,13 +118,16 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
   const sources = id => {
     const agent = ctx.agents.get(id)
     if (!agent) return []
-    return documents(agent).map(document => {
+    // One synchronous catalog observes one validated document cut. Rebuilding
+    // every definition per source made normalization quadratic in documents.
+    const state = record(agent), docs = documents(agent, state), bySource = groupRulesBySource(definitions(agent, docs))
+    return docs.map(document => {
       // The contributed object identifies its owner. Scoped registrations may reuse an id in another session.
       const owner = contributor(id, document)
       return { readOnly: owner !== undefined, sourceId: `context-care:document:${document.id}`, sessionId: id, plugin: owner?.plugin ?? 'dsh-context-care',
-        registration: owner?.filePath ?? owner?.registrationId ?? document.title, executor: 'dsh-context-care', rules: definitions(agent).filter(rule => rule.sourceId === `context-care:document:${document.id}`).map(rule => ({
+        registration: owner?.filePath ?? owner?.registrationId ?? document.title, executor: 'dsh-context-care', rules: (bySource.get(`context-care:document:${document.id}`) ?? []).map(rule => ({
           id: rule.id, title: rule.title, description: rule.description, definition: rule,
-          actions: rule.actions.map(action => ({ id: action.id, title: action.kind, defaultEnabled: action.enabledDefault, requires: action.dependsOn, ...availability(action, agent, rule) })) })) }
+          actions: rule.actions.map(action => ({ id: action.id, title: action.kind, defaultEnabled: action.enabledDefault, requires: action.dependsOn, ...availability(action, agent, rule, state) })) })) }
     })
   }
   let disposeProvider
@@ -168,9 +171,9 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
     }
     return selected
   }
-  function renderTemplates(agent) {
+  function renderTemplates(agent, docs = documents(agent)) {
     const renderer = templates.fork()
-    for (const partial of documents(agent).flatMap(document => document.partials)) renderer.registerPartial(partial)
+    for (const partial of docs.flatMap(document => document.partials)) renderer.registerPartial(partial)
     return renderer
   }
   const jobs = createActionRuns({ store, registry: executors, templates: { render(source, snapshot) {
@@ -256,8 +259,8 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
     } finally { if (ownedAnalysis) analysis.close() }
   }
   async function evaluatePlan(agent, request, stage, suppliedBlocks, freshSeq, analysis) {
-    const captured = token(agent); const docs = documents(agent); const localTemplates = renderTemplates(agent)
-    const rules = definitions(agent).filter(rule => rule.on.includes(stage))
+    const captured = token(agent); const docs = documents(agent); const localTemplates = renderTemplates(agent, docs)
+    const rules = definitions(agent, docs).filter(rule => rule.on.includes(stage))
     const snapshot = { session: { id: String(agent.session.id), turnId: sessionTurn(agent.session) }, vars: variableSnapshot({ ...record(agent), documents: docs }, sessionTurn(agent.session)),
       ...(freshSeq === undefined ? {} : { currentSeq: freshSeq }) }
     const views = requestViews(rules)
@@ -284,11 +287,14 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
         { sessionId: id, current: () => captured === token(agent) })
       const matches = new Set(matched.map(event => JSON.stringify([event.sourceId, event.ruleId])))
       snapshot.materializations = {}
+      // The awaited strict match is complete. Read one fresh ACK state for
+      // this synchronous policy pass, not a full store copy for every entry.
+      const entryState = record(agent)
       enabled = enabled.map(rule => {
         const action = rule.actions[0]; const event = { sourceId: rule.sourceId, ruleId: rule.id, ruleRevision: rule.revision }
         const key = actionKey(event, action); const entry = entries.get(key)
         if (!entry) return rule
-        const previous = record(agent).runtime.state[key]
+        const previous = entryState.runtime.state[key]
         entryPrevious[key] = previous ?? null
         const policy = policies[key] = entryPolicy(entry, previous, { turnId: snapshot.session.turnId, turn, matches: matches.has(JSON.stringify([rule.sourceId, rule.id])) })
         if (policy.reuse) snapshot.materializations[key] = policy.text
@@ -306,14 +312,15 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
     const decisionEntries = new Map(docs.flatMap(document => document.entries.map(entry =>
       [JSON.stringify([`context-care:document:${document.id}`, `entry:${entry.id}`]), entry])))
     // No await inside the callback: delivery always rechecks live policy separately.
-    const planPass = input => controls.withDecisions(id, select => withPlanningToken(captured, () => tokenStamp(agent), () => token(agent), current => {
-      const planning = { select, current, entries: decisionEntries, state: record(agent), turnId: sessionTurn(agent.session) }
+    const withPlanDecisions = run => controls.withDecisions(id, select => withPlanningToken(captured, () => tokenStamp(agent), () => token(agent), current =>
+      run({ select, current, entries: decisionEntries, state: record(agent), turnId: sessionTurn(agent.session) })))
+    const planPass = input => withPlanDecisions(planning => {
       return planRequestV2({ ...input, decision(event, action) {
         const selected = decision(agent, event, action, captured, { planning })
         const policy = policies[actionKey(event, action)]
         return selected.enabled && policy?.reason ? { enabled: false, reason: policy.reason } : selected
       } })
-    }))
+    })
     const estimateMessage = message => ctx.tokenMeter.estimateMessage(message)
     const planned = planPass({ request, blocks, rules, events, templates: localTemplates, snapshot,
       maxInjectedChars, maxInjectedTokens, maxCacheChangedBytes, maxRequestBytes, estimateMessage, analysis })
@@ -361,8 +368,11 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
     }
     if (maxCacheChangedBytes !== undefined && planned.impact.changedSuffixBytes > maxCacheChangedBytes) throw new Error('request-cache-change-budget-exceeded')
     if (captured !== token(agent)) throw new Error('workbench-changed-during-planning')
-    const transitions = entryTransitions.filter(item => policies[item.key].inactive
-      && !planned.applied.some(applied => applied.key === item.key) && decision(agent, item.event, item.action, captured).enabled)
+    // Final applied actions already include every cascade pass. Build membership
+    // only when entry transitions exist; never re-scan all actions per entry.
+    const appliedKeys = entryTransitions.length ? new Set(planned.applied.map(item => item.key)) : undefined
+    const transitions = entryTransitions.length ? withPlanDecisions(planning => entryTransitions.filter(item => policies[item.key].inactive
+      && !appliedKeys.has(item.key) && decision(agent, item.event, item.action, captured, { planning }).enabled)) : []
     planned.records.push(...transitions.map(item => ({ sourceId: item.event.sourceId, ruleId: item.event.ruleId, actionId: item.action.id,
       status: 'planned', reason: 'entry-deactivation' })))
     return { ...planned, entryPolicies: policies, entryPrevious, entryTransitions: transitions, turn,
@@ -464,8 +474,9 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
       const event = history.withLive(agent.session, log => log.at(seq))
       if (!event || !['assistant/message', 'user/message', 'system/message', 'tool/result'].includes(event.type)) throw new Error('display-message-unavailable')
       const captured = token(agent); const id = String(agent.session.id); const docs = documents(agent)
-      const rules = definitions(agent).filter(rule => rule.on.includes('display.render'))
-      const enabled = rules.map(rule => ({ ...rule, actions: rule.actions.filter(action => action.stage === 'display.render' && controls.enabled(id, rule.sourceId, rule.id, action.id)) })).filter(rule => rule.actions.length)
+      const rules = definitions(agent, docs).filter(rule => rule.on.includes('display.render'))
+      const enabled = rules.length ? controls.withDecisions(id, select => rules.map(rule => ({ ...rule,
+        actions: rule.actions.filter(action => action.stage === 'display.render' && select(rule.sourceId, rule.id, action.id).enabled) })).filter(rule => rule.actions.length)) : []
       if (!enabled.length) return { seq, changed: false, before: [], after: [], records: [] }
       const turn = history.withLive(agent.session, log => log.last('turn/start', seq + 1))
       const turnId = turn ? `${id}:turn:${turn.data.turn ?? turn.seq}` : `${id}:seed`
@@ -484,8 +495,8 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
       }
       let result
       try {
-        const projection = planDisplayV2({ blocks: display.filter(block => block.seq === seq), rules, events, templates: renderTemplates(agent), snapshot,
-          decision: (event, action) => controls.decision(id, event.sourceId, event.ruleId, action.id), maxInjectedChars, maxBytes: maxRequestBytes })
+        const projection = controls.withDecisions(id, select => planDisplayV2({ blocks: display.filter(block => block.seq === seq), rules, events, templates: renderTemplates(agent), snapshot,
+          decision: (event, action) => select(event.sourceId, event.ruleId, action.id), maxInjectedChars, maxBytes: maxRequestBytes }))
         result = { seq, ...projection }
         // Include identity, change flag and HTTP envelope in the published byte budget.
         if (Buffer.byteLength(JSON.stringify({ projections: result.changed ? [result] : [] }), 'utf8') > maxRequestBytes) throw new Error('display-result-budget-exceeded')
@@ -595,9 +606,20 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
           Object.assign(held, { status: 'handoff', updatedAt: Date.now() })
         }
         for (const { key } of planned.entryTransitions ?? []) runtime.state[key] = deactivatedEntry(runtime.state[key])
-        for (const { event, action, text } of planned.applied.filter(item => !planned.scheduled.some(job => job.event === item.event && job.action === item.action))) {
+        // Scheduled membership is an exact event/action object pair, not an id.
+        // This index belongs only to this ACK transaction and retains no policy.
+        const scheduled = new Map()
+        for (const job of planned.scheduled) {
+          let actions = scheduled.get(job.event)
+          if (!actions) { actions = new Set(); scheduled.set(job.event, actions) }
+          actions.add(job.action)
+        }
+        const immediate = planned.applied.filter(item => !scheduled.get(item.event)?.has(item.action))
+        const entries = immediate.length ? new Map(documents(agent).flatMap(document => document.entries.map(entry =>
+          [JSON.stringify([`context-care:document:${document.id}`, `entry:${entry.id}`]), entry]))) : undefined
+        for (const { event, action, text } of immediate) {
           const key = actionKey(event, action)
-          const entry = documents(agent).find(document => `context-care:document:${document.id}` === event.sourceId)?.entries.find(entry => `entry:${entry.id}` === event.ruleId)
+          const entry = entries.get(JSON.stringify([event.sourceId, event.ruleId]))
           runtime.state[key] = entry && planned.entryPolicies?.[key]
             ? { ...deliveredEntry(entry, runtime.state[key], planned.entryPolicies[key], text, { turnId: planned.turnId, turn: planned.turn }), occurrenceId: event.occurrenceId }
             : { lastStarted: Date.now(), occurrenceId: event.occurrenceId, turnId: planned.turnId }
@@ -683,8 +705,9 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
       const agent = exec.agent
       if (!agent) return undefined
       const captured = token(agent)
-      const rules = definitions(agent).filter(rule => rule.on.includes('tool.before-execute')).map(rule => ({ ...rule,
-        actions: rule.actions.filter(action => action.stage === 'tool.before-execute' && controls.enabled(String(agent.session.id), rule.sourceId, rule.id, action.id)) })).filter(rule => rule.actions.length)
+      const candidates = definitions(agent).filter(rule => rule.on.includes('tool.before-execute'))
+      const rules = candidates.length ? controls.withDecisions(String(agent.session.id), select => candidates.map(rule => ({ ...rule,
+        actions: rule.actions.filter(action => action.stage === 'tool.before-execute' && select(rule.sourceId, rule.id, action.id).enabled) })).filter(rule => rule.actions.length)) : []
       const block = { id: `execution:${exec.callId}`, sessionId: String(agent.session.id), messageId: `execution:${exec.callId}`,
         turnId: sessionTurn(agent.session), role: 'assistant', view: 'original', type: 'tool-call', callId: exec.callId,
         raw: { type: 'tool-call', id: exec.callId, name: exec.name, arguments: JSON.stringify(exec.arguments) }, arguments: exec.arguments }
@@ -697,7 +720,8 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
         return { kind: 'deny', reason: `Tool rule assessment failed: ${error.message}. No rule denial was established; inspect ${error.diagnostic.operationId}.`,
           info: { code: error.code, operationId: error.diagnostic.operationId, stage: 'tool.before-execute' } }
       }
-      for (const event of events) for (const action of rules.find(rule => rule.id === event.ruleId && rule.sourceId === event.sourceId).actions) {
+      const byRule = indexFirstRules(rules)
+      for (const event of events) for (const action of byRule.get(JSON.stringify([event.sourceId, event.ruleId])).actions) {
         if (action.kind !== 'filter' || action.stage !== 'tool.before-execute' || !decision(agent, event, action, captured).enabled) continue
         await store.runtime(String(agent.session.id), runtime => {
           runtime.state[actionKey(event, action)] = { lastStarted: Date.now(), occurrenceId: event.occurrenceId }

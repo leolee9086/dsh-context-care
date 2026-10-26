@@ -5,14 +5,96 @@ import { setImmediate as yieldToHost } from 'node:timers/promises'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { createMessage, createToolResultMessage, ToolCallId, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 
+interface Plan { request: GenerateOptions; applied: { key: string }[]; entryTransitions: { key: string }[]; records: { cascadePass?: number }[] }
+interface EntryState { materialization?: { text: string }; lastInactiveAt?: number; status?: string }
 interface Harness {
-  open(t: test.TestContext): Promise<{ session: Session; anchorLookups(): number; anchorScans(): number; configureAnchors(anchor: string): Promise<void>; configure(filters?: boolean | 'cascade'): Promise<void>; display(seq: number): Promise<unknown>;
-    preview(request: GenerateOptions): Promise<{ request: GenerateOptions; applied: unknown[]; records: { cascadePass?: number }[] }>; cacheNames(): string[]; projectionWork(): number; pairBuilds(): number; pairWork(): number; pairMessages(): number; actionWork(): number; controlIdentityFinds(): number; byteSerializations(request: GenerateOptions): number; numericComparisons(): number; removalCollators(): number; catalogReads(): number; recordReads(): number; tokenReads(): number; pauseFilter(paused: boolean): Promise<void>;
+  open(t: test.TestContext): Promise<{ session: Session; configureEntries(count: number): Promise<void>; setEntriesActive(value: boolean): Promise<void>;
+    entryState(): Record<string, EntryState>; confirm(planned: Plan): Promise<void>; pauseEntry(paused: boolean): Promise<void>; configureCatalog(count: number): () => void;
+    catalog(): { sourceId: string; plugin: string; registration: string; rules: { id: string; title: string; actions: { id: string; available: boolean }[] }[] }[]; anchorLookups(): number; anchorScans(): number; configureAnchors(anchor: string): Promise<void>; configure(filters?: boolean | 'cascade'): Promise<void>; display(seq: number): Promise<unknown>;
+    preview(request: GenerateOptions): Promise<Plan>; cacheNames(): string[]; projectionWork(): number; pairBuilds(): number; pairWork(): number; pairMessages(): number; actionWork(): number; controlIdentityFinds(): number; byteSerializations(request: GenerateOptions): number; numericComparisons(): number; removalCollators(): number; catalogReads(): number; recordReads(): number; tokenReads(): number; pauseFilter(paused: boolean): Promise<void>;
     reconcile(): Promise<void>; http(): Promise<void>; probe(): Promise<void>; runs(): number; displayCalls(): number }>
 }
 
 /** Run in the real Loader composition; spy methods delegate to native Session. */
 export function registerWorkbenchPerformanceCases(harness: Harness): void {
+  test('native entry batch shares policy and deactivation cuts while durable ACKs remain authoritative', { timeout: 120000 }, async t => {
+    const fixture = await harness.open(t), { session } = fixture
+    await fixture.configureEntries(32)
+    const request: GenerateOptions = { provider: 'care-test', model: 'care-test', messages: [] }
+    for (let index = 0; index < 1000; index++) {
+      const message = createMessage({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: `ENTRY_HISTORY ${index}` }] })
+      session.append('user/message', message, { surfaceOp: 'append' }); request.messages.push(structuredClone(message))
+    }
+    const activate = await fixture.preview(request); assert.equal(activate.applied.length, 33, JSON.stringify(activate.records.slice(0, 3)))
+    await fixture.confirm(activate)
+    const key = (index: number) => JSON.stringify(['context-care:document:entry-batch', `entry:held-${index}`, 1, 'inject'])
+    for (let index = 0; index < 32; index++) assert.equal(fixture.entryState()[key(index)].materialization?.text, `HELD_${index}`)
+    await fixture.setEntriesActive(false)
+    const before = fixture.entryState(), reads = t.mock.method(session, 'eventAt'), snapshots = t.mock.method(session, 'snapshotEvents'), derive = t.mock.method(session, 'deriveMessages')
+    const beforeRecords = fixture.recordReads(), beforeCatalogs = fixture.catalogReads(), loop = monitorEventLoopDelay({ resolution: 10 }); loop.enable(); t.after(() => loop.disable())
+    await yieldToHost(); const cpuStart = process.cpuUsage()
+    const timed = async <T>(run: () => Promise<T>) => { const start = performance.now(); const value = await run(); return { ms: performance.now() - start, value } }
+    const [preview, http, other] = await Promise.all([timed(() => fixture.preview(request)), timed(fixture.http), timed(fixture.probe)])
+    const planned = preview.value, recordReads = fixture.recordReads() - beforeRecords, catalogReads = fixture.catalogReads() - beforeCatalogs
+    assert.equal(planned.applied.length, 1); assert.equal(planned.entryTransitions.length, 32)
+    assert.ok(recordReads < 20, '32 inactive policies and decisions must not clone the store per entry')
+    assert.ok(catalogReads < 10, 'deactivation uses a synchronous decision batch, not 32 separate catalogs')
+    assert.deepEqual(fixture.entryState(), before, 'preview cannot acknowledge deactivation')
+    const warmReads = reads.mock.callCount(), again = await fixture.preview(request)
+    assert.equal(again.entryTransitions.length, 32); assert.equal(reads.mock.callCount(), warmReads)
+    await fixture.pauseEntry(true)
+    const paused = await fixture.preview(request); assert.equal(paused.entryTransitions.length, 31)
+    assert.ok(!paused.entryTransitions.some(item => item.key === key(0)))
+    await fixture.confirm(paused)
+    const confirmed = fixture.entryState(); assert.deepEqual(confirmed[key(0)], before[key(0)], 'paused entry retains its held slice')
+    for (let index = 1; index < 32; index++) {
+      assert.equal(confirmed[key(index)].materialization, undefined); assert.ok((confirmed[key(index)].lastInactiveAt ?? 0) > 0)
+      assert.equal(confirmed[`$dispatch:${key(index)}`].status, 'settled')
+    }
+    await fixture.pauseEntry(false); await fixture.setEntriesActive(true)
+    const historical = await fixture.preview(request)
+    assert.equal(historical.applied.length, 1, 'resuming cannot replay old evidence for the paused entry')
+    const fresh = createMessage({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'FRESH_ENTRY_EVIDENCE' }] })
+    session.append('user/message', fresh, { surfaceOp: 'append' }); request.messages.push(structuredClone(fresh))
+    const cooled = await fixture.preview(request)
+    assert.equal(cooled.applied.length, 2, 'fresh evidence restores the paused held slice while deactivated entries remain cooling')
+    assert.equal(cooled.entryTransitions.length, 0); assert.deepEqual(fixture.entryState()[key(1)], confirmed[key(1)])
+    assert.equal(reads.mock.callCount(), warmReads + 1, 'fresh evidence reads only the newly appended native event')
+    assert.equal(snapshots.mock.callCount(), 0); assert.equal(derive.mock.callCount(), 0)
+    await yieldToHost(); loop.disable(); const cpu = process.cpuUsage(cpuStart)
+    t.diagnostic(`workbench-entry-batch ${JSON.stringify({ entries: 32, nativeReadsAfterWarm: reads.mock.callCount(), recordReads, catalogReads, planMs: preview.ms, httpMs: http.ms, otherAgentMs: other.ms, cpuUserMs: cpu.user / 1000, cpuSystemMs: cpu.system / 1000, loopMaxMs: loop.max / 1e6 })}`)
+    assert.ok(preview.ms < 5000 && http.ms < 1000 && other.ms < 1500 && loop.max / 1e6 < 1000)
+  })
+
+  test('native workbench catalog reads one state cut for every source and action', { timeout: 120000 }, async t => {
+    const fixture = await harness.open(t), { session } = fixture
+    for (let index = 0; index < 1000; index++) session.append('user/message', createMessage({ role: 'user', source: { kind: 'user' },
+      content: [{ type: 'text', text: `CATALOG_HISTORY ${index} ` + 'x'.repeat(256) }] }), { surfaceOp: 'append' })
+    const dispose = fixture.configureCatalog(32)
+    const reads = t.mock.method(session, 'eventAt'), snapshots = t.mock.method(session, 'snapshotEvents'), derive = t.mock.method(session, 'deriveMessages')
+    const beforeReads = fixture.recordReads(), loop = monitorEventLoopDelay({ resolution: 10 }); loop.enable(); t.after(() => loop.disable())
+    await yieldToHost(); const cpuStart = process.cpuUsage(), start = performance.now()
+    const catalog = fixture.catalog(), catalogMs = performance.now() - start
+    assert.equal(fixture.recordReads() - beforeReads, 1, '32 documents and 128 actions share one actual store read')
+    assert.equal(catalog.length, 32)
+    for (let index = 0; index < 32; index++) {
+      const source = catalog[index]
+      assert.equal(source.sourceId, `context-care:document:catalog-${index}`); assert.equal(source.plugin, 'catalog-owner'); assert.equal(source.registration, 'catalog-cut')
+      assert.deepEqual(source.rules.map(rule => rule.id), ['r:0', 'r:1', 'r:2', 'r:3'])
+      assert.ok(source.rules.every(rule => rule.actions.length === 1 && rule.actions[0].available))
+    }
+    catalog[0].rules[0].title = 'CALLER_MUTATION'
+    const again = fixture.catalog(); assert.equal(again[0].rules[0].title, 'Rule 0:0')
+    assert.equal(fixture.recordReads() - beforeReads, 2, 'a new catalog call gets a fresh owned state, not mutable identity caching')
+    const timed = async (run: () => Promise<void>) => { const began = performance.now(); await run(); return performance.now() - began }
+    const [httpMs, otherAgentMs] = await Promise.all([timed(fixture.http), timed(fixture.probe)])
+    dispose(); assert.deepEqual(fixture.catalog(), [], 'unregistered definitions disappear immediately')
+    assert.equal(reads.mock.callCount(), 0); assert.equal(snapshots.mock.callCount(), 0); assert.equal(derive.mock.callCount(), 0)
+    await yieldToHost(); loop.disable(); const cpu = process.cpuUsage(cpuStart)
+    t.diagnostic(`workbench-catalog-cut ${JSON.stringify({ documents: 32, rules: 128, stateReadsPerCatalog: 1, catalogMs, httpMs, otherAgentMs, cpuUserMs: cpu.user / 1000, cpuSystemMs: cpu.system / 1000, loopMaxMs: loop.max / 1e6 })}`)
+    assert.ok(catalogMs < 1000 && httpMs < 1000 && otherAgentMs < 1500 && loop.max / 1e6 < 1000)
+  })
+
   test('long native explicit anchors preserve placement without per-action block scans', { timeout: 120000 }, async t => {
     const fixture = await harness.open(t), { session } = fixture
     const request: GenerateOptions = { provider: 'care-test', model: 'care-test', messages: [] }
