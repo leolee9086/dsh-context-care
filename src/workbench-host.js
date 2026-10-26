@@ -13,6 +13,7 @@ import { createWorkbenchWindow } from '../lib/workbench-window.js'
 import { planRequestV2 } from './request-plan.js'
 import { requestImpact } from './request-impact.js'
 import { createRequestPlanCache } from '../lib/request-plan-cache.js'
+import { createDisplayPlanCache } from '../lib/display-plan-index.js'
 import { withPlanningToken } from '../lib/planning-token.js'
 import { groupRulesBySource, indexFirstRules } from '../lib/request-rule-index.js'
 import { entryTurn as readEntryTurn, entryPolicy, deliveredEntry, deactivatedEntry } from './entry-lifecycle.js'
@@ -495,8 +496,12 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
       }
       let result
       try {
-        const projection = controls.withDecisions(id, select => planDisplayV2({ blocks: display.filter(block => block.seq === seq), rules, events, templates: renderTemplates(agent), snapshot,
-          decision: (event, action) => select(event.sourceId, event.ruleId, action.id), maxInjectedChars, maxBytes: maxRequestBytes }))
+        const analysis = createDisplayPlanCache(history.cache)
+        let projection
+        try {
+          projection = controls.withDecisions(id, select => planDisplayV2({ blocks: display.filter(block => block.seq === seq), rules, events, templates: renderTemplates(agent), snapshot, analysis,
+            decision: (event, action) => select(event.sourceId, event.ruleId, action.id), maxInjectedChars, maxBytes: maxRequestBytes }))
+        } finally { analysis.close() }
         result = { seq, ...projection }
         // Include identity, change flag and HTTP envelope in the published byte budget.
         if (Buffer.byteLength(JSON.stringify({ projections: result.changed ? [result] : [] }), 'utf8') > maxRequestBytes) throw new Error('display-result-budget-exceeded')

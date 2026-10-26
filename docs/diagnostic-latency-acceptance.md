@@ -1,5 +1,21 @@
 # 诊断查询与数据推送验收
 
+## v0.14.17：显示规划结构索引与输出合并（2026-10-26）
+
+第47轮只沿已定位 display-plan 及真实 Host 调用方修复。逐事件 rules.find 改精确 sourceId/ruleId 首身份目录；相同 actions 的 display.render 阶段只建一次既有稳定依赖调度结构，保留 Set 对象去重、首重复 ID、缺失依赖未计划、逐证据 outcomes、先执行可执行前缀及更早决策/模板失败优先于循环错误。逐动作 baseline.find/findIndex 改为首 display 块和位置索引，不借 original 同名块。filter 后代目录按原 path-only 前缀构建，重复 ID 行和顺序保留，$result 仍整组；按原首块一组只物化/校验一次，签名/不透明后代仍拒绝。
+
+Host 从统一 history.cache 开 display-plan-blocks/rules/actions 三个本次同步操作域，成功/失败均 finally 清除；不缓存控制结论、输出文本或跨 await 政策。纯函数直接调用使用本地索引。注入输出保留原降序比较器，并逆向同位组一次合并基线，代替逐次 splice 搬移整个增长数组；优先级、重复 ID/tie、原基线位置及最终过滤顺序不改。UTF-16 patch 基线、字符和原 UTF-8 结果预算、原文/模型请求/Session 日志不变。
+
+新增7项纯函数显示回归（另有2项原Tavern，共9项）：首display ID/后代/$result/空path/重复与跨消息原路径语义；2000注入对1000基线与原sort+splice逐项等价含重复tie/优先级；1000块的一万次首块/锚点/过滤查询不增ID/path读取，独立cut不共享目录；逐证据控制、一次动作结构、close释放；循环前缀/更早render失败/外阶段缺失依赖；重复规则首匹配及缺锚点；不透明过滤拒绝与精确字节边界。
+
+真实 Loader 新回归：1000条原生历史加1条含256文本块消息，8条逆序依赖动作生成2048记录/2304输出；actionWork8、blockWork256、ruleWork1，当前动作按依赖顺序；暖重渲染不增eventAt，暂停/恢复立即生效；再append一条原生消息仅增1次读取，旧消息显式锚点失效明确失败且域仍清空，无snapshotEvents或旁路deriveMessages。首轮4项实质+5空suite（报告9）exit0：cold868.22ms/warm585.27ms/鉴权HTTP121.88ms/另一Agent131.23ms/CPU2312+172ms/loop583.53ms/native1002。输出合并后定向2实质+5空suite（报告7）exit0，cold883.89/warm645.84ms/HTTP112.68ms/另一Agent120.34ms/CPU2406+187ms/loop639.11ms。数值仅为该次实测，不声称比较提速；改动以实际遍历计数和输出等价为据。
+
+失败如实保留：新增JS接口的analysis先推断必填、加undefined默认又推断过窄、显式返回类型声明触及未导出RuleIdentity，前三次check均退出2且运行测试未启动；现明确可选类型并导出身份，strict/104JS与纯函数通过。完整 pnpm release:check 单次exit0：551/551单元、0skip、22046.6991ms，严格类型/104JS、DSH0.2.1-rc.3的62事件目录和完整Host/Client构建。唯一归档artifacts/final-v01417-round47/dsh-context-care-0.14.17.tgz，960273字节，SHA256 EC326784C75504FBA135C0BD8D7A356496F43E3D165BF80C31E873069AB63582（19:10:22+08:00）。完整源码Host226/226、0skip、exit0（316997.4186ms）。新显示用例cold961.99ms/warm621.60ms/鉴权HTTP61.28ms/另一Agent77.46ms/CPU2953+297ms/loop624.43ms，actionWork8/blockWork256/ruleWork1；2012事件旧长会话显示430.35/3.62ms、reconcile812.08/4.56ms、HTTP45.82ms/另一Agent61.58ms/loop79.10ms，完整套件保留原生冷读/替换/旧切面/取消/投递等覆盖。
+
+全新.local/consumer-final-v0.14.17-20261026普通pnpm12.6 add --offline安装53项，无allowBuilds/ignore-scripts/exotic例外或开发junction，exit0。只执行安装包的8入口、Client factory、真实Worker、原控制/精确预算/配对/锚点/可写cut与新增显示一万稳定查询、2000注入等价、逐证据outcomes、cycle前缀/更早错误、字节边界和close释放，231个src/lib JS与声明逐字节一致。旧v0.14.16、v0.14.15的tag对象/peeled与归档SHA256在19:13:13+08:00核对未变。包后只更新不打包验收文档，唯一归档不重打；Client24/24、3文件、exit0（5.52s）。桌面真实Electron/ASAR无空格正则精确选择31/31实质用例、0skip、exit0/空stderr（32457.8531ms），含新显示、真实模板失败但两轮对话完成、旧切面/取消/JSONL/失败ACK、长诊断和工作台。新显示cold481.48ms/warm155.63ms/鉴权HTTP25.70ms/另一Agent34.01ms/CPU844+140ms/loop156.11ms/native1002；2012事件显示307.92/2.92ms、reconcile528.44/1.68ms/HTTP21.53ms/另一Agent28.90ms/loop40.76ms。7001事件诊断cold87.47/warm2.47ms/selected6.41ms/increment2.92ms/HTTP83.40ms/另一Agent95.01ms/CPU438+63ms/loop96.21ms。隔离ASAR未冒充实际GUI现场。安装态真实Host16项实质+5空suite全部exit0（报告21，不称21项业务，35674.1891ms），含1002事件新显示、2012长工作台、7001诊断页、冷Session/JSONL、真实失活/失败ACK及工具控制。新显示cold898.42ms/warm535.83ms/HTTP72.12ms/另一Agent91.89ms/CPU2109+203ms/loop544.74ms，actionWork8/blockWork256/ruleWork1，暖不重读；长工作台显示474.55/4.95ms、reconcile775.04/4.06ms/HTTP46.62ms/另一Agent59.72ms/loop88.21ms；诊断cold226.30/warm6.52ms/selected5.11ms/increment6.52ms/HTTP220.82ms/另一Agent236.64ms/loop220.73ms。全部本轮门禁结果已收取，未扩大Worker预算、时钟或取消阈值。
+
+整体目标仍未完成。display替换分支每个候选仍调用原patch引擎校验完整基线/累计patch，是下一段已定位生产工作，不能归为只待安装。同GUI实际加载版本/性能与14规则真实时钟接纳、最终投递、去重仍未现场。未读业务长日志，未改Harness/Worker预算/时钟/取消阈值，未代装/启用/重启。
+
 ## v0.14.16：来源目录与条目确认同步切面（2026-10-26）
 
 第46轮沿实际 workbench-host 消费者修复：来源目录原每个文档重新读取/校验文档、归一化全部规则再筛选，且可用性逐动作复制全部 store；现一个同步来源调用只读一次状态和文档，规则单次归一化后按 sourceId 分组，保留全部规则及来源顺序。分组1000个来源键仅读1000次，640次分组访问不增加读取，重复/分隔符身份不丢。没有新增跨调用长期文档缓存，目录输出仍独立，注册移除立即生效。规划/模板准备共享本次已校验文档。

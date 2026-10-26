@@ -1,20 +1,22 @@
 import { applyBlockPatchesV2 } from '@leolee9086/dsh-rule-engine'
+import { indexFirstRules } from '../lib/request-rule-index.js'
+import { indexRequestActions } from '../lib/request-action-order.js'
+import { indexDisplayBlocks, mergeDisplayInsertions } from '../lib/display-plan-index.js'
 
 const viewBlock = block => ({ id: block.id, seq: block.seq, path: block.path, role: block.role, type: block.type, text: block.text })
 /** Plan a read-only comparison for one committed message. Every patch uses baseline UTF-16 ranges. */
-export function planDisplayV2({ blocks, rules, events, templates, snapshot, decision, maxInjectedChars, maxBytes }) {
-  const baseline = blocks.filter(block => block.view === 'display')
-  const patches = []; const filtered = new Set(); const insertions = []; const records = []
+export function planDisplayV2({ blocks, rules, events, templates, snapshot, decision, maxInjectedChars, maxBytes, analysis = /** @type {ReturnType<typeof import('../lib/display-plan-index.js').createDisplayPlanCache> | undefined} */ (undefined) }) {
+  const indexed = analysis ? analysis.blocks(blocks) : indexDisplayBlocks(blocks), baseline = indexed.baseline
+  const patches = []; const filtered = new Set(); const checkedFilters = new Set(); const insertions = []; const records = []
   let injectedChars = 0
+  const byRule = analysis ? analysis.rules(rules) : indexFirstRules(rules), orders = new Map()
   for (const event of events) {
-    const rule = rules.find(rule => rule.sourceId === event.sourceId && rule.id === event.ruleId)
+    const rule = byRule.get(JSON.stringify([event.sourceId, event.ruleId]))
     if (!rule) throw new Error('display-rule-unavailable')
-    const actions = rule.actions.filter(action => action.stage === 'display.render')
-    const pending = new Set(actions); const outcomes = new Map()
-    while (pending.size) {
-      const action = [...pending].find(action => action.dependsOn.every(id => !pending.has(actions.find(parent => parent.id === id))))
-      if (!action) throw new Error('display-dependency-cycle')
-      pending.delete(action)
+    let stages = analysis ? analysis.actions(rule.actions) : orders.get(rule.actions)
+    if (!stages) { stages = indexRequestActions([...new Set(rule.actions.filter(action => action.stage === 'display.render'))]); orders.set(rule.actions, stages) }
+    const ordered = stages.get('display.render'), outcomes = new Map()
+    for (const action of ordered?.order ?? []) {
       const record = { sourceId: event.sourceId, ruleId: event.ruleId, actionId: action.id, blockId: event.blockId, ranges: event.ranges, status: 'planned' }
       records.push(record)
       const eligibility = decision(event, action)
@@ -22,7 +24,7 @@ export function planDisplayV2({ blocks, rules, events, templates, snapshot, deci
         record.status = 'skipped'; record.reason = eligibility.enabled ? 'dependency-not-planned' : eligibility.reason
         outcomes.set(action.id, false); continue
       }
-      const block = baseline.find(block => block.id === event.blockId)
+      const block = indexed.first(event.blockId)
       if (!block || event.segments) throw new Error('display-cross-block-write-unavailable')
       const context = { ...snapshot, captures: event.captures, facts: event.facts, block: event.block,
         tool: { name: event.block.raw?.name, arguments: event.block.arguments, result: event.block.raw?.content } }
@@ -38,9 +40,11 @@ export function planDisplayV2({ blocks, rules, events, templates, snapshot, deci
         }
         patches.push(...candidates)
       } else if (action.kind === 'filter') {
-        const group = baseline.filter(candidate => candidate.id === block.id || block.path === '$result' || candidate.path.startsWith(block.path + '.'))
-        if (group.some(candidate => candidate.signed || candidate.replayState !== undefined)) throw new Error('display-opaque-filter-denied')
-        group.forEach(candidate => filtered.add(candidate.id))
+        if (!checkedFilters.has(block.id)) {
+          const group = indexed.filterGroup(block)
+          if (group.some(candidate => candidate.signed || candidate.replayState !== undefined)) throw new Error('display-opaque-filter-denied')
+          group.forEach(candidate => filtered.add(candidate.id)); checkedFilters.add(block.id)
+        }
       } else if (action.kind === 'inject') {
         const target = action.target ?? { view: 'display', anchor: 'end', position: 'after' }
         if (target.view !== 'display' || target.lifetime && target.lifetime !== 'request') throw new Error('display-target-unavailable')
@@ -51,7 +55,7 @@ export function planDisplayV2({ blocks, rules, events, templates, snapshot, deci
           if (target.depth > 1) throw new Error('display-message-depth-unavailable')
           at = target.depth === 0 ? baseline.length : 0
         } else {
-          at = baseline.findIndex(candidate => candidate.id === (target.anchor === 'matched' ? block.id : target.anchor))
+          at = indexed.position(target.anchor === 'matched' ? block.id : target.anchor)
           if (at < 0) throw new Error('display-anchor-unavailable')
           if (target.position !== 'before') at++
         }
@@ -61,11 +65,13 @@ export function planDisplayV2({ blocks, rules, events, templates, snapshot, deci
       } else throw new Error(`display-action-unavailable:${action.kind}`)
       outcomes.set(action.id, true)
     }
+    // Preserve the original executable prefix and its earlier decision/render
+    // errors before reporting a remaining dependency cycle.
+    if (ordered?.cycle) throw new Error('display-dependency-cycle')
   }
   const patched = applyBlockPatchesV2(baseline, patches)
-  const output = patched.blocks.map(viewBlock)
   // Insert against baseline indices, then hide filtered originals. Insertions never acquire a committed seq.
-  for (const insertion of insertions.sort((a, b) => b.at - a.at || a.priority - b.priority || b.block.id.localeCompare(a.block.id))) output.splice(insertion.at, 0, insertion.block)
+  const output = mergeDisplayInsertions(patched.blocks.map(viewBlock), insertions)
   const result = { before: baseline.map(viewBlock), after: output.filter(block => !filtered.has(block.id)), records, patches: patched.results }
   if (Buffer.byteLength(JSON.stringify(result), 'utf8') > maxBytes) throw new Error('display-result-budget-exceeded')
   return { ...result, changed: JSON.stringify(result.before) !== JSON.stringify(result.after) }

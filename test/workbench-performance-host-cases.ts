@@ -10,13 +10,47 @@ interface EntryState { materialization?: { text: string }; lastInactiveAt?: numb
 interface Harness {
   open(t: test.TestContext): Promise<{ session: Session; configureEntries(count: number): Promise<void>; setEntriesActive(value: boolean): Promise<void>;
     entryState(): Record<string, EntryState>; confirm(planned: Plan): Promise<void>; pauseEntry(paused: boolean): Promise<void>; configureCatalog(count: number): () => void;
-    catalog(): { sourceId: string; plugin: string; registration: string; rules: { id: string; title: string; actions: { id: string; available: boolean }[] }[] }[]; anchorLookups(): number; anchorScans(): number; configureAnchors(anchor: string): Promise<void>; configure(filters?: boolean | 'cascade'): Promise<void>; display(seq: number): Promise<unknown>;
+    catalog(): { sourceId: string; plugin: string; registration: string; rules: { id: string; title: string; actions: { id: string; available: boolean }[] }[] }[]; anchorLookups(): number; anchorScans(): number; configureAnchors(anchor: string): Promise<void>; configure(filters?: boolean | 'cascade'): Promise<void>; display(seq: number): Promise<{ changed: boolean; before: { text: string }[]; after: { text: string }[]; records: { actionId: string }[] }>;
+    configureDisplay(anchor: string): Promise<void>; pauseDisplay(paused: boolean): Promise<void>; displayWork(name: string): number;
     preview(request: GenerateOptions): Promise<Plan>; cacheNames(): string[]; projectionWork(): number; pairBuilds(): number; pairWork(): number; pairMessages(): number; actionWork(): number; controlIdentityFinds(): number; byteSerializations(request: GenerateOptions): number; numericComparisons(): number; removalCollators(): number; catalogReads(): number; recordReads(): number; tokenReads(): number; pauseFilter(paused: boolean): Promise<void>;
     reconcile(): Promise<void>; http(): Promise<void>; probe(): Promise<void>; runs(): number; displayCalls(): number }>
 }
 
 /** Run in the real Loader composition; spy methods delegate to native Session. */
 export function registerWorkbenchPerformanceCases(harness: Harness): void {
+  test('long native display reuses one dependency structure and exact anchor directory per cut', { timeout: 120000 }, async t => {
+    const fixture = await harness.open(t), { session } = fixture
+    const append = (content: { type: 'text'; text: string }[]) => session.append('assistant/message', { turn: 1, step: 1, stream: [],
+      usage: { inputTokens: 1, outputTokens: 1 }, message: createMessage({ role: 'assistant', source: { kind: 'model', provider: 'care-test', model: 'care-test' }, content }) }, { surfaceOp: 'append' })
+    for (let index = 0; index < 1000; index++) append([{ type: 'text', text: `OLD_DISPLAY ${index}` }])
+    const current = append(Array.from({ length: 256 }, (_, index) => ({ type: 'text' as const, text: `DISPLAY_BODY ${index}` })))
+    await fixture.configureDisplay(`${session.id}#${current.seq}#128`)
+    const reads = t.mock.method(session, 'eventAt'), snapshots = t.mock.method(session, 'snapshotEvents'), derive = t.mock.method(session, 'deriveMessages')
+    const loop = monitorEventLoopDelay({ resolution: 10 }); loop.enable(); t.after(() => loop.disable()); await yieldToHost()
+    const cpuStart = process.cpuUsage(), start = performance.now()
+    const timed = async <T>(run: () => Promise<T>) => { const began = performance.now(); const value = await run(); return { ms: performance.now() - began, value } }
+    const [cold, http, other] = await Promise.all([timed(() => fixture.display(current.seq)), timed(fixture.http), timed(fixture.probe)])
+    const output = cold.value
+    assert.equal(output.changed, true); assert.equal(output.before.length, 256); assert.equal(output.after.length, 2304); assert.equal(output.records.length, 2048)
+    assert.deepEqual(output.records.slice(0, 8).map(record => record.actionId), Array.from({ length: 8 }, (_, index) => `a:${index}`))
+    assert.equal(output.after[127].text, 'DISPLAY_BODY 127'); assert.equal(output.after[128].text, 'CAPTION_0'); assert.equal(output.after[2175].text, 'CAPTION_7'); assert.equal(output.after[2176].text, 'DISPLAY_BODY 128')
+    assert.equal(fixture.displayWork('display-plan-actions'), 8, '256 evidence events reuse one action dependency structure')
+    assert.equal(fixture.displayWork('display-plan-blocks'), 256); assert.equal(fixture.displayWork('display-plan-rules'), 1)
+    assert.ok(!fixture.cacheNames().some(name => name.startsWith('display-plan-')), 'the Host releases every display input owner')
+    const firstReads = reads.mock.callCount(), warm = await timed(() => fixture.display(current.seq))
+    assert.deepEqual(warm.value, output); assert.equal(reads.mock.callCount(), firstReads)
+    assert.equal(fixture.displayWork('display-plan-actions'), 16, 'an independent display gets a fresh structure, never stale outcomes')
+    await fixture.pauseDisplay(true); const hidden = await fixture.display(current.seq); assert.equal(hidden.changed, false)
+    await fixture.pauseDisplay(false); const restored = await fixture.display(current.seq); assert.deepEqual(restored, output)
+    const next = append([{ type: 'text', text: 'DISPLAY_BODY NEXT' }])
+    await assert.rejects(fixture.display(next.seq), /display-anchor-unavailable/)
+    assert.equal(reads.mock.callCount(), firstReads + 1); assert.ok(!fixture.cacheNames().some(name => name.startsWith('display-plan-')), 'failure also releases indexes')
+    assert.equal(snapshots.mock.callCount(), 0); assert.equal(derive.mock.callCount(), 0)
+    await yieldToHost(); loop.disable(); const cpu = process.cpuUsage(cpuStart)
+    t.diagnostic(`workbench-display-index ${JSON.stringify({ events: session.seq, blocks: 256, actions: 8, evidence: 256, records: 2048, coldMs: cold.ms, warmMs: warm.ms, httpMs: http.ms, otherAgentMs: other.ms, nativeReads: reads.mock.callCount(), cpuUserMs: cpu.user / 1000, cpuSystemMs: cpu.system / 1000, loopMaxMs: loop.max / 1e6, wallMs: performance.now() - start })}`)
+    assert.ok(cold.ms < 5000 && http.ms < 1000 && other.ms < 1500 && loop.max / 1e6 < 1000)
+  })
+
   test('native entry batch shares policy and deactivation cuts while durable ACKs remain authoritative', { timeout: 120000 }, async t => {
     const fixture = await harness.open(t), { session } = fixture
     await fixture.configureEntries(32)

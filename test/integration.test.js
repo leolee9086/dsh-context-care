@@ -768,6 +768,14 @@ registerWorkbenchPerformanceCases({ async open(t) {
     actionWork: () => projectionCalls.mock.calls.filter(call => call.arguments[0].name === 'request-plan-actions').reduce((sum, call) => sum + (call.arguments[1] ?? 1), 0),
     projectionWork: () => projectionCalls.mock.calls.filter(call => call.arguments[0].name === 'request-model-projection')
       .reduce((sum, call) => sum + (call.arguments[1] ?? 1), 0),
+    displayWork: name => projectionCalls.mock.calls.filter(call => call.arguments[0].name === name).reduce((sum, call) => sum + (call.arguments[1] ?? 1), 0),
+    configureDisplay: anchor => service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'display-batch', revision: 1, title: 'Display batch',
+      rules: [{ schemaVersion: 2, id: 'captions', revision: 1, on: ['display.render'],
+        select: { view: 'display', roles: ['assistant'], blockTypes: ['text'], depth: { unit: 'message', limit: 1 } }, match: { kind: 'regex', pattern: '^DISPLAY_BODY' },
+        actions: Array.from({ length: 8 }, (_, index) => ({ id: `a:${index}`, kind: 'inject', stage: 'display.render', enabledDefault: true,
+          dependsOn: index ? [`a:${index - 1}`] : [], template: `CAPTION_${index}`, target: { view: 'display', anchor, position: 'before' } })).reverse() }] } }).then(() => undefined),
+    pauseDisplay: paused => ctx.contextCareControls.patch(agent.id, { revision: ctx.contextCareControls.revision(agent.id),
+      sourceId: 'context-care:document:display-batch', ruleId: 'captions', paused }).then(() => undefined),
     configureEntries: count => service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: {
       schemaVersion: 2, id: 'entry-batch', revision: 1, title: 'Entry batch', variables: [{ name: 'active', scope: 'session', type: 'boolean', default: true }],
       entries: [...Array.from({ length: count }, (_, index) => ({ id: `held-${index}`, revision: 1, title: `Held ${index}`, enabledDefault: true,
