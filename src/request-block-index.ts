@@ -22,6 +22,15 @@ export function indexRequestBlocks<B extends RequestBlock>(blocks: readonly B[])
   return { model, byId, byCall }
 }
 
+/** Preserve the existing stable rightmost-first order without rebuilding ICU
+ * collation options for every path comparison. Keep the collator local: each
+ * sort observes the current default locale and retains no request data. */
+export function orderRequestRemovals<B extends RequestBlock>(blocks: readonly B[], filters: ReadonlySet<string>): B[] {
+  let compare: Intl.Collator['compare'] | undefined
+  return blocks.filter(block => filters.has(block.id)).sort((a, b) => b.messageIndex - a.messageIndex
+    || (compare ??= new Intl.Collator(undefined, { numeric: true }).compare)(b.path, a.path))
+}
+
 /** A removed ancestor already covers its descendants; synthetic results are not parents. */
 export function filteredAncestor(block: RequestBlock, removed: ReadonlySet<string>): boolean {
   let end = block.path.lastIndexOf('.')

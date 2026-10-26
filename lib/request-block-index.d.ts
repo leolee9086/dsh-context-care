@@ -12,5 +12,9 @@ export declare function indexRequestBlocks<B extends RequestBlock>(blocks: reado
     byId: Map<string, B>;
     byCall: Map<string, B[]>;
 };
+/** Preserve the existing stable rightmost-first order without rebuilding ICU
+ * collation options for every path comparison. Keep the collator local: each
+ * sort observes the current default locale and retains no request data. */
+export declare function orderRequestRemovals<B extends RequestBlock>(blocks: readonly B[], filters: ReadonlySet<string>): B[];
 /** A removed ancestor already covers its descendants; synthetic results are not parents. */
 export declare function filteredAncestor(block: RequestBlock, removed: ReadonlySet<string>): boolean;

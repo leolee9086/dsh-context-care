@@ -7,7 +7,7 @@ import { createMessage, createToolResultMessage, ToolCallId, type GenerateOption
 
 interface Harness {
   open(t: test.TestContext): Promise<{ session: Session; configure(filters?: boolean | 'cascade'): Promise<void>; display(seq: number): Promise<unknown>;
-    preview(request: GenerateOptions): Promise<{ request: GenerateOptions; applied: unknown[]; records: { cascadePass?: number }[] }>; cacheNames(): string[]; projectionWork(): number; byteSerializations(request: GenerateOptions): number; catalogReads(): number; recordReads(): number; tokenReads(): number; pauseFilter(paused: boolean): Promise<void>;
+    preview(request: GenerateOptions): Promise<{ request: GenerateOptions; applied: unknown[]; records: { cascadePass?: number }[] }>; cacheNames(): string[]; projectionWork(): number; byteSerializations(request: GenerateOptions): number; numericComparisons(): number; removalCollators(): number; catalogReads(): number; recordReads(): number; tokenReads(): number; pauseFilter(paused: boolean): Promise<void>;
     reconcile(): Promise<void>; http(): Promise<void>; probe(): Promise<void>; runs(): number; displayCalls(): number }>
 }
 
@@ -64,6 +64,7 @@ export function registerWorkbenchPerformanceCases(harness: Harness): void {
     await fixture.configure(true)
     const before = structuredClone(request), reads = t.mock.method(session, 'eventAt')
     const beforeCatalog = fixture.catalogReads(), beforeRecords = fixture.recordReads(), beforeTokens = fixture.tokenReads()
+    const beforeNumeric = fixture.numericComparisons(), beforeCollators = fixture.removalCollators()
     const snapshots = t.mock.method(session, 'snapshotEvents'), fullMessages = t.mock.method(session, 'deriveMessages')
     const loop = monitorEventLoopDelay({ resolution: 10 }); loop.enable(); t.after(() => loop.disable())
     const cpuStart = process.cpuUsage(); await yieldToHost()
@@ -71,6 +72,9 @@ export function registerWorkbenchPerformanceCases(harness: Harness): void {
     const [planned, http, other] = await Promise.all([timed(() => fixture.preview(request)), timed(fixture.http), timed(fixture.probe)])
     const result = planned.value as Awaited<ReturnType<typeof fixture.preview>>
     assert.equal(result.applied.length, 500, 'both matching child occurrences retain their action records')
+    const numericComparisons = fixture.numericComparisons() - beforeNumeric, removalCollators = fixture.removalCollators() - beforeCollators
+    assert.equal(numericComparisons, 0, 'native filtering no longer configures numeric locale options for each comparison')
+    assert.equal(removalCollators, 1, 'all selected removal paths share one local numeric collator')
     const catalogReads = fixture.catalogReads() - beforeCatalog, recordReads = fixture.recordReads() - beforeRecords, tokenReads = fixture.tokenReads() - beforeTokens
     assert.ok(tokenReads < 20, `500 evidence records must not serialize a full policy token each time: ${tokenReads}`)
     assert.ok(catalogReads < 20, `500 evidence records must not cause per-action catalog reads: ${catalogReads}`)
@@ -85,7 +89,7 @@ export function registerWorkbenchPerformanceCases(harness: Harness): void {
     assert.equal(snapshots.mock.callCount(), 0); assert.equal(fullMessages.mock.callCount(), 0)
     assert.ok(!fixture.cacheNames().some(name => name === 'request-plan-analysis' || name === 'request-plan-block-index' || name === 'request-model-projection'))
     await yieldToHost(); loop.disable(); const cpu = process.cpuUsage(cpuStart)
-    t.diagnostic(`workbench-tool-filter ${JSON.stringify({ events: session.seq, messages: request.messages.length, matchedChildren: 500, catalogReads, recordReads, tokenReads, planMs: planned.ms, httpMs: http.ms, otherAgentMs: other.ms, cpuUserMs: cpu.user / 1000, cpuSystemMs: cpu.system / 1000, loopMaxMs: loop.max / 1e6, nativeReads: reads.mock.callCount() })}`)
+    t.diagnostic(`workbench-tool-filter ${JSON.stringify({ events: session.seq, messages: request.messages.length, matchedChildren: 500, numericComparisons, removalCollators, catalogReads, recordReads, tokenReads, planMs: planned.ms, httpMs: http.ms, otherAgentMs: other.ms, cpuUserMs: cpu.user / 1000, cpuSystemMs: cpu.system / 1000, loopMaxMs: loop.max / 1e6, nativeReads: reads.mock.callCount() })}`)
     assert.ok(planned.ms < 5000 && http.ms < 1000 && other.ms < 1500 && loop.max / 1e6 < 1000)
     await fixture.pauseFilter(true)
     const paused = await fixture.preview(request)

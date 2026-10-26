@@ -1,5 +1,15 @@
 # 更新记录
 
+## v0.14.12
+
+**2026-10-26：级联精确规则索引与删除排序的数值collator复用。**
+
+- 沿第41轮已定位局部清除两处重复：每条cascade evidence的remaining.find全规则查找改为本同步pass精确[source,id]索引，保留Array.find首个身份匹配；matcher返回后才建立，无跨await政策缓存，未知规则仍显式失败。
+- 删除仍使用原messageIndex倒序与path numeric locale倒序/stable tie；新TS helper只在本次sort首次同消息路径比较时建一个当前默认locale collator，后续比较复用，空/单item不建，不改变祖先排除/$result/工具配对与action记录，无全局collator或第二缓存。
+- 新2单元：旧localeCompare comparator逐id结果完全一致（多位数、嵌套、system、$result、leading-zero相等），保留block identity/源顺序且每sort1collator/0逐比较选项；1000规则只读取source/id共2000次，10000查询不增读取，duplicate-first与跨来源tuple边界、新pass均正确。
+- 新真实Host用例覆盖64跨来源同名cascade entries：seed+64各一次/非cascade不重放、重复preview顺序相同、源与store不变、结果独立可写/native复用/snapshot0/cache释放。既有500证据配对过滤新增numericComparisons0/removalCollators1断言，暂停恢复/既有catalog3/record14/token5不变；千消息三级链byte4/project1003仍保持。6定向单元、8实质Host（另5空suite不计实质）通过。
+- 后CPU单实质工具过滤535.86ms/HTTP100.42ms/另一Agent109.07ms/CPU828+312ms/loop168.95ms；与其它轮采样存在噪声，不编整体提速比。最终release:check strict/104JS/62事件目录、524/524单元（17244.08ms）及Host/Client构建通过；完整源码Host219/219（248894.18ms）、Client3文件24/24（3.92s），桌面ASAR25/25实质/0skip/空stderr/exit0（23206.60ms），工具319.45ms/numeric0/collator1、三级链316.54ms/byte4/project1003。独立包见验收记录。未改Harness/Worker预算计时取消/输入阈值，无脚本批改/Git回滚/any，未代装/启用/重启；整体目标active，旧标签保留。
+
 ## v0.14.11
 
 **2026-10-26：按规划操作的不可变请求切面复用完整public JSON字节。**

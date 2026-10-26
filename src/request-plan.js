@@ -2,7 +2,7 @@ import { applyBlockPatchesV2, bindInputs } from '@leolee9086/dsh-rule-engine'
 import { createHash } from 'node:crypto'
 import { setRequestBlock } from './request-blocks.js'
 import { estimateInjection, requestImpact } from './request-impact.js'
-import { indexRequestBlocks, filteredAncestor } from '../lib/request-block-index.js'
+import { indexRequestBlocks, filteredAncestor, orderRequestRemovals } from '../lib/request-block-index.js'
 
 function ownedRequest(request) {
   // Cancellation and prepared-call handles stay native. Clone only the JSON request payload.
@@ -186,7 +186,7 @@ function planRequest({ request, blocks, rules, events, templates, snapshot, deci
     removedPaths.add(JSON.stringify([block.messageIndex, block.path]))
   }
   // Deletions run deepest and rightmost first so they never shift an outstanding path.
-  for (const block of writableBlocks.filter(block => filters.has(block.id)).sort((a, b) => b.messageIndex - a.messageIndex || b.path.localeCompare(a.path, undefined, { numeric: true }))) {
+  for (const block of orderRequestRemovals(writableBlocks, filters)) {
     if (block.path === '$result') {
       const owned = writable(); analysis?.modelProjection?.changed(owned.messages[block.messageIndex])
       owned.messages[block.messageIndex].content = []; continue

@@ -14,6 +14,7 @@ import { planRequestV2 } from './request-plan.js'
 import { requestImpact } from './request-impact.js'
 import { createRequestPlanCache } from '../lib/request-plan-cache.js'
 import { withPlanningToken } from '../lib/planning-token.js'
+import { indexFirstRules } from '../lib/request-rule-index.js'
 import { entryTurn as readEntryTurn, entryPolicy, deliveredEntry, deactivatedEntry } from './entry-lifecycle.js'
 import { releaseResources } from './resource-cleanup.js'
 import { importWorkbench } from './workbench-import.js'
@@ -335,9 +336,13 @@ export async function openWorkbenchHost(ctx, controls, { ruleFiles = [], executo
           planned.records.push(...found.map(event => ({ sourceId: event.sourceId, ruleId: event.ruleId, status: 'skipped', reason: 'cascade-pass-limit' })))
           break
         }
+        const remainingByIdentity = indexFirstRules(remaining)
         for (const event of found) {
-          visited.add(JSON.stringify([event.sourceId, event.ruleId]))
-          for (const action of remaining.find(rule => rule.sourceId === event.sourceId && rule.id === event.ruleId).actions) {
+          const identity = JSON.stringify([event.sourceId, event.ruleId])
+          visited.add(identity)
+          const rule = remainingByIdentity.get(identity)
+          if (!rule) throw new Error('request-plan-rule-unavailable')
+          for (const action of rule.actions) {
             const key = actionKey(event, action); const entry = entries.get(key)
             if (!entry) continue
             // Only an explicit cascade can renew activation from injected text.

@@ -716,6 +716,8 @@ registerWorkbenchPerformanceCases({ async open(t) {
   const recordReads = t.mock.method(service.store, 'read')
   const policyTokenReads = t.mock.method(service.store, 'token')
   const publicSerializations = t.mock.method(JSON, 'stringify')
+  const localeComparisons = t.mock.method(String.prototype, 'localeCompare')
+  const collators = t.mock.method(Intl, 'Collator')
   let catalogReads = 0
   t.after(ctx.contextCareControls.registerProvider(id => { if (id === agent.id) catalogReads++; return [] }))
   const { base, cookie } = await controlCookie(ctx)
@@ -724,6 +726,8 @@ registerWorkbenchPerformanceCases({ async open(t) {
     pauseFilter: paused => ctx.contextCareControls.patch(agent.id, { revision: ctx.contextCareControls.revision(agent.id),
       sourceId: 'context-care:document:workbench-performance', ruleId: 'filter-pairs', paused }).then(() => undefined),
     preview: request => service.preview(agent, request), cacheNames: () => ensureSessionLog(ctx).cache.report().map(row => row.name),
+    numericComparisons: () => localeComparisons.mock.calls.filter(call => call.arguments[2]?.numeric).length,
+    removalCollators: () => collators.mock.callCount(),
     byteSerializations: request => publicSerializations.mock.calls.filter(call => call.arguments[0]?.messages?.[0]?.id === request.messages[0].id).length,
     projectionWork: () => projectionCalls.mock.calls.filter(call => call.arguments[0].name === 'request-model-projection')
       .reduce((sum, call) => sum + (call.arguments[1] ?? 1), 0),
@@ -3318,6 +3322,39 @@ test('Workbench cascades preserve original-selected model injection anchors', as
   assert.equal(result.applied.length, 2)
   assert.deepEqual(result.request.messages.slice(1).map(message => message.content[0].text), ['SECOND_LINK', 'FINAL_LINK'])
   assert.deepEqual(request, before)
+  assert.ok(!ensureSessionLog(ctx).cache.report().some(row => row.name === 'request-model-projection' || row.name.startsWith('request-plan-')))
+})
+
+test('Workbench cascade rule index preserves 64 same-named entries across sources without historical replay', async t => {
+  const owned = await fixture(t, false), ctx = await owned.open()
+  ctx.llm.registerAdapter(['care-test'], new ScriptedAdapter())
+  const agent = await ctx.agentLoop.create('indexed-cascade-sources', { provider: 'care-test', model: 'care-test' }), service = ctx.contextCareWorkbench
+  const message = createMessage({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'ROOT_INDEX_START' }] })
+  agent.session.append('user/message', message, { surfaceOp: 'append' })
+  const entry = (id, keyword, template, cascade) => ({ id, revision: 1, title: id, enabledDefault: true, template, cascade,
+    activation: { kind: 'keywords', keywords: [keyword] }, select: { view: 'model', roles: ['user'], blockTypes: ['text'] },
+    target: { view: 'model', role: 'user', anchor: 'end', position: 'after' } })
+  const put = async (id, entries) => service.store.edit(agent.id, { revision: service.store.read(agent.id).revision, operation: 'put-document',
+    document: { schemaVersion: 2, id, revision: 1, title: id, entries } })
+  await put('index-seed', [entry('seed', 'ROOT_INDEX_START', 'INDEX_CASCADE_MATCH', false),
+    entry('not-cascade', 'INDEX_CASCADE_MATCH', 'MUST_NOT_REPLAY', false)])
+  for (const source of ['index:left', 'index:right']) await put(source, Array.from({ length: 32 }, (_, index) =>
+    entry(`same-${index}`, 'INDEX_CASCADE_MATCH', `FINAL_${source}_${index}`, true)))
+  const request = { messages: [message] }, before = structuredClone(request), beforeStore = service.store.read(agent.id)
+  const native = t.mock.method(agent.session, 'eventAt'), snapshots = t.mock.method(agent.session, 'snapshotEvents')
+  const first = await service.preview(agent, request)
+  assert.equal(first.applied.length, 65); assert.equal(first.records.filter(row => row.cascadePass === 1).length, 64)
+  for (const source of ['index:left', 'index:right']) for (let index = 0; index < 32; index++) {
+    assert.equal(first.applied.filter(item => item.event.sourceId === `context-care:document:${source}` && item.event.ruleId === `entry:same-${index}`).length, 1)
+    assert.equal(first.request.messages.filter(message => message.content.some(block => block.type === 'text' && block.text === `FINAL_${source}_${index}`)).length, 1)
+  }
+  assert.doesNotMatch(JSON.stringify(first.request), /MUST_NOT_REPLAY/)
+  const reads = native.mock.callCount(), second = await service.preview(agent, request)
+  assert.deepEqual(second.request, first.request); assert.equal(second.applied.length, 65)
+  assert.equal(native.mock.callCount(), reads); assert.equal(snapshots.mock.callCount(), 0)
+  first.request.messages[0].content[0].text = 'WRITABLE_FIRST'
+  assert.equal(second.request.messages[0].content[0].text, 'ROOT_INDEX_START')
+  assert.deepEqual(request, before); assert.deepEqual(service.store.read(agent.id), beforeStore)
   assert.ok(!ensureSessionLog(ctx).cache.report().some(row => row.name === 'request-model-projection' || row.name.startsWith('request-plan-')))
 })
 
