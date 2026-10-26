@@ -1,5 +1,15 @@
 # 更新记录
 
+## v0.14.13
+
+**2026-10-26：统一操作域复用动作依赖结构，逐证据决策和结果保持独立。**
+
+- 第42轮沿request-plan每event actions.filter/依赖actions.find/pending展开局部。新TS indexRequestActions按stage与首个id引用建图，以min-index ready heap保留原每次最早ready顺序（不是拓扑层批执行）；重复对象Set语义、重复id首依赖、missing/cross-stage仍原结构语义。返回可执行前缀和cycle标记，planner执行原前缀后才报环，早期decision/render错误仍优先。
+- 不可变actions数组结构存Host统一request-plan-actions域，同规则多证据/预算retry复用，不缓存event/outcomes或跨await控制；close清除/闭后拒读，构建失败不发布显式retry。无Host analysis的独立调用只用本同步栈Map。无第二长期缓存，原预算、变更请求独立可写、工具配对/取消/投递不改。
+- 新4单元覆盖300确定随机图逐对象顺序/cycle与旧scheduler一致、duplicate/missing/cross-stage/earliest-ready、128动作读取一次500次复用、关闭/新operation重建、逐event父禁用不污染后续、环前缀/早期异常时机、失败不发布retry；原budget retry新增action work1断言。20定向单元通过。
+- 新真实Host128消息32动作链4096records，只有32结构work；父禁用后旧历史不回放，追加新128消息只free成功/30子链按原控制dependency-disabled，恢复追加新消息4096成功；每独立preview+32、native只读新增256/snapshot0/源不变/缓存清除。500证据filter每preview结构work1，两次计时preview2，原catalog3/record14/token5/numeric0/collator1保持。8实质Host+5空suite通过。
+- 两次新fixture失败均仅修测试：ControlPatch单动作须actionId+enabled，不得与rule级paused混用；控制变更水位排除旧evidence，不期待旧历史free补跑，改以新提交消息验证禁用恢复。生产控制水位/依赖优先级未改。后CPU单工具535.83ms/HTTP106.66ms/另一Agent117.07ms/CPU891+297ms/loop170.52ms，不编整体加速比。最终完整门禁、桌面、独立包见验收记录。未改Harness/Worker预算时钟取消阈值，无脚本改写/Git回滚/any，未代装启用重启，goal active。
+
 ## v0.14.12
 
 **2026-10-26：级联精确规则索引与删除排序的数值collator复用。**

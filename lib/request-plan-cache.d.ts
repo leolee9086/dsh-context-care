@@ -1,5 +1,6 @@
 import type { SessionCache } from './session-cache.js';
 import { type RequestBlock } from './request-block-index.js';
+import { type RequestActionDependency, type RequestActionStages } from './request-action-order.js';
 interface Payload {
     messages: readonly {
         content: readonly unknown[];
@@ -26,6 +27,7 @@ export declare function createRequestPlanCache<R extends Payload, I, B = unknown
         changed(message: R["messages"][number]): void;
         close(): void;
     } | undefined;
+    actionIndex: <A extends RequestActionDependency>(actions: readonly A[]) => RequestActionStages<A>;
     blockIndex: (blocks: readonly RequestBlock[]) => {
         model: RequestBlock[];
         byId: Map<string, RequestBlock>;

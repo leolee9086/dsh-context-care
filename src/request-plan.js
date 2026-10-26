@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { setRequestBlock } from './request-blocks.js'
 import { estimateInjection, requestImpact } from './request-impact.js'
 import { indexRequestBlocks, filteredAncestor, orderRequestRemovals } from '../lib/request-block-index.js'
+import { indexRequestActions } from '../lib/request-action-order.js'
 
 function ownedRequest(request) {
   // Cancellation and prepared-call handles stay native. Clone only the JSON request payload.
@@ -71,6 +72,9 @@ function planRequest({ request, blocks, rules, events, templates, snapshot, deci
   const patches = []; const filters = new Set(); const filteredCalls = new Set(); const insertions = []; const records = []; const applied = []; const scheduled = []
   const injectedEntries = new Set(); const argumentPatches = new Map()
   const byRule = new Map(rules.map(rule => [JSON.stringify([rule.sourceId, rule.id]), rule]))
+  // Standalone callers have no Host operation domain; this stack-only directory
+  // lives for exactly this plan, while production uses the unified cache.
+  const localActions = analysis ? undefined : new Map()
   const stateKey = (event, action) => JSON.stringify([event.sourceId, event.ruleId, event.ruleRevision, action.id])
   let injectedChars = 0; let injectedTokens = estimateMessage ? 0 : null
   // Stable sort preserves the shared engine's source/id order among equally ranked evidence.
@@ -78,13 +82,11 @@ function planRequest({ request, blocks, rules, events, templates, snapshot, deci
   for (const event of prioritized) {
     const rule = byRule.get(JSON.stringify([event.sourceId, event.ruleId]))
     if (!rule) throw new Error('request-plan-rule-unavailable')
-    const actions = rule.actions.filter(action => action.stage === event.stage)
-    const pending = new Set(actions)
+    let stages = analysis ? analysis.actionIndex(rule.actions) : localActions.get(rule.actions)
+    if (!stages) { stages = indexRequestActions(rule.actions); localActions.set(rule.actions, stages) }
+    const schedule = stages.get(event.stage)
     const outcomes = new Map()
-    while (pending.size) {
-      const action = [...pending].find(action => action.dependsOn.every(id => !pending.has(actions.find(item => item.id === id))))
-      if (!action) throw new Error('request-plan-dependency-cycle')
-      pending.delete(action)
+    for (const action of schedule?.order ?? []) {
       const eligible = decision(event, action)
       const record = { sourceId: event.sourceId, ruleId: event.ruleId, actionId: action.id, occurrenceId: event.occurrenceId,
         blockId: event.blockId, ranges: event.ranges, captures: event.captures, status: 'planned' }
@@ -177,6 +179,7 @@ function planRequest({ request, blocks, rules, events, templates, snapshot, deci
       outcomes.set(action.id, true)
       applied.push({ event, action, key, ...(text === undefined ? {} : { text }) })
     }
+    if (schedule?.cycle) throw new Error('request-plan-dependency-cycle')
   }
   const patched = applyBlockPatchesV2(writableBlocks, patches)
   for (const block of patched.blocks) if (block !== writableById.get(block.id) && !filters.has(block.id)) writeBlock(block, block.raw)

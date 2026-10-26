@@ -52,6 +52,7 @@ test('cache-budget replanning does not reproject unchanged messages or leak muta
   const result = planRequestV2({ request, blocks, rules: [rule], events, templates: createTemplates(), snapshot: {},
     decision: () => ({ enabled: true }), analysis, maxCacheChangedBytes: 0 })
   assert.equal(result.request, request); assert.ok(result.records.some(row => row.reason === 'request-cache-change-budget-exceeded'))
+  assert.equal(cache.report().find(row => row.name === 'request-plan-actions')?.work, 1, 'budget replanning shares only the immutable action structure')
   assert.equal(cache.report().find(row => row.name === 'request-model-projection')?.work, 1)
 })
 

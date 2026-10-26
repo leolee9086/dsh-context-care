@@ -729,6 +729,7 @@ registerWorkbenchPerformanceCases({ async open(t) {
     numericComparisons: () => localeComparisons.mock.calls.filter(call => call.arguments[2]?.numeric).length,
     removalCollators: () => collators.mock.callCount(),
     byteSerializations: request => publicSerializations.mock.calls.filter(call => call.arguments[0]?.messages?.[0]?.id === request.messages[0].id).length,
+    actionWork: () => projectionCalls.mock.calls.filter(call => call.arguments[0].name === 'request-plan-actions').reduce((sum, call) => sum + (call.arguments[1] ?? 1), 0),
     projectionWork: () => projectionCalls.mock.calls.filter(call => call.arguments[0].name === 'request-model-projection')
       .reduce((sum, call) => sum + (call.arguments[1] ?? 1), 0),
     configure: filters => service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: {
@@ -3377,6 +3378,55 @@ test('Workbench v2 cascades only explicit entries, previews without writes and r
   assert.doesNotThrow(() => service.assertCurrent(agent, planned))
   await service.store.automaticVariable(agent.id, before.documents[0].variables[0], 2, 'turn')
   assert.throws(() => service.assertCurrent(agent, planned), { code: 'CONTROL_CHANGED' })
+})
+
+test('Workbench action dependency structure builds once per rule across 128 evidence occurrences and keeps paused outcomes separate', { timeout: 120000 }, async t => {
+  const owned = await fixture(t, false), ctx = await owned.open(), service = ctx.contextCareWorkbench
+  const agent = await ctx.agentLoop.create('action-dependency-reuse', { provider: 'care-test', model: 'care-test' })
+  const messages = Array.from({ length: 128 }, (_, index) => createMessage({ role: 'user', source: { kind: 'user' },
+    content: [{ type: 'text', text: `DEPENDENCY ${index}` }] }))
+  for (const message of messages) agent.session.append('user/message', message, { surfaceOp: 'append' })
+  const actions = Array.from({ length: 31 }, (_, index) => { const number = 30 - index; return { id: `step-${number}`, kind: 'notify',
+    stage: 'request.assemble', enabledDefault: true, template: `NOTICE ${number}`, dependsOn: number ? [`step-${number - 1}`] : [] } })
+  actions.push({ id: 'free', kind: 'notify', stage: 'request.assemble', enabledDefault: true, template: 'FREE', dependsOn: [] })
+  await service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'dependency-reuse', revision: 1, title: 'Dependencies',
+    rules: [{ schemaVersion: 2, id: 'chain', revision: 1, on: ['request.assemble'], select: { view: 'model', roles: ['user'], blockTypes: ['text'] },
+      match: { kind: 'regex', pattern: '^DEPENDENCY' }, actions }] } })
+  const cache = ensureSessionLog(ctx).cache, worked = t.mock.method(cache, 'worked')
+  const work = () => worked.mock.calls.filter(call => call.arguments[0].name === 'request-plan-actions').reduce((sum, call) => sum + call.arguments[1], 0)
+  const native = t.mock.method(agent.session, 'eventAt'), snapshots = t.mock.method(agent.session, 'snapshotEvents')
+  const request = { messages }, before = structuredClone(request), storeBefore = service.store.read(agent.id)
+  const first = await service.preview(agent, request)
+  assert.equal(first.applied.length, 4096); assert.equal(work(), 32, '128 occurrences share the one 32-action structural projection')
+  const expected = [...Array.from({ length: 31 }, (_, index) => `step-${index}`), 'free']
+  const occurrences = new Set(first.records.map(row => row.occurrenceId)); assert.equal(occurrences.size, 128)
+  for (const occurrence of occurrences) assert.deepEqual(first.records.filter(row => row.occurrenceId === occurrence).map(row => row.actionId), expected)
+  assert.equal(first.request, request, 'notification-only planning still borrows the unchanged request')
+  assert.deepEqual(service.store.read(agent.id), storeBefore); const nativeReads = native.mock.callCount()
+  await ctx.contextCareControls.patch(agent.id, { revision: ctx.contextCareControls.revision(agent.id), sourceId: 'context-care:document:dependency-reuse', ruleId: 'chain', actionId: 'step-0', enabled: false })
+  const historical = await service.preview(agent, request)
+  assert.equal(historical.applied.length, 0, 'a control toggle never replays old evidence, even for the independent free action')
+  assert.equal(historical.records.filter(row => row.actionId === 'free' && row.reason === 'historical-evidence').length, 128)
+  assert.equal(native.mock.callCount(), nativeReads); assert.equal(work(), 64)
+  const appendFresh = label => {
+    const messages = Array.from({ length: 128 }, (_, index) => createMessage({ role: 'user', source: { kind: 'user' },
+      content: [{ type: 'text', text: `DEPENDENCY ${label} ${index}` }] }))
+    for (const message of messages) agent.session.append('user/message', message, { surfaceOp: 'append' })
+    return { messages }
+  }
+  const freshPaused = appendFresh('PAUSED'), pausedBefore = structuredClone(freshPaused)
+  const paused = await service.preview(agent, freshPaused)
+  assert.equal(paused.applied.length, 128); assert.ok(paused.applied.every(item => item.action.id === 'free'))
+  assert.equal(paused.records.filter(row => row.reason === 'dependency-disabled').length, 128 * 30, 'live control dependency rejection still precedes per-evidence planner outcomes')
+  assert.equal(work(), 96, 'each independent preview builds one structure, never the previous evidence outcomes')
+  await ctx.contextCareControls.patch(agent.id, { revision: ctx.contextCareControls.revision(agent.id), sourceId: 'context-care:document:dependency-reuse', ruleId: 'chain', actionId: 'step-0', enabled: true })
+  const freshResumed = appendFresh('RESUMED'), resumedBefore = structuredClone(freshResumed)
+  const resumed = await service.preview(agent, freshResumed)
+  assert.equal(resumed.applied.length, 4096); assert.equal(work(), 128)
+  assert.deepEqual(request, before); assert.deepEqual(freshPaused, pausedBefore); assert.deepEqual(freshResumed, resumedBefore)
+  assert.equal(native.mock.callCount(), nativeReads + 256, 'only the two newly appended batches are read')
+  assert.equal(snapshots.mock.callCount(), 0)
+  assert.ok(!cache.report().some(row => row.name.startsWith('request-plan-') || row.name === 'request-model-projection'))
 })
 
 test('Workbench planning tokens retain synchronous template and source invalidation and exact restored equality', async t => {

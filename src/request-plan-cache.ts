@@ -2,6 +2,7 @@ import type { SessionCache, CacheKey } from './session-cache.js'
 import { indexRequestBlocks, type RequestBlock } from './request-block-index.js'
 import { createRequestModelProjection } from './request-model-projection.js'
 import { publicRequestBytes } from './request-impact-bytes.js'
+import { indexRequestActions, type RequestActionDependency, type RequestActionStages } from './request-action-order.js'
 
 interface Payload { messages: readonly { content: readonly unknown[] }[] }
 interface Analysis<T> { hasEmptyMessages: boolean; impact: T }
@@ -38,7 +39,16 @@ export function createRequestPlanCache<R extends Payload, I, B = unknown>(measur
       cache.worked(blocksKey, blocks.length)
       return indexRequestBlocks(blocks)
     })
+  const actionsKey = cache.define<readonly RequestActionDependency[], RequestActionStages<RequestActionDependency>>('request-plan-actions',
+    'Stable dependency structure of one immutable rule action array within this operation; never evidence outcomes.', actions => {
+      const value = indexRequestActions(actions); cache.worked(actionsKey, actions.length); return value
+    })
+  const actionIndex = <A extends RequestActionDependency>(actions: readonly A[]): RequestActionStages<A> => {
+    active()
+    // This namespace preserves the exact action objects owned by this array.
+    return cache.use(actions, actionsKey) as RequestActionStages<A>
+  }
   const read = (request: R): Analysis<I> => { active(); return cache.use(request, key) }
-  return { read, modelProjection, blockIndex: (blocks: readonly RequestBlock[]) => { active(); return cache.use(blocks, blocksKey) }, impact: (before: R, after: R): I => { active(); return before === after ? read(before).impact : measure(before, after, readBytes) },
-    close: () => { if (!closed) { closed = true; cache.clear(key); cache.clear(blocksKey); cache.clear(bytesKey); modelProjection?.close() } } }
+  return { read, modelProjection, actionIndex, blockIndex: (blocks: readonly RequestBlock[]) => { active(); return cache.use(blocks, blocksKey) }, impact: (before: R, after: R): I => { active(); return before === after ? read(before).impact : measure(before, after, readBytes) },
+    close: () => { if (!closed) { closed = true; cache.clear(key); cache.clear(blocksKey); cache.clear(bytesKey); cache.clear(actionsKey); modelProjection?.close() } } }
 }
