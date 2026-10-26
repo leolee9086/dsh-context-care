@@ -1,8 +1,7 @@
-const requestFields = ['provider', 'model', 'reasoningEffort', 'temperature', 'maxTokens', 'stop', 'system', 'tools', 'messages']
+import { publicRequestBytes } from '../lib/request-impact-bytes.js'
 
 /** Compare complete public request payloads. Provider wire serialization and cache token hits are unavailable through the LLM service. */
-export function requestImpact(before, after) {
-  const bytes = request => Buffer.from(JSON.stringify(Object.fromEntries(requestFields.filter(key => request[key] !== undefined).map(key => [key, request[key]]))), 'utf8')
+export function requestImpact(before, after, bytes = publicRequestBytes) {
   const original = bytes(before); const transformed = before === after ? original : bytes(after)
   let commonPrefixBytes = 0
   while (commonPrefixBytes < Math.min(original.length, transformed.length) && original[commonPrefixBytes] === transformed[commonPrefixBytes]) commonPrefixBytes++

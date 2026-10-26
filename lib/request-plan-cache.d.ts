@@ -11,12 +11,13 @@ interface Analysis<T> {
 }
 /**
  * One planning operation reuses immutable request inputs across output occurrences.
- * Changed requests are measured normally. Requests must not change after first read.
+ * Each complete public payload is serialized once; comparisons still inspect full bytes.
+ * Requests must not change after first measurement and cannot outlive this operation.
  * @param measure Exact existing request byte comparison.
  * @param cache Host-owned projection storage; close releases this operation's domain.
  * @returns Scoped analysis, comparison and disposal functions.
  */
-export declare function createRequestPlanCache<R extends Payload, I, B = unknown>(measure: (before: R, after: R) => I, cache: SessionCache, project?: (message: R['messages'][number]) => readonly B[]): {
+export declare function createRequestPlanCache<R extends Payload, I, B = unknown>(measure: (before: R, after: R, bytes?: (request: R) => Buffer) => I, cache: SessionCache, project?: (message: R['messages'][number]) => readonly B[]): {
     read: (request: R) => Analysis<I>;
     modelProjection: {
         read(message: R["messages"][number]): readonly B[];

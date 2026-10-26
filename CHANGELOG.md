@@ -1,5 +1,15 @@
 # 更新记录
 
+## v0.14.11
+
+**2026-10-26：按规划操作的不可变请求切面复用完整public JSON字节。**
+
+- 第40轮局部核对matcher：inputBytes只有一遍完整JSON预算检查，postMessage是必要原生传输clone；没有可删重复证据，保留Worker原计时/取消/完整输入预算。实际重复在级联与cache-budget重试的requestImpact基准序列化，新增TS publicRequestBytes保留原字段顺序与完整UTF8 payload，在Host统一request-plan-bytes域按本操作不可变request identity各序列化一次。
+- requestImpact完整Buffer前缀/相等/后缀差异算法及所有byte预算仍原逻辑；候选最后写后计量，后续级联/重试clone再写，旧切面不变。无size-only/任意截断/第二缓存/跨preview可变请求复用。操作close释放全部字节/分析/块索引域，拒绝闭后复活。
+- 新增3单元：public字段顺序/Unicode/非public排除，20候选3轮比较只21payload序列化且与原完整比较一致、每次预算临界仍检查；循环序列化失败不发布/修正retry，下一operation观察mutable输入，close后拒绝读取。真实千消息三级链既有Host回归新增完整payload序列化4次断言（基准+3候选）/project1003，原range/独立可写/native复用/cache释放保持。
+- 7定向单元、6实质Host（另5空suite不计实质）通过。三级链475.56ms/HTTP102.34ms/另一Agent114.66ms/loop31.74ms，后CPU同一单实质458.31ms/HTTP97.01ms/另一Agent106.72ms/CPU578+250ms/loop32.92ms，byteSerializations4。没有同工作负载前后CPU配对，不能据此编整体加速比；完整prefix比较/必要冷copy、包络、Worker输入计量传输及无revision外部比较仍有成本。
+- 最终release:check strict/104JS/62事件目录、522/522单元（17897.32ms）及Host/Client构建通过；完整源码Host218/218（246452.45ms）、Client3文件24/24（3.80s），桌面ASAR24/24实质/0skip/空stderr/exit0（22448.66ms），三级链332.60ms/byte4/project1003。独立包结果见验收记录。未改Harness/Worker时钟取消/预算或输入阈值，无脚本批改/Git回滚/any，未代装/启用/重启。整体目标active，旧发布标签保留。
+
 ## v0.14.10
 
 **2026-10-26：冷模型消息投影一次复制自有内容树。**

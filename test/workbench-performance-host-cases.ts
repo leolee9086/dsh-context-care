@@ -7,7 +7,7 @@ import { createMessage, createToolResultMessage, ToolCallId, type GenerateOption
 
 interface Harness {
   open(t: test.TestContext): Promise<{ session: Session; configure(filters?: boolean | 'cascade'): Promise<void>; display(seq: number): Promise<unknown>;
-    preview(request: GenerateOptions): Promise<{ request: GenerateOptions; applied: unknown[]; records: { cascadePass?: number }[] }>; cacheNames(): string[]; projectionWork(): number; catalogReads(): number; recordReads(): number; tokenReads(): number; pauseFilter(paused: boolean): Promise<void>;
+    preview(request: GenerateOptions): Promise<{ request: GenerateOptions; applied: unknown[]; records: { cascadePass?: number }[] }>; cacheNames(): string[]; projectionWork(): number; byteSerializations(request: GenerateOptions): number; catalogReads(): number; recordReads(): number; tokenReads(): number; pauseFilter(paused: boolean): Promise<void>;
     reconcile(): Promise<void>; http(): Promise<void>; probe(): Promise<void>; runs(): number; displayCalls(): number }>
 }
 
@@ -33,6 +33,8 @@ export function registerWorkbenchPerformanceCases(harness: Harness): void {
     assert.equal(result.applied.length, 3, JSON.stringify(result.records)); assert.equal(result.records.filter(row => row.cascadePass).length, 2)
     assert.equal(result.request.messages.length, 1003)
     assert.deepEqual(result.request.messages.slice(-3).map(message => message.content[0]).map(block => block.type === 'text' ? block.text : ''), ['SECOND_LINK', 'THIRD_LINK', 'FINAL_LINK'])
+    const byteSerializations = fixture.byteSerializations(request)
+    assert.equal(byteSerializations, 4, 'complete baseline plus three distinct cascade candidates are each serialized once')
     const projected = fixture.projectionWork() - workBefore
     assert.equal(projected, 1003, '1000 input messages + one system + two newly inspected injections, never the cloned historical bodies again')
     assert.deepEqual(request, before); assert.equal(Object.isFrozen(request.messages[0].content[0]), initiallyFrozen)
@@ -43,7 +45,7 @@ export function registerWorkbenchPerformanceCases(harness: Harness): void {
     assert.equal(nativeReads.mock.callCount(), 1000)
     assert.ok(!fixture.cacheNames().some(name => name.startsWith('request-plan-') || name === 'request-model-projection'))
     await yieldToHost(); loop.disable(); const cpu = process.cpuUsage(cpuStart)
-    t.diagnostic(`workbench-model-cascade ${JSON.stringify({ events: session.seq, messages: 1000, bodyProjections: projected, planMs: planned.ms, httpMs: http.ms, otherAgentMs: other.ms, cpuUserMs: cpu.user / 1000, cpuSystemMs: cpu.system / 1000, loopMaxMs: loop.max / 1e6, wallMs: performance.now() - began })}`)
+    t.diagnostic(`workbench-model-cascade ${JSON.stringify({ events: session.seq, messages: 1000, bodyProjections: projected, byteSerializations, planMs: planned.ms, httpMs: http.ms, otherAgentMs: other.ms, cpuUserMs: cpu.user / 1000, cpuSystemMs: cpu.system / 1000, loopMaxMs: loop.max / 1e6, wallMs: performance.now() - began })}`)
     assert.ok(planned.ms < 5000 && http.ms < 1000 && other.ms < 1500 && loop.max / 1e6 < 1000)
   })
 

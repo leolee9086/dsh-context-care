@@ -715,6 +715,7 @@ registerWorkbenchPerformanceCases({ async open(t) {
   const projectionCalls = t.mock.method(ensureSessionLog(ctx).cache, 'worked')
   const recordReads = t.mock.method(service.store, 'read')
   const policyTokenReads = t.mock.method(service.store, 'token')
+  const publicSerializations = t.mock.method(JSON, 'stringify')
   let catalogReads = 0
   t.after(ctx.contextCareControls.registerProvider(id => { if (id === agent.id) catalogReads++; return [] }))
   const { base, cookie } = await controlCookie(ctx)
@@ -723,6 +724,7 @@ registerWorkbenchPerformanceCases({ async open(t) {
     pauseFilter: paused => ctx.contextCareControls.patch(agent.id, { revision: ctx.contextCareControls.revision(agent.id),
       sourceId: 'context-care:document:workbench-performance', ruleId: 'filter-pairs', paused }).then(() => undefined),
     preview: request => service.preview(agent, request), cacheNames: () => ensureSessionLog(ctx).cache.report().map(row => row.name),
+    byteSerializations: request => publicSerializations.mock.calls.filter(call => call.arguments[0]?.messages?.[0]?.id === request.messages[0].id).length,
     projectionWork: () => projectionCalls.mock.calls.filter(call => call.arguments[0].name === 'request-model-projection')
       .reduce((sum, call) => sum + (call.arguments[1] ?? 1), 0),
     configure: filters => service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: {
