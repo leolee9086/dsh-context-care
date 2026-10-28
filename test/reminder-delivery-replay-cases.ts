@@ -1,4 +1,5 @@
 import test, { type TestContext } from 'node:test'
+import { eventRule } from './event-rule.js'
 import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -34,22 +35,14 @@ interface Harness {
     detector?: { ref: string; revision: number; module: string; exportName: string }): Promise<Host>
 }
 const stickySource = (clock: 'main-request' | 'human-turn'): ReminderSource => ({
-  sourceId: 'replayed-sticky', plugin: 'test', revision: 1, rules: [{
-    format: 'reminder/v4', id: 'sticky', on: 'tool.succeeded', when: { tool: 'replay_probe' },
-    text: 'FROZEN {{event.arguments.marker}}', effect: { kind: 'remind', deliver: { model: { once: 'none',
-      sticky: { clock, lifetime: clock === 'main-request' ? 3 : 2, cooldown: clock === 'main-request' ? 2 : 0 },
-      shared: { reset: 'lifetime', lifetime: 'replay', limit: 2 },
-    } } },
-  }],
+  sourceId: 'replayed-sticky', plugin: 'test', revision: 1, rules: [eventRule('tool.succeeded', { id: 'sticky', event: { tool: 'replay_probe' } }, { template: 'FROZEN {{event.arguments.marker}}', delivery: { model: { once: 'none',
+      sticky: { clock, lifetime: clock === 'main-request' ? 3 : 2, cooldown: clock === 'main-request' ? 2 : 0 }, shared: { reset: 'lifetime', lifetime: 'replay', limit: 2 } } } })],
 })
 
 /** The fixture owns actual Loader, Worker, Agent and Session implementations. */
 export function registerDeliveryReplayCases(harness: Harness) {
   test('Session-only idle collection ignores historical triggers and avoids query reads and empty writes', async t => {
-    const source: ReminderSource = { sourceId: 'idle-source', plugin: 'test', revision: 1, rules: [{
-      format: 'reminder/v4', id: 'idle', on: 'tool.succeeded', text: 'IDLE_NOTICE',
-      when: { tool: 'replay_probe' }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
-    }] }
+    const source: ReminderSource = { sourceId: 'idle-source', plugin: 'test', revision: 1, rules: [eventRule('tool.succeeded', { id: 'idle', event: { tool: 'replay_probe' } }, { template: 'IDLE_NOTICE' })] }
     const hot = await harness.open(t, source)
     await hot.turn()
     const cold = await harness.open(t, source, await hot.seed())
@@ -140,17 +133,14 @@ export function registerDeliveryReplayCases(harness: Harness) {
     const source = stickySource('human-turn'), hot = await harness.open(t, source)
     await hot.trigger('old-definition-hit', 'old-body')
     await hot.queueReminder()
-    const changed = { ...source, revision: 2, rules: source.rules.map(rule => ({ ...rule, text: 'CHANGED {{event.arguments.marker}}' })) }
+    const changed = { ...source, revision: 2, rules: source.rules.map(rule => ({ ...rule, actions: rule.actions.map(action => ({ ...action, template: 'CHANGED {{event.arguments.marker}}' })) })) }
     const cold = await harness.open(t, changed, await hot.seed())
     await cold.turn()
     assert.deepEqual(await cold.notices(), [], 'a new registration must not authorize an old pending body')
   })
 
   test('Session-only interrupt clock shares cold reads and follows native human arrivals incrementally', async t => {
-    const source: ReminderSource = { sourceId: 'clock-only', plugin: 'test', revision: 1, rules: [{
-      format: 'reminder/v4', id: 'idle', on: 'tool.succeeded', text: 'IDLE_NOTICE',
-      when: { tool: 'replay_probe' }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
-    }] }
+    const source: ReminderSource = { sourceId: 'clock-only', plugin: 'test', revision: 1, rules: [eventRule('tool.succeeded', { id: 'idle', event: { tool: 'replay_probe' } }, { template: 'IDLE_NOTICE' })] }
     const hot = await harness.open(t, source), before = hot.historyReadCount()
     assert.deepEqual(await Promise.all([hot.humanTurn(), hot.humanTurn()]), ['initial', 'initial'])
     assert.equal(hot.historyReadCount() - before, 0, 'concurrent readers reuse the attached native Session')
@@ -230,11 +220,7 @@ export function registerDeliveryReplayCases(harness: Harness) {
   })
 
   test('Session-only human cooldown counts one tick for a batch of accepted messages', async t => {
-    const source: ReminderSource = { sourceId: 'human-batch', plugin: 'test', revision: 1, rules: [{
-      format: 'reminder/v4', id: 'batch', on: 'tool.succeeded', text: 'HUMAN_BATCH', when: { tool: 'replay_probe' },
-      effect: { kind: 'remind', deliver: { model: { once: 'none',
-        sticky: { clock: 'human-turn', lifetime: 1, cooldown: 2 } } } },
-    }] }
+    const source: ReminderSource = { sourceId: 'human-batch', plugin: 'test', revision: 1, rules: [eventRule('tool.succeeded', { id: 'batch', event: { tool: 'replay_probe' } }, { template: 'HUMAN_BATCH', delivery: { model: { once: 'none', sticky: { clock: 'human-turn', lifetime: 1, cooldown: 2 } } } })] }
     const hot = await harness.open(t, source)
     await hot.trigger('initial', 'batch'); await hot.turn()
     const cold = await harness.open(t, source, await hot.seed())
@@ -249,11 +235,7 @@ export function registerDeliveryReplayCases(harness: Harness) {
   })
 
   test('Session-only queued sticky starts human cooldown after its delivery request', async t => {
-    const source: ReminderSource = { sourceId: 'human-queued', plugin: 'test', revision: 1, rules: [{
-      format: 'reminder/v4', id: 'queued', on: 'tool.succeeded', text: 'QUEUED_STICKY', when: { tool: 'replay_probe' },
-      effect: { kind: 'remind', deliver: { model: { once: 'none',
-        sticky: { clock: 'human-turn', lifetime: 1, cooldown: 2 } } } },
-    }] }
+    const source: ReminderSource = { sourceId: 'human-queued', plugin: 'test', revision: 1, rules: [eventRule('tool.succeeded', { id: 'queued', event: { tool: 'replay_probe' } }, { template: 'QUEUED_STICKY', delivery: { model: { once: 'none', sticky: { clock: 'human-turn', lifetime: 1, cooldown: 2 } } } })] }
     const hot = await harness.open(t, source)
     await hot.trigger('initial', 'queued'); await hot.queueReminder(); await hot.turn()
     const seed = await hot.seed()
@@ -273,11 +255,7 @@ export function registerDeliveryReplayCases(harness: Harness) {
   })
 
   test('Session-only explicit native cancellation removes queued matches in hot and cold Hosts', async t => {
-    const source: ReminderSource = { sourceId: 'cancel-queued', plugin: 'test', revision: 1, rules: [{
-      format: 'reminder/v4', id: 'notice', on: 'tool.succeeded', when: { tool: 'replay_probe' }, text: 'CANCELED_NOTICE',
-      effect: { kind: 'remind', deliver: { model: { once: 'surface',
-        shared: { reset: 'lifetime', lifetime: 'one', limit: 1 } } } },
-    }] }
+    const source: ReminderSource = { sourceId: 'cancel-queued', plugin: 'test', revision: 1, rules: [eventRule('tool.succeeded', { event: { tool: 'replay_probe' } }, { template: 'CANCELED_NOTICE', delivery: { model: { once: 'surface', shared: { reset: 'lifetime', lifetime: 'one', limit: 1 } } } })] }
     const hot = await harness.open(t, source)
     await hot.trigger('cancel-hit', 'canceled'); await hot.queueReminder()
     hot.cancelQueued()
@@ -297,13 +275,8 @@ export function registerDeliveryReplayCases(harness: Harness) {
     t.after(() => rm(root, { recursive: true, force: true }))
     const detector = { ref: 'queued-quota', revision: 1,
       module: new URL('./fixtures/reminder-execution-real.ts', import.meta.url).href, exportName: 'judge' }
-    const source: ReminderSource = { sourceId: 'queued-quota', plugin: 'test', revision: 1, rules: [{
-      format: 'reminder/v4', id: 'notice', on: 'tool.succeeded', when: { tool: 'replay_probe' },
-      text: 'QUEUED {{event.arguments.marker}}', judge: { ref: detector.ref, revision: 1,
-        params: { label: 'queued-quota', tracePath, mode: 'quick', ok: true, value: 'frozen' } },
-      effect: { kind: 'remind', deliver: { model: { once: 'surface',
-        shared: { reset: 'lifetime', lifetime: 'one', limit: 1 } } } },
-    }] }
+    const source: ReminderSource = { sourceId: 'queued-quota', plugin: 'test', revision: 1, rules: [eventRule('tool.succeeded', { event: { tool: 'replay_probe' }, judge: { ref: detector.ref, revision: 1, params: { label: 'queued-quota', tracePath, mode: 'quick', ok: true, value: 'frozen' } } },
+      { template: 'QUEUED {{event.arguments.marker}}', delivery: { model: { once: 'surface', shared: { reset: 'lifetime', lifetime: 'one', limit: 1 } } } })] }
     const hot = await harness.open(t, source, undefined, false, detector)
     const release = await hot.reserveElsewhere()
     await hot.trigger('quota-loser', 'original-body'); await hot.queueReminder()
@@ -342,11 +315,7 @@ export function registerDeliveryReplayCases(harness: Harness) {
       return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
     }
     const at = Date.now()
-    const source: ReminderSource = { sourceId: 'snoozed-window', plugin: 'test', revision: 1, rules: [{
-      format: 'reminder/v4', id: 'window', on: 'request.before', text: 'SNOOZED_NOTICE',
-      when: { timeWindow: { start: localTime(at - 3600000), end: localTime(at + 3600000) } },
-      effect: { kind: 'remind', deliver: { model: { once: 'window' } } },
-    }] }
+    const source: ReminderSource = { sourceId: 'snoozed-window', plugin: 'test', revision: 1, rules: [eventRule('request.before', { id: 'window', event: { timeWindow: { start: localTime(at - 3600000), end: localTime(at + 3600000) } } }, { template: 'SNOOZED_NOTICE', delivery: { model: { once: 'window' } } })] }
     const hot = await harness.open(t, source)
     // Pause delivery while the actual Agent calls the tool, then enable the rule.
     // There must be no reminder message from which to infer this suppression.
@@ -372,11 +341,7 @@ export function registerDeliveryReplayCases(harness: Harness) {
       const date = new Date(time)
       return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
     }
-    const source: ReminderSource = { sourceId: 'replayed-window', plugin: 'test', revision: 1, rules: [{
-      format: 'reminder/v4', id: 'window', on: 'request.before', text: 'ONE_WINDOW_NOTICE',
-      when: { timeWindow: { start: localTime(at - 3600000), end: localTime(at + 3600000) } },
-      effect: { kind: 'remind', deliver: { model: { once: 'window' } } },
-    }] }
+    const source: ReminderSource = { sourceId: 'replayed-window', plugin: 'test', revision: 1, rules: [eventRule('request.before', { id: 'window', event: { timeWindow: { start: localTime(at - 3600000), end: localTime(at + 3600000) } } }, { template: 'ONE_WINDOW_NOTICE', delivery: { model: { once: 'window' } } })] }
     const hot = await harness.open(t, source)
     await hot.turn(); assert.deepEqual(await hot.notices(), ['ONE_WINDOW_NOTICE'])
     await hot.hideNotice()

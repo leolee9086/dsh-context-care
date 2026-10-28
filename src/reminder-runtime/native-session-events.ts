@@ -1,5 +1,7 @@
+import { RuleEventInput as Event } from '@leolee9086/dsh-rule-engine'
+import type { EventValue } from '@leolee9086/dsh-rule-engine'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
-import { Event, type EventValue } from './state.js'
+
 import type { NativeHistory } from './tool-events.js'
 
 /** Only the actual accepted event determines source, causation, payload and time. */

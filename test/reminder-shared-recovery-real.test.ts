@@ -1,12 +1,12 @@
+import { CLAIM_DOMAIN, isDefiniteStorageFailure, createBoundedMatcher } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
+import { eventRule } from './event-rule.js'
 import assert from 'node:assert/strict'
 import { readFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { z } from 'zod'
-import { createReminderRuntime } from '../src/reminder-runtime/runtime.ts'
-import { CLAIM_DOMAIN } from '../src/reminder-runtime/claims.ts'
-import { isDefiniteStorageFailure } from '../src/reminder-runtime/persistence.ts'
-import { createBoundedMatcher } from '../src/bounded-matcher.js'
+import { createReminderRuntime } from './reminder-runtime-fixture.ts'
+
 import { openRealReminderStorage, obstructRecord } from './fixtures/reminder-persistence-real.ts'
 
 // This replaces the legacy integration case which threw synthetic session/claim
@@ -32,11 +32,7 @@ test('real shared quota: failed session save compensates; failed claim release c
       const envelope: unknown = JSON.parse(await readFile(claimPath, 'utf8'))
       return z.object({ version: z.literal(1), record: CLAIM_DOMAIN.tables.claims.valueSchema }).parse(envelope).record
     }
-    runtime.registerSource({ sourceId: 'fault-quota', plugin: 'test', revision: 1, rules: [{
-      format: 'reminder/v4', id: 'one', on: 'tool.succeeded', text: 'One shared notice', when: { tool: 'read' },
-      effect: { kind: 'remind', deliver: { model: { once: 'surface',
-        shared: { reset: 'lifetime', lifetime: 'one', limit: 1 } } } },
-    }] })
+    runtime.registerSource({ sourceId: 'fault-quota', plugin: 'test', revision: 1, rules: [eventRule('tool.succeeded', { id: 'one', event: { tool: 'read' } }, { template: 'One shared notice', delivery: { model: { once: 'surface', shared: { reset: 'lifetime', lifetime: 'one', limit: 1 } } } })] })
     await matcher.warmup()
     for (const sessionId of ['a', 'b']) await runtime.submit({ type: 'tool.succeeded', sessionId,
       callId: sessionId, rootCallId: sessionId, name: 'read', arguments: {} })

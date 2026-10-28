@@ -1,4 +1,7 @@
+import { createBoundedMatcher, compileSnapshotCondition as compileReminderCondition, CountLimits, RuleEventInput as Event, EventMatchResult as MatchResult, BatchResult, BatchAnswer } from '@leolee9086/dsh-rule-engine'
+import type { EventWork as Work, RuleDeclaration as ReminderRuleInput, EventRuntimeOptions as RuntimeOptions } from '@leolee9086/dsh-rule-engine'
 import test, { type TestContext } from 'node:test'
+import { eventRule } from './event-rule.js'
 import assert from 'node:assert/strict'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
@@ -7,11 +10,9 @@ import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { setTimeout as delay } from 'node:timers/promises'
 import { z } from 'zod'
-import { createBoundedMatcher } from '../src/bounded-matcher.js'
-import { compileReminderCondition, CountLimits } from '../lib/reminder-runtime/conditions.js'
-import { Event, MatchResult, BatchResult, BatchAnswer, type Work } from '../lib/reminder-runtime/state.js'
+
 import { JudgeParams, readTrace, waitForTrace, burnCpu, type JudgeParamsValue } from './fixtures/reminder-execution-real.ts'
-import { createReminderRuntime, type ReminderRuleInput, type RuntimeOptions } from '../lib/reminder-runtime/runtime.js'
+import { createReminderRuntime } from './reminder-runtime-fixture.ts'
 import { openRealReminderStorage } from './fixtures/reminder-persistence-real.ts'
 
 const moduleUrl = new URL('./fixtures/reminder-execution-real.ts', import.meta.url).href
@@ -190,8 +191,7 @@ test('real runtime: completing a plain batch does not re-enter still-running jud
       runtime.registerDetector(detector)
       const alpha = params('runtime-alpha', { mode: 'gate', gatePath, value: { identity: 'A', values: [1, true] } })
       const beta = params('runtime-beta', { mode: 'gate', gatePath, value: { identity: 'B', values: [2, null] } })
-      const plain: ReminderRuleInput = { format: 'reminder/v4', id: 'plain', on: 'tool.succeeded', text: 'plain',
-        when: { tool: 'read' }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } }
+      const plain: ReminderRuleInput = eventRule('tool.succeeded', { id: 'plain', event: { tool: 'read' } }, { template: 'plain' })
       runtime.registerSource({ sourceId: 'real-mixed', plugin: 'test', revision: 1, rules: [
         { ...plain, id: 'alpha', priority: 30, judge: { ref: detector.ref, revision: 1, params: alpha } },
         { ...plain, id: 'beta', priority: 20, judge: { ref: detector.ref, revision: 1, params: beta } },
@@ -330,8 +330,7 @@ test('real runtime: priority orders judge execution and an exclusive winner skip
       save: (id, state) => storage.sessions.put(id, state) })
     try {
       runtime.registerDetector(detector)
-      const plain: ReminderRuleInput = { format: 'reminder/v4', id: 'base', on: 'tool.succeeded', text: 'ORDER',
-        when: { tool: 'read' }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } }
+      const plain: ReminderRuleInput = eventRule('tool.succeeded', { id: 'base', event: { tool: 'read' } }, { template: 'ORDER' })
       const judged = (label: string, extra: Partial<JudgeParamsValue> = {}) => ({ ref: detector.ref, revision: 1,
         params: params(label, { mode: 'burn', durationMs: 60, ...extra }) })
       // Registration order intentionally disagrees with priority. The skipped
@@ -383,9 +382,7 @@ for (const roundExhausted of [false, true]) {
         matched(await capture(matcher.detect(work('prime-timeout', params('prime-timeout')),
           undefined, timing(2000))), 'prime the real worker')
         runtime.registerDetector(detector)
-        const plain: ReminderRuleInput = { format: 'reminder/v4', id: 'base', on: 'tool.succeeded',
-          text: 'Timeout result', when: { tool: 'read' },
-          effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } }
+        const plain: ReminderRuleInput = eventRule('tool.succeeded', { id: 'base', event: { tool: 'read' } }, { template: 'Timeout result' })
         const judged = (label: string, extra: Partial<JudgeParamsValue> = {}) => ({ ref: detector.ref,
           revision: 1, params: params(label, extra) })
         runtime.registerSource({ sourceId: 'real-timeout', plugin: 'test', revision: 1, rules: [

@@ -1,3 +1,4 @@
+import { createBoundedMatcher, BatchAnswer, BatchResult, EventMatchResult as MatchResult, CountLimits } from '@leolee9086/dsh-rule-engine'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
@@ -5,9 +6,7 @@ import { resolve, join } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { isDeepStrictEqual } from 'node:util'
 import { z } from 'zod'
-import { createBoundedMatcher } from '../src/bounded-matcher.js'
-import { BatchAnswer, BatchResult, MatchResult } from '../lib/reminder-runtime/state.js'
-import { CountLimits } from '../lib/reminder-runtime/conditions.js'
+
 import { workload, captureBenchmarkIdentity } from './benchmark-reminders.ts'
 
 // Sampling changes execution overhead. This diagnoses worker CPU attribution;

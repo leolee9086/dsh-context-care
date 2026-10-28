@@ -1,6 +1,7 @@
+import { humanActivity } from '@leolee9086/dsh-rule-engine'
+import type { HistoryEvent } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { humanActivity, type HistoryEvent } from '../src/reminder-runtime/request-context.ts'
 
 const now = 1_000_000
 const windowMs = 300_000

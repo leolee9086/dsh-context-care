@@ -1,3 +1,4 @@
+import { MatcherFailure, DeliveryConfig as ReminderConfig, createEngine } from '@leolee9086/dsh-rule-engine'
 // @ts-check
 /** @import { Context } from '@deepseek-ai/cordis' */
 /** @import { Agent } from '@deepseek-ai/dsh-agent' */
@@ -9,6 +10,7 @@
 /** @import {} from '@deepseek-ai/dsh-storage-domain' */
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
+
 import { RequestBudgetExceeded } from './context-budget.js'
 import { captureInputPricing } from './input-pricing.js'
 import { openRequestJournal, requestFingerprint } from './request-journal.js'
@@ -20,8 +22,8 @@ import { openRuleControls } from './rule-controls.js'
 import { recordSecondaryFailure } from './secondary-failure.js'
 import { releaseResources } from './resource-cleanup.js'
 import { openWorkbenchHost } from './workbench-host.js'
-import { MatcherFailure } from './bounded-matcher.js'
-import { ensureReminderService, ReminderConfig } from './reminder-runtime/index.js'
+
+import { ensureReminderService } from './reminder-runtime/index.js'
 import { createSummaryProposalHistory } from '../lib/summary-proposal-history.js'
 import { createCareChanges } from '../lib/care-changes.js'
 import { ensureSessionLog } from '../lib/session-log.js'
@@ -73,6 +75,7 @@ export async function apply(ctx, config = {}) {
 /** Own live request operations and Session-derived history using the stream waterfall.
  * @param {Context} ctx @param {import('zod').input<typeof Config>} config */
 export async function openRequestHost(ctx, config = {}) {
+  const engine = createEngine()
   const changes = createCareChanges()
   ctx.provide('contextCareChanges', changes)
   ctx.effect(() => () => changes.close())
@@ -116,7 +119,7 @@ export async function openRequestHost(ctx, config = {}) {
     await journal.close().catch(closeError => ctx.logger.warn(`context-care: journal rollback failed: ${String(closeError)}`))
     throw error
   }
-  try { controls = await openRuleControls(ctx.storageDomain, { changed: /** @param {string | undefined} id */ id => changes.changed(id, ['status', 'actions', 'controls', 'runtime']), boundary: /** @param {string} id */ id => (ctx.sessions.get(/** @type {SessionId} */ (id))?.seq ?? 0) - 1 }) }
+  try { controls = await openRuleControls(ctx.storageDomain, { compile: engine.compile, changed: /** @param {string | undefined} id */ id => changes.changed(id, ['status', 'actions', 'controls', 'runtime']), boundary: /** @param {string} id */ id => (ctx.sessions.get(/** @type {SessionId} */ (id))?.seq ?? 0) - 1 }) }
   catch (error) {
     for (const [label, resource] of /** @type {const} */ ([['feedback', feedback], ['journal', journal]])) {
       await resource.close().catch(closeError => ctx.logger.warn(`context-care: ${label} rollback failed: ${String(closeError)}`))
@@ -128,7 +131,7 @@ export async function openRequestHost(ctx, config = {}) {
   ctx.provide('contextCareControls', controls)
   /** @type {Workbench} */
   let workbench
-  try { workbench = await openWorkbenchHost(ctx, controls, Config.parse(config)) }
+  try { workbench = await openWorkbenchHost(ctx, controls, Config.parse(config), engine) }
   catch (error) {
     for (const [label, resource] of /** @type {const} */ ([['controls', controls], ['feedback', feedback], ['journal', journal]])) {
       try { await resource.close() } catch (secondary) { recordSecondaryFailure(error, secondary, `workbench-open-${label}`) }
@@ -137,7 +140,7 @@ export async function openRequestHost(ctx, config = {}) {
   }
   ctx.provide('contextCareWorkbench', workbench)
   ctx.effect(() => () => workbench.close())
-  await ensureReminderService(ctx, Config.parse(config).reminders, controls)
+  await ensureReminderService(ctx, Config.parse(config).reminders, controls, engine)
   const proposals = createSummaryProposalHistory({ readSession: id => history.read(id) }, history)
   ctx.on('session/event', (session, event) => proposals.observe(session, event))
   ctx.effect(() => () => proposals.close())
@@ -165,8 +168,12 @@ export async function openRequestHost(ctx, config = {}) {
     call.record = { ...previous, ...details, dispatched: call.dispatched, phase }
     return journal.put(`call_${call.callId}`, call.session.id, 'request', call.record)
   }
-  ctx.effect(() => ruleControls.registerProvider(/** @param {SessionId} sessionId */ sessionId => ownerFor(ctx.agents.get(sessionId))?.controlSources?.(sessionId) ?? []))
+  ctx.effect(() => ruleControls.registerProvider(/** @param {string} sessionId */ sessionId => {
+    const nativeId = /** @type {SessionId} */ (sessionId)
+    return ownerFor(ctx.agents.get(nativeId))?.controlSources?.(nativeId) ?? []
+  }))
   const service = {
+    engine,
     controls: ruleControls,
     /** @param {RequestOwner} owner */
     register(owner) { owners.add(owner); return () => { owners.delete(owner); for (const [id, call] of calls) if (call.owner === owner) calls.delete(id) } },

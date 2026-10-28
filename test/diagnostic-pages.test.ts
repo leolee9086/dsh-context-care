@@ -22,16 +22,16 @@ test('diagnostic relations retain stable buckets and account for removal and lat
   let owner = 'child'
   const first = { id: 'a' }, second = { id: 'b' }, unrelated = { id: 'c' }
   const relations = createDiagnosticRelations((record: typeof first) => record === unrelated ? ['unrelated'] : [owner])
-  assert.deepEqual([...relations.update([first, second, unrelated])], ['child', 'unrelated'])
+  assert.deepEqual([...relations.update({ added: [first, second, unrelated], removed: [] })], ['child', 'unrelated'])
   const stable = relations.get('unrelated')
   assert.deepEqual(relations.get('child'), [first, second])
-  assert.equal(relations.update([first, second, unrelated]).size, 0)
+  assert.equal(relations.update({ added: [], removed: [] }).size, 0)
   assert.equal(relations.get('unrelated'), stable)
   owner = 'parent'
-  assert.deepEqual(new Set(relations.update([first, second, unrelated], true)), new Set(['child', 'parent']))
+  assert.deepEqual(new Set(relations.rekey([first, second])), new Set(['child', 'parent']))
   assert.deepEqual(relations.get('child'), []); assert.deepEqual(relations.get('parent'), [first, second])
   assert.equal(relations.get('unrelated'), stable)
-  relations.update([second, unrelated]); assert.deepEqual(relations.get('parent'), [second])
+  relations.update({ added: [], removed: [first] }); assert.deepEqual(relations.get('parent'), [second])
 })
 
 test('diagnostic record feeds coalesce pending edits and keep independent readers and old snapshots', () => {
@@ -77,7 +77,7 @@ test('diagnostic relation delta updates inspect only changed keys and preserve u
 test('diagnostic relations update order when existing immutable records reorder', () => {
   const first = {}, second = {}
   const relations = createDiagnosticRelations(() => ['shared'])
-  relations.update([first, second]); assert.deepEqual(relations.get('shared'), [first, second])
-  assert.deepEqual([...relations.update([second, first])], ['shared'])
+  relations.update({ added: [first, second], removed: [] }); assert.deepEqual(relations.get('shared'), [first, second])
+  assert.deepEqual([...relations.update({ added: [], removed: [], order: [second, first] })], ['shared'])
   assert.deepEqual(relations.get('shared'), [second, first])
 })

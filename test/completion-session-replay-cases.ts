@@ -1,7 +1,7 @@
+import type { CompletionNotice } from '@leolee9086/dsh-rule-engine'
 import test, { type TestContext } from 'node:test'
 import assert from 'node:assert/strict'
 import type { SessionEvent, SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
-import type { CompletionNotice } from '../src/session-completions.ts'
 
 interface Seed {
   id: SessionId

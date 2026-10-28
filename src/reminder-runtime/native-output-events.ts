@@ -1,6 +1,6 @@
 import type { AssistantStreamRecord, StreamChunk, TimedStreamChunk } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
-import type { OutputConfig, OutputEvent } from './output-stream.js'
+import type { OutputConfig, OutputEvent } from '@leolee9086/dsh-rule-engine'
 import { createOutputProjection } from './output-projection.js'
 import type { SessionLogRead } from '../session-log.js'
 

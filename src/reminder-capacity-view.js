@@ -1,6 +1,7 @@
+import { CapacityWire } from '@leolee9086/dsh-rule-engine/catalog-capacity'
 import React, { useEffect, useRef, useState } from 'react'
 import { h } from './care-ui.js'
-import { CapacityWire } from './reminder-capacity.js'
+
 import { httpFailure } from './http-failure.js'
 
 /** Global reminder catalog settings, shown alongside session rules with their scope made explicit. */

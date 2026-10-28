@@ -1,12 +1,13 @@
+import { createBoundedMatcher, createTemplates } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
+import { eventRule } from './event-rule.js'
 import assert from 'node:assert/strict'
 import { SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import { ToolCallId, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-tools'
 import { createToolEvents } from '../lib/reminder-runtime/tool-events.js'
-import { createReminderRuntime } from '../lib/reminder-runtime/runtime.js'
-import { createBoundedMatcher } from '../src/bounded-matcher.js'
-import { createTemplates } from '../src/templates.js'
+import { createReminderRuntime } from './reminder-runtime-fixture.ts'
+
 import { nativeSession } from './fixtures/native-session.ts'
 
 const config = { maxContextChars: 256, maxContextMessages: 8, maxQueued: 2, maxConcurrent: 1 }
@@ -106,8 +107,7 @@ test('runtime collection ignores old tool outcomes and handles explicitly observ
   const runtime = createReminderRuntime({ config: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 }, templates: createTemplates(),
     execute: (input, signal, timing) => matcher.detect(input, signal, timing), resolveEvent: (event, signal) => source.resolve(event, signal) })
   t.after(async () => { await runtime.close(); await matcher.close(); source.close() })
-  runtime.registerSource({ sourceId: 'native-growth', plugin: 'test', revision: 1, rules: [{ format: 'reminder/v4', id: 'notice', on: 'tool.succeeded', when: { tool: 'probe' },
-    text: 'RECOVERED {{event.arguments.file_path}}', effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } }] })
+  runtime.registerSource({ sourceId: 'native-growth', plugin: 'test', revision: 1, rules: [eventRule('tool.succeeded', { event: { tool: 'probe' } }, { template: 'RECOVERED {{event.arguments.file_path}}' })] })
   const collect = () => runtime.collect({ sessionId: String(session.id), visible: [] })
   assert.deepEqual(await collect(), [])
   const callId = ToolCallId('committed-after-empty-scan'), call = session.append('tool/call', { turn: 0, step: 0, callId, name: 'probe', arguments: '{"file_path":"late.ts"}' })

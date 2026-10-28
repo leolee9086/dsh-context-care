@@ -1,9 +1,9 @@
+import { createRequestPlanCache, requestImpact, indexRequestActions, type RequestActionDependency } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { indexRequestActions, type RequestActionDependency } from '../lib/request-action-order.js'
+
 import { createSessionCache } from '../lib/session-cache.js'
-import { createRequestPlanCache } from '../lib/request-plan-cache.js'
-import { requestImpact } from '../src/request-impact.js'
+
 import { planRequestV2 } from '../src/request-plan.js'
 
 function legacy<A extends RequestActionDependency>(all: readonly A[], stage: string) {
@@ -73,7 +73,8 @@ test('dependency outcomes and decisions remain per evidence and decision/render 
     } }
   const planned = planRequestV2(options)
   assert.deepEqual(visited, ['denied:parent', 'denied:child', 'denied:free', 'allowed:parent', 'allowed:child', 'allowed:free'])
-  assert.equal(planned.records.find(row => row.occurrenceId === 'denied' && row.actionId === 'child')?.reason, 'dependency-not-planned')
+  const denied = planned.records.find(row => 'occurrenceId' in row && row.occurrenceId === 'denied' && row.actionId === 'child')
+  assert.ok(denied && 'reason' in denied); assert.equal(denied.reason, 'dependency-not-planned')
   assert.deepEqual(planned.applied.map(item => `${item.event.occurrenceId}:${item.action.id}`), ['denied:free', 'allowed:parent', 'allowed:child', 'allowed:free'])
   const cycle = [action('prefix'), action('x', ['y']), action('y', ['x'])]
   const seen: string[] = [], cycleOptions = { ...options, rules: [{ sourceId: 's', id: 'r', priority: 0, actions: cycle }], events: [event('cycle')],

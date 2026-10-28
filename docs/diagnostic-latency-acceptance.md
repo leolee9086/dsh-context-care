@@ -1,5 +1,19 @@
 # 诊断查询与数据推送验收
 
+## v0.14.18：显示替换按受影响块重评（2026-10-26）
+
+第48轮沿 display-plan 的 replace 分支继续修复。已读实际安装 @leolee9086/dsh-rule-engine0.3.0 的 lib/v2.js413-435：patch全局按priority降序/actionId locale升序，首block ID验证signed/text/segments/range/text，每block独立重叠，按起点逆序变换；同ID基线的每行都变换，results仍全局排序。新TS createDisplayPatchPlan 保留原引擎作验证与文本裁决者，仅把受影响编号的全部原基线行和该组累计patch传入，不重写重叠/优先级/切片规则。
+
+显示已有编号目录增加same(id)惰性组，补丁暂存复用而不再扫描一次baseline。投机候选若原结果完全拒绝或抛错不发布状态；planned动作编号按各组计数，保留原results.some(actionId && planned)的全局成员行为，即同动作编号在别块planned也会影响候选提交。最终复用每组原引擎输出，按原全局稳定比较器交错result流、按原基线位置合并块，不再完整apply。无replace不初始化；Host统一display-plan-patches只统计实际引擎row+candidate工作，并随同本次同步域finally清除。保留原UTF-16、字符/结果UTF-8预算、逐证据控制与依赖、原文/请求/Session不变。
+
+新增6项patch回归，连同显示索引7/Tavern2共15定向全部exit0：300批每次accept和每提交前缀finish逐项对照原引擎；跨块同actionID/重复baseline/priority覆盖/零宽/相等tie；1000块只1000rows+1000ranges且finish不再apply；借现有目录构造不重读ID、单候选不读999无关行；原stale/signed/segments/非法范围错误与失败暂存不变；真实planner重叠/依赖/精确字节边界和非文本replacement错误。初TS测试直接import遇旧引擎声明漏applyBlockPatchesV2，check退出2未运行测试；改按实际resolve入口和窄类型加载，无修改引擎。误猜v2.d.ts的grep不存在仅只读失败，未重试扫库。日志保留。
+
+真实 Loader 新回归：1000历史加512文本块当前消息，first替换512成功、overlap512拒绝、dependent512跳过，输出512块/记录1536，实际engineWork2560（各块1row+1patch再1row+2patch），不包含其余511块或无关patch；暖不增native、暂停零补丁工作、恢复实时，append仅+1读取且输出PATCHED NEW，finally清域，无snapshot/旁路derive。最新定向4实质+5空suite（报告9）exit0（15294.2809ms）：替换cold804.77/warm294.64ms/鉴权HTTP122.57ms/另一Agent138.63ms/CPU1938+141ms/loop281.54ms/native1002；既有256块注入994.28/564.40ms/HTTP74.01ms/另一Agent91.94ms/loop565.71ms。首轮替换788.27/419.95ms/loop412.88、旧注入1122.74/843.43ms/loop832.57波动仍保留，不声称比较提速比例。
+
+完整pnpm release:check单次exit0：557/557单元0skip、22419.0041ms，严格类型/104JS、DSH0.2.1-rc.3的62事件目录和完整Host/Client构建。唯一归档artifacts/final-v01418-round48/dsh-context-care-0.14.18.tgz，964586字节，SHA256 A35DAD31542EDAF5954D1E6A242725804CB349D5C7DBEC98AA23FE27CA45B1A4（2026-10-26T19:36:01.0327052+08:00）。全新.local/consumer-final-v0.14.18-20261026普通pnpm12.6 add --offline安装53项，无allowBuilds/ignore-scripts/exotic例外或开发junction，exit0。只执行安装模块8入口/Client factory/真实Worker、原预算控制/配对锚点/显示索引与新增300提交前缀逐项对照、1000块rows1000/ranges1000/finish不重放；最后再探测missing失败增加1个range调用但0row，失败前后输出相等（最终报告ranges1001含此失败探针），跨块同动作ID/重复baseline/字节边界通过，233个src/lib JS与声明逐字节一致。包后只更新不打包验收文档，不重打唯一归档。完整源码Host及Client/桌面ASAR、安装态Host和新tag远端仍待收取，未提前称门禁完整。
+
+整体目标保持active，未完成。同一块里的累计范围仍交原引擎重评，后续要依赖真实规则解决，不能把剩余生产消费者审计归为只待安装；同GUI实际加载/性能与14条规则真实时钟接纳、投递、去重仍未现场。未读业务长日志、未改Harness/Worker预算/时钟/取消阈值，未代装/启用/重启。
+
 ## v0.14.17：显示规划结构索引与输出合并（2026-10-26）
 
 第47轮只沿已定位 display-plan 及真实 Host 调用方修复。逐事件 rules.find 改精确 sourceId/ruleId 首身份目录；相同 actions 的 display.render 阶段只建一次既有稳定依赖调度结构，保留 Set 对象去重、首重复 ID、缺失依赖未计划、逐证据 outcomes、先执行可执行前缀及更早决策/模板失败优先于循环错误。逐动作 baseline.find/findIndex 改为首 display 块和位置索引，不借 original 同名块。filter 后代目录按原 path-only 前缀构建，重复 ID 行和顺序保留，$result 仍整组；按原首块一组只物化/校验一次，签名/不透明后代仍拒绝。

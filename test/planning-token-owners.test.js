@@ -1,8 +1,6 @@
+import { withPlanningToken, createTemplates, createRuleStore as createWorkbenchStore } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { withPlanningToken } from '../lib/planning-token.js'
-import { createTemplates } from '../src/templates.js'
-import { createWorkbenchStore } from '../src/workbench-store.js'
 
 test('template mutation stamps recheck original versions including same-revision remove and re-register', () => {
   const templates = createTemplates()

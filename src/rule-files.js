@@ -24,14 +24,3 @@ export async function readRuleFiles(paths, maxBytes = 1048576) {
     } finally { await handle.close() }
   }))
 }
-
-/** File authors advance revisions explicitly; changing text must not reuse success/cooldown identity. */
-export function assertFileRevision(previous, next) {
-  if (!previous || previous.id !== next.id || JSON.stringify(previous) === JSON.stringify(next)) return
-  if (next.revision <= previous.revision) throw new Error('rule-file-document-needs-new-revision')
-  for (const field of ['rules', 'entries', 'partials']) for (const item of next[field]) {
-    const old = previous[field].find(value => field === 'partials' ? value.name === item.name : value.id === item.id)
-    if (old && (item.revision < old.revision || JSON.stringify(old) !== JSON.stringify(item) && item.revision === old.revision))
-      throw new Error(`rule-file-${field}-needs-new-revision`)
-  }
-}

@@ -1,4 +1,7 @@
+import { createBoundedMatcher, MatcherFailure, compileEventActions as compileRule, CountLimits, BatchAnswer, BatchResult, RuleEventInput as Event, EventMatchResult as MatchResult, normalizeCondition } from '@leolee9086/dsh-rule-engine'
+import type { BatchRuleInput, EventDetectorValue as DetectorValue, EventValue, EventWork as Work, EventAction as CompiledRule } from '@leolee9086/dsh-rule-engine'
 import assert from 'node:assert/strict'
+import { eventRule } from './event-rule.js'
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { readFile, writeFile } from 'node:fs/promises'
@@ -7,12 +10,13 @@ import { performance } from 'node:perf_hooks'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import { z } from 'zod'
-import { createBoundedMatcher, MatcherFailure } from '../src/bounded-matcher.js'
-import { compileRule } from '../lib/reminder-runtime/schema.js'
-import { CountLimits } from '../lib/reminder-runtime/conditions.js'
-import { BatchAnswer, BatchResult, Event, MatchResult } from '../lib/reminder-runtime/state.js'
-import type { BatchRuleInput, DetectorValue, EventValue, Work } from '../lib/reminder-runtime/state.js'
-import type { CompiledRule } from '../lib/reminder-runtime/schema.js'
+
+
+
+
+
+
+
 
 // This program measures the shipped worker path. It never supplies an execute replacement.
 // Run only after the Lead grants a CPU measurement window; do not run alongside CPU-loop tests.
@@ -78,7 +82,7 @@ function workloadDigest(value: Workload): string {
 }
 const descriptor = (exportName = 'judge'): DetectorValue => ({ ref: 'benchmark-judge', revision: 1, module: fixtureUrl, exportName })
 
-/** Preserve realistic v4 rules; only the event's inert context padding changes across sizes. */
+/** Exercise canonical event declarations; only inert context padding changes across sizes. */
 export function workload(kind: Kind, count: number, eventChars: number): Workload {
   const id = `${kind}-${count}-${eventChars}`
   const event = Event.parse({ type: 'tool.before-execute', sessionId: 'benchmark-session', callId: id, rootCallId: id,
@@ -103,20 +107,18 @@ export function workload(kind: Kind, count: number, eventChars: number): Workloa
     const condition = conditions[index % conditions.length]
     assert.ok(condition !== undefined)
     const hasJudge = kind === 'judges' || (kind === 'mixed' && index % 2 === 0)
-    return compileRule({ format: 'reminder/v4', id: `r${index}`, on: 'tool.before-execute', priority: count - index,
+    return compileRule(eventRule('tool.before-execute', { id: `r${index}`, priority: count - index,
       ...(index % 3 === 0 ? { exclusiveGroup: `group-${Math.floor(index / 3)}` } : {}),
-      when: { tool: 'pwsh', arguments: { command: { regex: 'Get-ChildItem' } }, condition }, text: `fixture rule ${index}`,
-      effect: index % 4 === 0 ? { kind: 'deny-tool', dangerous: true, reason: `fixture-denial-${index}`, deliver: { model: { once: 'surface' } } }
-        : { kind: 'remind', deliver: { model: { once: 'surface' } } },
+      event: { tool: 'pwsh', arguments: { command: { regex: 'Get-ChildItem' } } }, match: normalizeCondition(condition),
       ...(hasJudge ? { judge: { ref: 'benchmark-judge', revision: 1, params: {
         mode: index % 8 === 4 ? 'reject' : index % 8 === 6 ? 'throw' : 'accept', tag: `tag-${index}`,
         marker: 'TARGET', minimumLevel: 2, expectedCallId: id,
       } } } : {}),
-    }, limits)
-  })
+    }, { template: `fixture rule ${index}`, ...(index % 4 === 0 ? { deny: { dangerous: true, reason: `fixture-denial-${index}` } } : {}) }), limits)
+  }).flat()
   const compileMs = performance.now() - began
   const batchRules = rules.map((rule): BatchRuleInput => ({ key: rule.id, condition: rule.condition,
-    ...(rule.judge === undefined ? {} : { judge: descriptor(), params: rule.judge.params ?? null }) }))
+    ...(rule.judge === undefined ? {} : { judge: descriptor(), params: z.json().parse(rule.judge.params ?? null) }) }))
   return { id, kind, event, rules, batchRules, compileMs }
 }
 
@@ -314,13 +316,19 @@ async function measure(value: Workload, settings: Options) {
 
 /** Hash both sources and actual worker-loaded artifacts; HEAD alone is insufficient in a dirty tree. */
 async function provenance() {
-  const files = ['src/bounded-matcher.js', 'src/match-worker.js',
-    ...['pool', 'progress', 'worker', 'worker-error'].flatMap(name => [`src/matcher/${name}.ts`, `lib/matcher/${name}.js`]),
-    ...['matcher', 'schema', 'conditions', 'state', 'runtime', 'text-count', 'text-projection'].flatMap(name => [`src/reminder-runtime/${name}.ts`, `lib/reminder-runtime/${name}.js`]),
+  const files = ['src/match-worker.js',
+    'src/reminder-runtime/runtime.ts', 'lib/reminder-runtime/runtime.js',
     'package.json', 'pnpm-lock.yaml', 'test/benchmark-reminders.ts', 'test/fixtures/reminder-benchmark.ts',
-    'node_modules/@leolee9086/dsh-rule-engine/package.json', 'node_modules/zod/package.json']
+    'node_modules/zod/package.json']
   const hashes: Record<string, string> = {}
   for (const file of files) hashes[file] = hash(await readFile(new URL(file, new URL('../', import.meta.url))))
+  // Hash the actually resolved engine, including the worker modules loaded by its
+  // public entry. The explicit source-checkout hook and installed package agree.
+  const engineRoot = new URL('.', import.meta.resolve('@leolee9086/dsh-rule-engine/package.json'))
+  const engineFiles = ['package.json', ...['index', 'matcher-pool', 'matcher-progress', 'worker-error', 'rule-worker',
+    'event-matcher', 'event-evaluation', 'event-rules', 'block-rules', 'snapshot-conditions', 'text-count', 'text-projection']
+    .flatMap(name => [`lib/${name}.js`, `lib/${name}.d.ts`])]
+  for (const file of engineFiles) hashes[`engine:${file}`] = hash(await readFile(new URL(file, engineRoot)))
   const git = (args: string[]) => execFileSync('git', args, { cwd: root, encoding: 'utf8', windowsHide: true }).trim()
   const status = git(['status', '--porcelain'])
   return { head: git(['rev-parse', 'HEAD']), dirty: status.length > 0, status, hashes }

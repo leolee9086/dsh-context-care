@@ -8,7 +8,7 @@ declare module '@deepseek-ai/dsh-llm' {
 }
 import type { DiagnosticRead, DiagnosticRecordInput } from '../lib/diagnostic-pages.js'
 import { ensureSessionLog } from '../lib/session-log.js'
-import { createDiagnosticPages, createDiagnosticIndex, isDiagnosticDelta, createDiagnosticRecordFeed, compareDiagnosticRecords } from '../lib/diagnostic-pages.js'
+import { createDiagnosticPages, createDiagnosticIndex, createDiagnosticRecordFeed, compareDiagnosticRecords } from '../lib/diagnostic-pages.js'
 import { createRequestCache } from '../lib/request-cache.js'
 import { createRewriteJournal } from '../src/rewrite-journal.js'
 import { rewriteCut, rewriteSnapshot } from '../lib/rewrite-feed.js'
@@ -40,7 +40,7 @@ export function registerDiagnosticPageCases(harness: Harness): void {
     const pages = createDiagnosticPages(history, promptEventTypes, () => {
       const update = createPromptIndex()
       return (records: DiagnosticRecordInput<CacheRecord>, events: readonly SessionEvent[]) => {
-        assert.ok(isDiagnosticDelta(records)); processed += records.added.length + records.removed.length
+        processed += records.added.length + records.removed.length
         const result = update(records, events)
         if (fail) { fail = false; throw new Error('delta-update-failed') }
         return result
@@ -168,7 +168,7 @@ export function registerDiagnosticPageCases(harness: Harness): void {
         return result
       }
     })
-    const observed = new WeakSet<object>(), records: CacheRecord[] = []
+    const observed = new WeakSet<object>(), records = createDiagnosticRecordFeed<CacheRecord>(compareDiagnosticRecords)
     const first = pages(session, records, { offset: 0, limit: 20 })
     assert.equal(first.total, 1000); assert.equal(classified, 1000); assert.equal(built, 20)
     const originalReads = reads.mock.callCount()
@@ -181,7 +181,8 @@ export function registerDiagnosticPageCases(harness: Harness): void {
     assert.equal(grown.items[0], first.items[0]); assert.equal(classified, 1001); assert.equal(built, 40)
     pages(session, records, { offset: 0, limit: 20 }); assert.equal(built, 41)
     const request: CacheRecord = { key: 'request', version: 1, sessionId: String(session.id), kind: 'request', at: 2, data: { callId: 'joined', requestSourceSeqs: [999] } }
-    const changed = pages(session, [request], { offset: 1, limit: 20 })
+    records.set(request.key, request)
+    const changed = pages(session, records, { offset: 1, limit: 20 })
     assert.notEqual(changed.items[0], first.items[0]); assert.equal(changed.items[1], first.items[1]); assert.equal(built, 42)
     assert.equal(snapshots.mock.callCount(), 0)
   })
@@ -229,7 +230,7 @@ export function registerDiagnosticPageCases(harness: Harness): void {
 
   test('native diagnostic retry discards a partially mutated metadata index', async t => {
     const ctx = await harness.open(t), history = ensureSessionLog(ctx), session = ctx.sessions.create(SessionId('native-page-partial'))
-    const records: object[] = []; let fail = false, created = 0
+    const records = createDiagnosticRecordFeed<object>(() => 0); let fail = false, created = 0
     const pages = createDiagnosticPages(history, ['user/message'], () => {
       created++
       const entries = createDiagnosticIndex<number>()
@@ -256,7 +257,7 @@ export function registerDiagnosticPageCases(harness: Harness): void {
 
   test('native diagnostic caches refresh future evidence and retry failed projections', async t => {
     const ctx = await harness.open(t), history = ensureSessionLog(ctx), session = ctx.sessions.create(SessionId('native-page-retry'))
-    const records: object[] = []; let fail = true, updates = 0, bodies = 0
+    const records = createDiagnosticRecordFeed<object>(() => 0); let fail = true, updates = 0, bodies = 0
     const pages = createDiagnosticPages(history, ['user/message'], () => {
       const entries = createDiagnosticIndex<{ evidence?: string }>()
       return (_records: DiagnosticRecordInput<object>, added: readonly SessionEvent[]) => {

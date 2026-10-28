@@ -1,7 +1,7 @@
+import { TextCountConfig, measureTextCount, combineTruth, negateTruth, markdownStatements } from '@leolee9086/dsh-rule-engine'
+import type { TextCountOptions, MatchTruth } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { TextCountConfig, measureTextCount, combineTruth, negateTruth, type TextCountOptions, type MatchTruth } from '../lib/reminder-runtime/text-count.js'
-import { markdownStatements } from '../lib/reminder-runtime/text-projection.js'
 
 const base = TextCountConfig.parse({
   projection: 'raw', locale: 'zh-CN', pattern: { kind: 'literal', text: '目标' },

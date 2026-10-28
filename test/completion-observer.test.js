@@ -1,7 +1,7 @@
+import { completionStateKey, createCompletionObserver, parseCompletion } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { completionStateKey, createCompletionObserver, createCompletionStateStore, parseCompletion } from '../src/completion-observer.js'
-
+import { createCompletionStateStore } from '../src/completion-observer.js'
 
 test('completion state keys stay safe for the JSON per-record backend', () => {
   const key = completionStateKey('session/一', 'attempt:2')

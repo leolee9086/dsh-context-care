@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { indexFirstControlIds, indexControlSources, createControlPreferenceIndex } from '../lib/control-decision-index.js'
+import { indexFirstControlIds, indexControlSources, createControlPreferenceIndex } from '@leolee9086/dsh-rule-engine'
 
 test('control identity directories build only accessed sources and rules once and preserve first exact identities', () => {
   let ruleReads = 0, actionReads = 0

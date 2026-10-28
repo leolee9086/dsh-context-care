@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createRuleControls } from '../src/rule-controls.js'
+import { createRuleControls } from '@leolee9086/dsh-rule-engine'
 
 test('indexed batch decisions make no linear identity searches across recursive dependencies and nested sessions retain separate preferences', async t => {
   const pref = (sourceId, ruleId, actions = {}, paused = false) => ({ sourceId, ruleId, actions, paused, sinceSeq: 7, epoch: 1 })

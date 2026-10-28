@@ -1,7 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { setTimeout as delay } from 'node:timers/promises'
-import { createOutputStream, type OutputConfig, type OutputEvent } from '../lib/reminder-runtime/output-stream.js'
+import type { OutputConfig, OutputEvent } from '@leolee9086/dsh-rule-engine'
+import { createOutputStream } from '../lib/reminder-runtime/output-stream.js'
 
 const config: OutputConfig = { maxStreamChars: 16, maxStreamBlocks: 4, streamEveryChars: 4, streamFlushMs: 5,
   maxStreamPending: 32, maxStreamPendingBytes: 4096 }

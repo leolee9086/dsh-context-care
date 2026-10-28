@@ -1,8 +1,9 @@
+import { executeEventMatch as executeReminderMatch, createBoundedMatcher } from '@leolee9086/dsh-rule-engine'
 import test, { after } from 'node:test'
+import { eventRule } from './event-rule.js'
 import assert from 'node:assert/strict'
-import { createReminderRuntime } from '../lib/reminder-runtime/runtime.js'
-import { executeReminderMatch } from '../lib/reminder-runtime/matcher.js'
-import { createBoundedMatcher } from '../src/bounded-matcher.js'
+import { createReminderRuntime } from './reminder-runtime-fixture.ts'
+
 const matcher = createBoundedMatcher({ timeoutMs: 2000, startupMs: 5000 })
 after(async () => { await matcher.close() })
 const port = (input: Parameters<typeof matcher.detect>[0], signal: AbortSignal, timing: Parameters<typeof matcher.detect>[2]) =>
@@ -11,9 +12,8 @@ const port = (input: Parameters<typeof matcher.detect>[0], signal: AbortSignal, 
 // 不预热的话测的就是「启动慢」而不是「存储阻塞不该影响判定」。
 await matcher.warmup()
 /** 灾难回溯：真实地卡住 worker，比伪造一个 throw 更接近线上会出的事。 */
-const hang = { format: 'reminder/v4', id: 'hang', on: 'tool.before-execute', text: 't',
-  when: { tool: 'blocked', arguments: { command: { regex: '(a+)+$' } } },
-  effect: { kind: 'deny-tool', dangerous: true, reason: '不该命中', deliver: { model: { once: 'surface' } } } }
+const hang = eventRule('tool.before-execute', { id: 'hang', event: { tool: 'blocked', arguments: { command: { regex: '(a+)+$' } } } },
+  { template: 't', deny: { dangerous: true, reason: '不该命中' } })
 const trap = 'a'.repeat(40)
 
 /** 同步阻塞事件循环，模拟与匹配无关的慢操作（存储写入、别的主线程任务）。 */
@@ -23,9 +23,8 @@ function blockLoop(ms: number) {
 }
 
 /** 规则匹配 tool 名，但参数条件永远不命中，所以期望结果是放行。 */
-const guard = { format: 'reminder/v4', id: 'guard', on: 'tool.before-execute', text: 't',
-  when: { tool: 'blocked', arguments: { command: { regex: 'never-matches-this' } } },
-  effect: { kind: 'deny-tool', dangerous: true, reason: '不该命中', deliver: { model: { once: 'surface' } } } }
+const guard = eventRule('tool.before-execute', { id: 'guard', event: { tool: 'blocked', arguments: { command: { regex: 'never-matches-this' } } } },
+  { template: 't', deny: { dangerous: true, reason: '不该命中' } })
 
 test('规则未命中、匹配瞬时完成，仅因无关的存储开销阻塞事件循环就被判成「未完成」', async (t) => {
   const instance = createReminderRuntime({
@@ -69,8 +68,7 @@ test('求值迟迟不返回时仍然拒绝，且不会无限等待', async (t) =
 })
 
 test('执行前的纯提醒规则不得阻塞工具调用', async (t) => {
-  const notice = { format: 'reminder/v4', id: 'notice-before', on: 'tool.before-execute', text: 't',
-    when: { tool: 'blocked' }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } }
+  const notice = eventRule('tool.before-execute', { id: 'notice-before', event: { tool: 'blocked' } }, { template: 't' })
   const instance = createReminderRuntime({
     config: { ruleTimeoutMs: 50, roundTimeoutMs: 2000 },
     // 即便求值真的卡死，纯提醒也不该拒绝任何调用。

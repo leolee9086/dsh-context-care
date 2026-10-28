@@ -1,10 +1,13 @@
+import type { MessageView, ClaimBookValue } from '@leolee9086/dsh-rule-engine'
+import { createBoundedMatcher, EventRule as ReminderRule } from '@leolee9086/dsh-rule-engine'
 import test, { after } from 'node:test'
+import { eventRule } from './event-rule.js'
 import assert from 'node:assert/strict'
-import { createBoundedMatcher } from '../src/bounded-matcher.js'
-import { createReminderRuntime } from '../lib/reminder-runtime/runtime.js'
-import { ReminderRule } from '../lib/reminder-runtime/schema.js'
-import type { MessageView } from '../lib/reminder-runtime/request-context.js'
-import type { ClaimBookValue } from '../lib/reminder-runtime/claims.js'
+
+import { createReminderRuntime } from './reminder-runtime-fixture.ts'
+
+
+
 // 真实的执行端口：匹配由 worker 线程池完成。规则条件与事件本来就互相匹配，
 // 不需要替身来伪造"命中"。
 const matcher = createBoundedMatcher({ timeoutMs: 2000, startupMs: 5000 })
@@ -13,9 +16,8 @@ const port = (input: Parameters<typeof matcher.detect>[0], signal: AbortSignal, 
   matcher.detect(input, signal, timing)
 
 const config = { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 }
-const stickyRule = (sticky: { lifetime: number; cooldown: number; clock?: 'main-request' | 'human-turn' }) => ({
-  format: 'reminder/v4', id: 'sticky', on: 'tool.succeeded', text: 'STICKY_NOTICE', when: { tool: 'probe' },
-  effect: { kind: 'remind', deliver: { model: { once: 'none', sticky } } } })
+const stickyRule = (sticky: { lifetime: number; cooldown: number; clock?: 'main-request' | 'human-turn' }) =>
+  eventRule('tool.succeeded', { id: 'sticky', event: { tool: 'probe' } }, { template: 'STICKY_NOTICE', delivery: { model: { once: 'none', sticky } } })
 const probe = (id: string) => ({ sessionId: 's', callId: id, rootCallId: id, name: 'probe', arguments: {} })
 const human = (id: string): MessageView => ({ id, role: 'user',
   content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } })
@@ -47,10 +49,7 @@ test('empty collection skips history and persistence unless a local enabled stic
   t.after(() => runtime.close())
   const collect = () => runtime.collect({ sessionId: 's', visible: [] })
   assert.deepEqual(await collect(), [])
-  runtime.registerSource({ sourceId: 'ordinary', plugin: 'test', revision: 1, rules: [{
-    format: 'reminder/v4', id: 'ordinary', on: 'tool.succeeded', text: 'NOTICE', when: { tool: 'probe' },
-    effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
-  }] })
+  runtime.registerSource({ sourceId: 'ordinary', plugin: 'test', revision: 1, rules: [eventRule('tool.succeeded', { id: 'ordinary', event: { tool: 'probe' } })] })
   assert.deepEqual(await collect(), [])
   const source = { sourceId: 'scoped', plugin: 'test', revision: 1, scope: { sessionIds: ['other'] },
     rules: [stickyRule({ lifetime: 2, cooldown: 0 })] }
@@ -135,10 +134,8 @@ test('sticky 激活只在开启时占用一次共享额度', async t => {
   const runtime = createReminderRuntime({ config, execute: port,
     updateClaims: async change => { book = change(book); return book } })
   t.after(() => runtime.close())
-  runtime.registerSource({ sourceId: 'sticky-quota', plugin: 'test', revision: 1, rules: [{
-    format: 'reminder/v4', id: 'sticky', on: 'tool.succeeded', text: 'STICKY_NOTICE', when: { tool: 'probe' },
-    effect: { kind: 'remind', deliver: { model: { once: 'none',
-      sticky: { lifetime: 3, cooldown: 0 }, shared: { reset: 'lifetime', lifetime: 'cap', limit: 1 } } } } }] })
+  runtime.registerSource({ sourceId: 'sticky-quota', plugin: 'test', revision: 1, rules: [eventRule('tool.succeeded', { id: 'sticky', event: { tool: 'probe' } }, { template: 'STICKY_NOTICE', delivery: { model: { once: 'none',
+      sticky: { lifetime: 3, cooldown: 0 }, shared: { reset: 'lifetime', lifetime: 'cap', limit: 1 } } } })] })
   await runtime.submit(probe('hit'))
   const delivered = await rounds(runtime, 3)
   assert.deepEqual(delivered, [['STICKY_NOTICE'], ['STICKY_NOTICE'], ['STICKY_NOTICE']])
@@ -147,10 +144,8 @@ test('sticky 激活只在开启时占用一次共享额度', async t => {
 })
 
 test('sticky 与 surface 去重互斥，none 必须与 sticky 同时出现', () => {
-  const base = { format: 'reminder/v4', id: 'r', on: 'tool.succeeded', text: 't', when: { tool: 'probe' } }
-  assert.equal(ReminderRule.safeParse({ ...base, effect: { kind: 'remind', deliver: { model: {
-    once: 'surface', sticky: { lifetime: 2, cooldown: 1 } } } } }).success, false)
-  assert.equal(ReminderRule.safeParse({ ...base, effect: { kind: 'remind', deliver: { model: { once: 'none' } } } }).success, false)
-  assert.equal(ReminderRule.safeParse({ ...base, effect: { kind: 'remind', deliver: { model: {
-    once: 'none', sticky: { lifetime: 2, cooldown: 1 } } } } }).success, true)
+  const base = (model: NonNullable<import('@leolee9086/dsh-rule-engine').ActionDeclaration['delivery']>['model']) => eventRule('tool.succeeded', { id: 'r', event: { tool: 'probe' } }, { delivery: { model } })
+  assert.equal(ReminderRule.safeParse(base({ once: 'surface', sticky: { lifetime: 2, cooldown: 1 } })).success, false)
+  assert.equal(ReminderRule.safeParse(base({ once: 'none' })).success, false)
+  assert.equal(ReminderRule.safeParse(base({ once: 'none', sticky: { lifetime: 2, cooldown: 1 } })).success, true)
 })

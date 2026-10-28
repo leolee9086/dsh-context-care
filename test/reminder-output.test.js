@@ -1,8 +1,9 @@
+import { createBoundedMatcher } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
+import { eventRule } from './event-rule.js'
 import assert from 'node:assert/strict'
-import { createOutputStream } from '../src/reminder-runtime/output-stream.js'
-import { createReminderRuntime } from '../src/reminder-runtime/index.js'
-import { createBoundedMatcher } from '../src/bounded-matcher.js'
+import { createOutputStream } from '../lib/reminder-runtime/output-stream.js'
+import { createReminderRuntime } from './reminder-runtime-fixture.ts'
 
 let revision = 1
 const frame = (attemptId, chunk) => ({ type: 'chunk', time: Date.now(), attemptId, revision: ++revision, chunk })
@@ -28,18 +29,15 @@ test('output stream joins deltas per readable block and isolates attempts and bl
   ])
 })
 
-test('v3 output literal, keyword and regex rules parse and match only declared block types', async t => {
+test('output literal, keyword and regex rules parse and match only declared block types', async t => {
   const matcher = createBoundedMatcher({ timeoutMs: 2000 })
   const runtime = createReminderRuntime({ config: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 },
     execute: (input, signal, timing) => matcher.detect(input, signal, timing) })
   t.after(async () => { await runtime.close(); await matcher.close() })
   runtime.registerSource({ sourceId: 'output-rules', plugin: 'test', revision: 1, rules: [
-    { format: 'reminder/v4', id: 'reasoning', on: 'assistant.output', text: 'reasoning hit',
-      when: { blockTypes: ['reasoning'], pattern: { kind: 'literal', text: '秘密' } }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } },
-    { format: 'reminder/v4', id: 'keywords', on: 'assistant.output', text: 'keywords hit',
-      when: { blockTypes: ['text'], pattern: { kind: 'keywords', values: ['foo', 'bar'], mode: 'all' } }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } },
-    { format: 'reminder/v4', id: 'regex', on: 'assistant.output', text: 'regex hit',
-      when: { blockTypes: ['text'], pattern: { kind: 'regex', regex: 'x[0-9]+' } }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } },
+    eventRule('assistant.output', { id: 'reasoning', event: { blockTypes: ['reasoning'], pattern: { kind: 'literal', text: '秘密' } } }, { template: 'reasoning hit' }),
+    eventRule('assistant.output', { id: 'keywords', event: { blockTypes: ['text'], pattern: { kind: 'keywords', values: ['foo', 'bar'], mode: 'all' } } }, { template: 'keywords hit' }),
+    eventRule('assistant.output', { id: 'regex', event: { blockTypes: ['text'], pattern: { kind: 'regex', regex: 'x[0-9]+' } } }, { template: 'regex hit' }),
   ] })
   for (const [index, type, text] of [[0, 'text', '秘密 foo x-no-number'], [1, 'reasoning', 'foo bar x42']]) {
     await runtime.submit({ type: 'assistant.output', sessionId: 's', callId: `miss-${index}`, rootCallId: 'miss',

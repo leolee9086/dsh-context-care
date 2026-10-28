@@ -5,9 +5,8 @@ import type { CacheKey } from './session-cache.js'
 export const compareDiagnosticRecords = (left: { at: number; key: string }, right: { at: number; key: string }) => left.at - right.at || left.key.localeCompare(right.key)
 export interface DiagnosticRecordDelta<R> { readonly added: readonly R[]; readonly removed: readonly R[]; readonly order?: readonly R[] }
 export interface DiagnosticRecordFeed<R> { consume(cursor: object): DiagnosticRecordDelta<R> }
-export type DiagnosticRecords<R> = readonly R[] | DiagnosticRecordFeed<R>
-export type DiagnosticRecordInput<R> = readonly R[] | DiagnosticRecordDelta<R>
-export const isDiagnosticDelta = <R>(records: DiagnosticRecordInput<R>): records is DiagnosticRecordDelta<R> => !Array.isArray(records)
+export type DiagnosticRecords<R> = DiagnosticRecordFeed<R>
+export type DiagnosticRecordInput<R> = DiagnosticRecordDelta<R>
 const emptyDelta: DiagnosticRecordDelta<never> = { added: [], removed: [] }
 
 /** The owning Session cache contains this feed. Consumers hold only their cursor;
@@ -53,19 +52,6 @@ export function createDiagnosticRecordFeed<R>(compare: (left: R, right: R) => nu
       reader.pending.clear()
       return { added, removed }
     },
-  }
-}
-
-/** Whole-list compatibility callers may replace arrays; production passes deltas. */
-export function createDiagnosticRecordChanges<R>() {
-  let previous: readonly R[] | undefined
-  return (records: DiagnosticRecordInput<R>): DiagnosticRecordDelta<R> => {
-    if (isDiagnosticDelta(records)) return records
-    if (records === previous) return emptyDelta
-    const before = new Set(previous), after = new Set(records)
-    const delta = { added: records.filter(record => !before.has(record)), removed: (previous ?? []).filter(record => !after.has(record)), order: records }
-    previous = records
-    return delta
   }
 }
 
@@ -147,54 +133,35 @@ export function createDiagnosticIndex<T>(): DiagnosticIndex<T> {
 /** Keep relation buckets stable across immutable record-list revisions. */
 export function createDiagnosticRelations<R, K>(keys: (record: R) => readonly K[], compare?: (left: R, right: R) => number) {
   const indexed = new Map<R, readonly K[]>(), buckets = new Map<K, Set<R>>()
-  let order = new Map<R, number>(), deltaOrder = false
+  let order = new Map<R, number>(), sequence = 0, explicitOrder = false
   const views = new Map<K, readonly R[]>()
   return {
-    update(records: DiagnosticRecordInput<R>, rekey = false): ReadonlySet<K> {
-      if (isDiagnosticDelta(records)) {
-        deltaOrder = true
-        const changed = new Set<K>()
-        for (const record of records.removed) {
-          for (const key of indexed.get(record) ?? []) {
-            const bucket = buckets.get(key)!; bucket.delete(record); if (!bucket.size) buckets.delete(key); changed.add(key)
-          }
-          indexed.delete(record); order.delete(record)
-        }
-        for (const record of records.added) {
-          const selected = [...new Set(keys(record))]; indexed.set(record, selected)
-          for (const key of selected) {
-            let bucket = buckets.get(key); if (!bucket) { bucket = new Set(); buckets.set(key, bucket) }
-            bucket.add(record); changed.add(key)
-          }
-        }
-        for (const key of changed) views.delete(key)
-        return changed
-      }
-      deltaOrder = false
-      const next = new Map(records.map((record, index) => [record, index])), changed = new Set<K>()
-      for (const [record, previous] of indexed) if (!next.has(record) || (rekey && (() => {
-        const selected = [...new Set(keys(record))]
-        return selected.length !== previous.length || selected.some((key, index) => key !== previous[index])
-      })())) {
-        for (const key of previous) { const bucket = buckets.get(key)!; bucket.delete(record); if (!bucket.size) buckets.delete(key); changed.add(key) }
-        indexed.delete(record)
-      }
-      for (const record of records) if (!indexed.has(record)) {
-        const selected = [...new Set(keys(record))]; indexed.set(record, selected)
-        for (const key of selected) { let bucket = buckets.get(key); if (!bucket) { bucket = new Set(); buckets.set(key, bucket) }; bucket.add(record); changed.add(key) }
-      }
-      // A list revision may reorder retained records. Absolute positions shift
-      // after unrelated inserts; invalidate only inversions inside a bucket.
-      const last = new Map<K, number>()
-      for (const record of records) {
-        const previous = order.get(record)
-        if (previous === undefined) continue
+    update(records: DiagnosticRecordInput<R>): ReadonlySet<K> {
+      const changed = new Set<K>()
+      for (const record of records.removed) {
         for (const key of indexed.get(record) ?? []) {
+          const bucket = buckets.get(key)!; bucket.delete(record); if (!bucket.size) buckets.delete(key); changed.add(key)
+        }
+        indexed.delete(record); order.delete(record)
+      }
+      for (const record of records.added) {
+        const selected = [...new Set(keys(record))]; indexed.set(record, selected)
+        if (!order.has(record)) order.set(record, sequence++)
+        for (const key of selected) {
+          let bucket = buckets.get(key); if (!bucket) { bucket = new Set(); buckets.set(key, bucket) }
+          bucket.add(record); changed.add(key)
+        }
+      }
+      if (records.order) {
+        explicitOrder = true
+        const next = new Map(records.order.map((record, index) => [record, index])), last = new Map<K, number>()
+        for (const record of records.order) for (const key of indexed.get(record) ?? []) {
+          const previous = order.get(record) ?? -1
           if ((last.get(key) ?? -1) > previous) changed.add(key)
           last.set(key, previous)
         }
+        order = next; sequence = next.size
       }
-      order = next
       for (const key of changed) views.delete(key)
       return changed
     },
@@ -214,7 +181,7 @@ export function createDiagnosticRelations<R, K>(keys: (record: R) => readonly K[
     },
     get(key: K): readonly R[] {
       let view = views.get(key)
-      if (!view) { view = [...(buckets.get(key) ?? [])].sort(deltaOrder && compare ? compare : ((a, b) => order.get(a)! - order.get(b)!)); views.set(key, view) }
+      if (!view) { view = [...(buckets.get(key) ?? [])].sort(!explicitOrder && compare ? compare : ((a, b) => order.get(a)! - order.get(b)!)); views.set(key, view) }
       return view
     },
   }
@@ -236,12 +203,12 @@ export function createDiagnosticPages<R, T, A>(history: SessionLog, types: reado
   const page = (session: Session, records: DiagnosticRecords<R>, query: PageQuery) => {
     using log = history.live(session)
     let state = history.cache.use(session, stateKey)
-    if ('consume' in records && state.records && state.records !== records) {
+    if (state.records && state.records !== records) {
       history.cache.invalidate(session, stateKey); state = history.cache.use(session, stateKey)
     }
     const added = log.select(types, state.through)
-    const input = 'consume' in records ? records.consume(state) : records
-    const changed = isDiagnosticDelta(input) ? input.added.length + input.removed.length > 0 : state.records !== records
+    const input = records.consume(state)
+    const changed = input.added.length + input.removed.length > 0 || input.order !== undefined
     if (!state.index || added.length || changed) {
       try { state.index = state.update(input, added) }
       catch (error) {

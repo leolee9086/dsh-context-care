@@ -1,8 +1,9 @@
+import { compileSnapshotCondition as compileReminderCondition, evaluateSnapshotCondition as matchReminderCondition } from '@leolee9086/dsh-rule-engine'
+import type { TextCountResult, OutputEvent } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createOutputStream, type OutputEvent, type OutputFrame } from '../lib/reminder-runtime/output-stream.js'
-import { compileReminderCondition, matchReminderCondition } from '../lib/reminder-runtime/conditions.js'
-import type { TextCountResult } from '../lib/reminder-runtime/text-count.js'
+
+import { createOutputStream, type OutputFrame } from '../lib/reminder-runtime/output-stream.js'
 
 let revision = 1
 type Chunk = Extract<OutputFrame, { type: 'chunk' }>['chunk']

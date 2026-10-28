@@ -1,11 +1,12 @@
+import { createBoundedMatcher } from '@leolee9086/dsh-rule-engine'
 import test, { type TestContext } from 'node:test'
+import { eventRule } from './event-rule.js'
 import assert from 'node:assert/strict'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
 import { createSessionClaims } from '../src/reminder-runtime/session-claims.ts'
-import { createReminderRuntime, type ReminderRuleInput } from '../src/reminder-runtime/runtime.ts'
+import { createReminderRuntime } from './reminder-runtime-fixture.ts'
 import { createSessionDeliveries } from '../src/reminder-runtime/session-deliveries.ts'
-import { createBoundedMatcher } from '../src/bounded-matcher.js'
 
 interface Harness {
   open(t: TestContext): Promise<{ ctx: Context; session: Session; expirySession: Session }>
@@ -13,12 +14,8 @@ interface Harness {
 
 // Declaration and body read from SiYuan callout 20261014114116-cduofoj.
 // Only the fixture clock changes; this does not claim a live SiYuan delivery.
-const rule: ReminderRuleInput = {
-  format: 'reminder/v4', id: 'test-window-1140-1150', on: 'request.before',
-  text: '这是刚设置的 11:40–11:50 时间窗口测试提醒。收到这条提醒后，明确告诉哥哥：“我收到思源的时间窗口提醒了。”这条规则在当前会话的本次时间窗口只提醒一次。',
-  when: { timeWindow: { start: '11:40', end: '11:50', timeZone: 'local' } },
-  effect: { kind: 'remind', deliver: { model: { once: 'window' } } },
-}
+const rule = eventRule('request.before', { id: 'test-window-1140-1150', event: { timeWindow: { start: '11:40', end: '11:50', timeZone: 'local' } } },
+  { template: '这是刚设置的 11:40–11:50 时间窗口测试提醒。收到这条提醒后，明确告诉哥哥：“我收到思源的时间窗口提醒了。”这条规则在当前会话的本次时间窗口只提醒一次。', delivery: { model: { once: 'window' } } })
 const time = (day: number, hour: number, minute: number, second = 0, millisecond = 0) =>
   new Date(2026, 9, day, hour, minute, second, millisecond).getTime()
 
@@ -108,7 +105,7 @@ export function registerSiyuanWindowHostCases(harness: Harness): void {
     at = time(25, 11, 40)
     const first = await collect(session)
     assert.equal(first.length, 1, '11:40:00.000 starts the window')
-    assert.equal(first[0]!.content[0]!.text, rule.text)
+    assert.equal(first[0]!.content[0]!.text, rule.actions[0].template)
     assert.equal(first[0]!.source.contextCareTrace.ruleId, rule.id)
     session.append('user/message', first[0]!, { surfaceOp: 'append' })
     const firstSeq = session.snapshotEvents().find(event => event.type === 'user/message' && event.data.id === first[0]!.id)?.seq

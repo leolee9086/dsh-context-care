@@ -1,14 +1,13 @@
-import { z } from 'zod'
-import { parseCompletion } from './completion-observer.js'
+import { parseCompletion, CompletionConfig } from '@leolee9086/dsh-rule-engine'
+
 import { createSessionCompletions } from '../lib/session-completions.js'
 import { ensureSessionLog } from '../lib/session-log.js'
 
 /** Completion wording and delivery are projections of the native Session log. */
 export const name = 'context-care-completion'
 export const inject = ['sessions', 'contextCareRequests']
-export const Config = z.object({ cooldownMs: z.number().int().nonnegative().default(300000),
-  maxObservedChars: z.number().int().positive().default(65536), notifications: z.boolean().default(true),
-  maxDeliveries: z.number().int().positive().default(2) }).strict().prefault({})
+// Cordis consumes this entry's Config declaration to parse its plugin settings.
+export const Config = CompletionConfig.describe('Observe committed native Session output and deliver completion notifications')
 
 /** @param {import('@deepseek-ai/cordis').Context} ctx @param {import('zod').output<typeof Config>} config */
 export async function apply(ctx, config) {

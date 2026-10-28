@@ -1,6 +1,7 @@
+import { isDefiniteStorageFailure, PersistenceTimeoutError } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { isDefiniteStorageFailure, PersistenceTimeoutError } from '../lib/reminder-runtime/persistence.js'
+
 
 // The former fake save/execute scenarios are now exercised against the real
 // JSON backend in reminder-persistence-real.test.ts: serial late ACK, expired

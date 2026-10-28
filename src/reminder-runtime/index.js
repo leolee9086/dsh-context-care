@@ -1,29 +1,27 @@
+import { DeliveryConfig as ReminderConfig, createOutputInterrupt, shutdownEventRuntime as shutdownReminderRuntime, createBoundedMatcher, createTemplates, handoffQueuedDelivery, requestContext } from '@leolee9086/dsh-rule-engine'
+import { CapacitySettings } from '@leolee9086/dsh-rule-engine/catalog-capacity'
 // @ts-check
 /** @import { Context } from '@deepseek-ai/cordis' */
 /** @import { Agent } from '@deepseek-ai/dsh-agent' */
 /** @import { SessionId } from '@deepseek-ai/dsh-session' */
 /** @import {} from '@deepseek-ai/dsh-tools' */
 /** @import {} from '@deepseek-ai/dsh-storage-domain' */
-/** @import { createRuleControls } from '../rule-controls.js' */
-import { createReminderRuntime, ReminderConfig, REMINDER_SERVICE } from '../../lib/reminder-runtime/runtime.js'
-import { createOutputStream } from './output-stream.js'
-import { createOutputInterrupt } from '../../lib/reminder-runtime/interrupt.js'
+/** @import { createRuleControls } from '@leolee9086/dsh-rule-engine' */
+import { createReminderRuntime, REMINDER_SERVICE } from '../../lib/reminder-runtime/runtime.js'
+import { createOutputStream } from '../../lib/reminder-runtime/output-stream.js'
+
 import { createSessionIdentityResolver } from '../../lib/reminder-runtime/session-identity.js'
-import { shutdownReminderRuntime } from '../../lib/reminder-runtime/shutdown.js'
+
 import { availableParallelism } from 'node:os'
-import { createBoundedMatcher } from '../bounded-matcher.js'
-import { CapacitySettings } from '../reminder-capacity.js'
+
 import { releaseResources } from '../resource-cleanup.js'
 import { createSessionClaims } from '../../lib/reminder-runtime/session-claims.js'
 import { createSessionDeliveries } from '../../lib/reminder-runtime/session-deliveries.js'
 import { createToolEvents } from '../../lib/reminder-runtime/tool-events.js'
 import { nativeOutputAttempt } from '../../lib/reminder-runtime/native-output-events.js'
-import { createTemplates } from '../templates.js'
+
 import { ensureSessionLog } from '../../lib/session-log.js'
-export { createReminderRuntime, ReminderConfig, REMINDER_SERVICE }
-// Legacy schema is exported for standalone callers; the production Host never opens it.
-export { REMINDER_DOMAIN } from '../../lib/reminder-runtime/runtime.js'
-export { ReminderScope } from './schema.js'
+export { createReminderRuntime, REMINDER_SERVICE }
 
 /** @type {WeakMap<Context['storageDomain'], Promise<ReturnType<typeof createReminderRuntime>>>} */
 const serviceStarts = new WeakMap()
@@ -32,14 +30,15 @@ const serviceStarts = new WeakMap()
  * @param {Context} ctx
  * @param {unknown} input
  * @param {ReturnType<typeof createRuleControls>} controls
+ * @param {import('@leolee9086/dsh-rule-engine').Engine} engine
  */
-export async function ensureReminderService(ctx, input, controls) {
+export async function ensureReminderService(ctx, input, controls, engine) {
   const existing = ctx.get(REMINDER_SERVICE)
   if (existing) return existing
   const facility = ctx.storageDomain
   const starting = serviceStarts.get(facility)
   if (starting) return starting
-  const pending = startReminderService(ctx, input, controls, facility)
+  const pending = startReminderService(ctx, input, controls, facility, engine)
   serviceStarts.set(facility, pending)
   try { return await pending }
   finally { if (serviceStarts.get(facility) === pending) serviceStarts.delete(facility) }
@@ -55,25 +54,17 @@ async function handoffPending(ctx, runtime, sessionId, candidateIds) {
   const agent = ctx.get('agents')?.get(/** @type {SessionId} */ (sessionId))
   if (!agent) throw new Error('reminder-native-inbox-agent-unavailable')
   const history = ensureSessionLog(ctx)
-  const visible = history.messages(agent.session)
-  const messages = await runtime.queuePending({ sessionId, visible, candidateIds: [...candidateIds] })
-  const allowed = await runtime.filterMessages(sessionId, visible, messages, undefined, true)
-  const denied = messages.filter(message => !allowed.includes(message))
-  if (denied.length) await runtime.rollback(sessionId, denied)
-  if (!allowed.length) return
-  // Rollback and identity lookup can yield to a rule or control change. Recheck
-  // after both; no await separates this decision from native publication.
-  const latest = await runtime.filterMessages(sessionId, history.messages(agent.session), allowed, undefined, true)
-  if (latest.length !== allowed.length) { await runtime.rollback(sessionId, allowed); return }
-  for (const message of latest) agent.inject(message)
+  await handoffQueuedDelivery({ runtime, sessionId, candidateIds,
+    visible: () => history.messages(agent.session), publish: message => agent.inject(message) })
 }
 
 /** @param {Context} ctx
  * @param {unknown} input
  * @param {ReturnType<typeof createRuleControls>} controls
+ * @param {import('@leolee9086/dsh-rule-engine').Engine} engine
  * @param {Context['storageDomain']} facility
  */
-async function startReminderService(ctx, input, controls, facility) {
+async function startReminderService(ctx, input, controls, facility, engine) {
   const config = ReminderConfig.parse(input)
   const winner = ctx.get(REMINDER_SERVICE)
   if (winner) return winner
@@ -120,8 +111,8 @@ async function startReminderService(ctx, input, controls, facility) {
       readQueued: id => deliveries.queued(id),
       handoffPending: async (id, ids) => { await handoffPending(ctx, runtime, id, ids) },
       dispatches: true, execute: (input, signal, timing) => matcher.detect(input, signal, timing), report: error => ctx.logger.warn('reminder:', error),
-      eligible: (id, source, rule) => controls.enabled(id, source, rule, 'model'),
-      epoch: (id, source, rule) => controls.epoch(id, source, rule) })
+      eligible: (id, source, rule, action) => controls.enabled(id, source, rule, action),
+      epoch: (id, source, rule) => controls.epoch(id, source, rule) }, engine)
     resources.unshift(['reminder-runtime', () => shutdownReminderRuntime(runtime)])
     const interrupt = createOutputInterrupt({ runtime, maxInterrupts: config.maxInterruptsPerTurn,
       sessionId: (/** @type {Agent} */ agent) => String(agent.session.id), visible: agent => history.messages(agent.session),
@@ -136,7 +127,7 @@ async function startReminderService(ctx, input, controls, facility) {
       submit: event => runtime.submit(event),
       afterSubmit: interrupt,
       report: error => ctx.logger.warn('reminder:', error),
-      enabled: id => runtime.controlCatalog(id).some(source => source.rules.some(rule => rule.definition?.on === 'assistant.output')) })
+      enabled: id => runtime.observesEvent(id, 'assistant.output') })
     resources.unshift(['reminder-output-stream', () => outputStream.close()])
     ctx.effect(() => () => releaseResources(resources, undefined))
     ctx.provide(REMINDER_SERVICE, runtime)
@@ -172,19 +163,12 @@ async function startReminderService(ctx, input, controls, facility) {
       if (!exec.agent) return
       if (toolEvents.waitForCommit(exec.agent.session, String(exec.callId))) return
       const visible = history.tail(exec.agent.session, config.maxContextMessages)
-      let chars = config.maxContextChars
-      const messages = []
-      for (const message of (config.maxContextMessages ? visible.slice(-config.maxContextMessages) : []).reverse()) {
-        const text = message.content.filter(block => block.type === 'text').map(block => block.text).join('\n')
-        messages.unshift({ role: message.role, text: text.slice(-chars || text.length), truncated: text.length > chars })
-        if (chars === 0) messages[0].text = ''
-        chars = Math.max(0, chars - text.length)
-      }
+      const context = requestContext(visible, config)
       const event = { type: result.isError ? 'tool.failed' : 'tool.succeeded',
         sessionId: String(exec.agent.session.id), name: exec.name, arguments: exec.arguments,
         ...(result.isError ? { error: { code: result.error?.info?.code } } : {}),
         callId: String(exec.callId), rootCallId: String(exec.rootCallId ?? exec.callId),
-        context: { messages, truncated: messages.length < visible.length || messages.some(message => message.truncated) } }
+        context }
       void runtime.submit(event, exec.signal).catch(error => ctx.logger.warn('reminder:', error))
     })
     ctx.on('agent/assistant-stream', ({ agent, frame }) => {

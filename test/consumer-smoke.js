@@ -27,7 +27,9 @@ runInNewContext(await readFile(resolve(root, 'lib/client.js'), 'utf8'), {
   fetch, setInterval, clearInterval, setTimeout, clearTimeout, AbortController,
 })
 assert.equal(typeof client.apply, 'function')
-assert.equal(manifest.dependencies['@leolee9086/dsh-rule-engine'], '0.3.0')
+assert.equal(manifest.dependencies['@leolee9086/dsh-rule-engine'], expected.dependencies['@leolee9086/dsh-rule-engine'])
+const installedEngine = packageRequire('@leolee9086/dsh-rule-engine/package.json')
+assert.equal(installedEngine.version, manifest.dependencies['@leolee9086/dsh-rule-engine'])
 const names = await readdir(resolve(root, 'src'))
 assert.equal(names.includes('vendor'), false)
 for (const file of names.filter(name => name.endsWith('.js'))) {
@@ -39,7 +41,8 @@ for (const file of names.filter(name => name.endsWith('.js'))) {
   for (const [, target] of source.matchAll(/(?:from\s+|import\s*)['"]([^'"]+)['"]/g)) if (target.startsWith('.')) await readFile(resolve(root, 'src', target))
 }
 const engine = await import(pathToFileURL(packageRequire.resolve('@leolee9086/dsh-rule-engine')).href)
-const { modelRequestBlocks, setRequestBlock } = await import(pathToFileURL(resolve(root, 'src/request-blocks.js')).href)
+const { modelRequestBlocks } = await import(pathToFileURL(resolve(root, 'src/request-blocks.js')).href)
+const { setRequestBlock, createBoundedMatcher } = engine
 const { extractRawBlocks } = await import(pathToFileURL(packageRequire.resolve('@leolee9086/dsh-session-blocks')).href)
 // Exercise pure immutable traversal data; Host projection ownership is covered by native integration tests.
 const message = { id: 'm7', role: 'assistant', content: [
@@ -57,7 +60,6 @@ assert.equal(request.messages[0].content[1].content[0].text, 'nested replacement
 assert.equal(message.content[1].content[0].text, 'nested original')
 assert.equal(block.text, '  ORIGINAL\n')
 assert.throws(() => { block.raw.text = 'changed' }, TypeError)
-const { createBoundedMatcher } = await import(pathToFileURL(resolve(root, 'src/bounded-matcher.js')).href)
 const matcher = createBoundedMatcher()
 try {
   const rule = engine.normalizeRuleV2({ schemaVersion: 2, sourceId: 'public-consumer', id: 'match', revision: 1,

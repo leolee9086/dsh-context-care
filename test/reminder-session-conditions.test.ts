@@ -1,9 +1,11 @@
+import { normalizeScope, matchesScope, createBoundedMatcher } from '@leolee9086/dsh-rule-engine'
+import type { RecipientFacts, RecipientCondition, ClaimBookValue, EventRuntimeOptions as RuntimeOptions } from '@leolee9086/dsh-rule-engine'
+
 import test, { after, type TestContext } from 'node:test'
+import { eventRule } from './event-rule.js'
 import assert from 'node:assert/strict'
-import { createReminderRuntime, type RuntimeOptions, type ReminderSource } from '../lib/reminder-runtime/runtime.js'
-import { normalizeScope, matchesScope, type RecipientFacts, type RecipientCondition } from '../lib/reminder-runtime/scope.js'
-import type { ClaimBookValue } from '../lib/reminder-runtime/claims.js'
-import { createBoundedMatcher } from '../src/bounded-matcher.js'
+import { createReminderRuntime, type ReminderSource } from './reminder-runtime-fixture.ts'
+
 const matcher = createBoundedMatcher({ timeoutMs: 2000, startupMs: 5000 })
 after(async () => { await matcher.close() })
 const port = (input: Parameters<typeof matcher.detect>[0], signal: AbortSignal, timing: Parameters<typeof matcher.detect>[2]) =>
@@ -12,11 +14,10 @@ const port = (input: Parameters<typeof matcher.detect>[0], signal: AbortSignal, 
 const name: RecipientCondition = { kind: 'compare', field: 'session.agentPresetName', op: 'eq', value: '织' }
 const model: RecipientCondition = { kind: 'compare', field: 'session.model', op: 'contains', value: 'gpt-' }
 const source: ReminderSource = { sourceId: 'notes', plugin: 'siyuan', revision: 1,
-  scope: { condition: name }, rules: [{ format: 'reminder/v4', id: 'notes-first', on: 'tool.succeeded',
-    scope: { condition: model }, text: '内部笔记写入思源。', when: { tool: 'write' }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } }] }
+  scope: { condition: name }, rules: [eventRule('tool.succeeded', { id: 'notes-first', recipient: { condition: model }, event: { tool: 'write' } }, { template: '内部笔记写入思源。' })] }
 const event = (callId: string, sessionId = 's') => ({ sessionId, callId, rootCallId: callId, name: 'write' })
 const facts = (): RecipientFacts => ({ agentPreset: 'zhi', agentPresetName: '织', provider: 'route', model: 'gpt-6' })
-function fixture(t: TestContext, options: RuntimeOptions) {
+function fixture(t: TestContext, options: Partial<RuntimeOptions>) {
   const runtime = createReminderRuntime({ execute: port, ...options })
   t.after(() => runtime.close())
   return runtime
@@ -49,7 +50,7 @@ test('会话条件拒绝错拼字段、无界匹配和过大条件树', () => {
     { kind: 'regex', field: 'session.model', pattern: '.*' }, { kind: 'any', conditions: [] },
     { kind: 'compare', field: 'session.model', op: 'exists', value: true },
     { kind: 'all', conditions: Array.from({ length: 65 }, () => name) },
-  ]) assert.throws(() => normalizeScope({ condition }), TypeError)
+  ]) assert.throws(() => normalizeScope({ condition }), /dsh-rule-engine: recipient: condition/)
   let nested: RecipientCondition = name
   for (let index = 0; index < 17; index++) nested = { kind: 'not', condition: nested }
   assert.throws(() => normalizeScope({ condition: nested }), /depth/)
@@ -108,7 +109,7 @@ test('共享额度保存期间模型切换会释放名额，其它合适会话�
       return book
     } })
   runtime.registerSource({ ...source, rules: source.rules.map(rule => ({ ...rule,
-    effect: { kind: 'remind', deliver: { model: { once: 'surface', shared: { reset: 'lifetime', lifetime: 'test', limit: 1 } } } } })) })
+    actions: rule.actions.map(action => ({ ...action, delivery: { model: { once: 'surface', shared: { reset: 'lifetime', lifetime: 'test', limit: 1 } } } })) })) })
   await Promise.all([runtime.submit(event('s-hit')), runtime.submit(event('other-hit', 'other'))])
   assert.deepEqual(await runtime.collect({ sessionId: 's', visible: [] }), [])
   assert.equal(book.buckets.length, 0)
@@ -126,7 +127,7 @@ test('一或多个会话共享消费只计合适接收者，额度不会按模�
     const runtime = fixture(t, { resolveIdentity: async id => id === 'excluded' ? { ...facts(), model: 'other' } : facts(),
       updateClaims: async change => { book = change(book); return book } })
     runtime.registerSource({ ...source, rules: source.rules.map(rule => ({ ...rule,
-      effect: { kind: 'remind', deliver: { model: { once: 'surface', shared: { reset: 'lifetime', lifetime: 'test', limit } } } } })) })
+      actions: rule.actions.map(action => ({ ...action, delivery: { model: { once: 'surface', shared: { reset: 'lifetime', lifetime: 'test', limit } } } })) })) })
     const ids = ['a', 'b', 'c', 'excluded']
     await Promise.all(ids.map(id => runtime.submit(event(id, id))))
     const messages = await Promise.all(ids.map(sessionId => runtime.collect({ sessionId, visible: [] })))

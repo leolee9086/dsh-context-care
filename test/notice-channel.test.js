@@ -1,6 +1,7 @@
+import { createNoticeChannel } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createNoticeChannel, NOTICE_CHANNEL } from '../src/notice-channel.js'
+import { NOTICE_CHANNEL } from '../src/notice-channel.js'
 
 test('注册一个源，collect 拿到它产出的通知', async () => {
   const channel = createNoticeChannel()

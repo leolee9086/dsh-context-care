@@ -6,11 +6,11 @@
 
 参考 S-forge MAGI 的指标曲线和 Codex 的上下文生命周期设计，以独立 Cordis 插件接入，不修改 Harness、S-forge 或 Codex 源码。本文档以中文为主。
 
-> 版本：`v0.14.17`，面向官方 DSH `0.2.0-rc.2` API，并已用桌面 `0.2.1-rc.3` 原生产物完成共享读取兼容检查。配合 DSH 思源对接插件 `dsh-plugin-siyuan v0.7.0`，支持独立规则来源、当前预设名称与模型条件，以及跨会话共享次数。通过固定 GitHub 标签安装，标签携带客户端及提醒运行时构建产物。
+> 版本：`v0.14.18`，面向官方 DSH `0.2.0-rc.2` API，并已用桌面 `0.2.1-rc.3` 原生产物完成共享读取兼容检查。配合 DSH 思源对接插件 `dsh-plugin-siyuan v0.8.0`，支持独立规则来源、当前预设名称与模型条件，以及跨会话共享次数。通过固定 GitHub 标签安装，标签携带客户端及提醒运行时构建产物。
 
 ## 指标与行为
 
-疲劳度采用 `min(100, 100 × (上下文估算量 / 策略预算)^1.5)`；唤醒值采用 `min(100, 100 × sqrt(保留历史估算量 / (模型容量 / 3)))`。默认按 30、60、85 分段；界面显示 0–100% 数值（最多一位小数）和等级，模型正文仍只报告等级，不显示剩余 token 倒计时。疲劳度四段依次为绿、蓝、橙、红；唤醒值依次为橙、蓝、青绿、绿。未校准使用灰色。容量取最近记录请求的真实路由模型；尚无容量时显示“未校准”。疲劳度以完整请求压力为基础，唤醒值以保留消息量为基础，因此工具定义和系统提示不会被当成丰富的历史经验。状态与自动维护使用插件自己的输入计价：公开 `tokenMeter.estimateMessage` 提供固定文本估算，保留 surface、工具定义和本轮待进入的输入共用冻结的计价依据，输出计费量不参与下一次输入预算。插件从 Session 中符合条件且 header 匹配的成功请求校准文本、schema 和 framing；热路径复用本次输入的标量计量，空缓存时从历史表层及已记录的请求专属提示和改写结果还原输入；没有样本时文本倍率为 1。图片视觉价格不重复乘倍率，有效大倍率不截断。旧 `providerUsageRatio` 配置只保留迁移提示。此版本使用官方 0.2.0-rc.2 已有接口，不要求新增 `measureInput` / `priceMessages` 方法或修改宿主。
+疲劳度采用 `min(100, 100 × (上下文估算量 / 策略预算)^1.5)`；唤醒值采用 `min(100, 100 × sqrt(保留历史估算量 / (模型容量 / 3)))`。默认按 30、60、85 分段；界面显示 0–100% 数值（最多一位小数）和等级，模型正文仍只报告等级，不显示剩余 token 倒计时。疲劳度四段依次为绿、蓝、橙、红；唤醒值依次为橙、蓝、青绿、绿。未校准使用灰色。容量取最近记录请求的真实路由模型；尚无容量时显示“未校准”。疲劳度以完整请求压力为基础，唤醒值以保留消息量为基础，因此工具定义和系统提示不会被当成丰富的历史经验。状态与自动维护使用插件自己的输入计价：公开 `tokenMeter.estimateMessage` 提供固定文本估算，保留 surface、工具定义和本轮待进入的输入共用冻结的计价依据，输出计费量不参与下一次输入预算。插件从 Session 中符合条件且 header 匹配的成功请求校准文本、schema 和 framing；热路径复用本次输入的标量计量，空缓存时从历史表层及已记录的请求专属提示和改写结果还原输入；没有样本时文本倍率为 1。图片视觉价格不重复乘倍率，有效大倍率不截断。此版本使用官方 0.2.0-rc.2 已有接口，不要求新增 `measureInput` / `priceMessages` 方法或修改宿主。
 
 `context_status` 查询状态。`context_rest` 提示建议续接笔记为 1000–8000 个 UTF-16 字符，内部默认保留 10000 字符的宽限；笔记排入持久化收件箱；当前工具批次完成后，在下一次请求准备边界执行一次压缩。笔记、近期历史、工具调用与结果配对均保留。它读取预设 compaction provider 的公开摘要配置，在插件内执行摘要事务；自定义提供方未声明 LLM 摘要配置时仍调用其执行接口。摘要保留原记录并让任务继续。容量未知时，主动请求仍选择历史前缀，按显式 `retainTokens` 保留尾部；未设置时保留最近完整单元，再交给摘要路由或自定义 provider 处理实际输入。自动维护在可算出压力阈值时启动。摘要指令分别记录原始明确要求、执行者的实现选择、推测和完成状态，并依据最新纠正更新来源归属。
 
@@ -54,19 +54,21 @@ Host 行 `dsh-context-care/requests` 通过官方 `llm/stream` waterfall 拦截�
 
 ## 规则提醒与晚间休息
 
-规则入口只接受 `reminder/v4`。`on` 区分工具成功、指定错误码的工具失败、自然请求、输出、工具执行前和会话事件；`effect` 区分提醒与工具阻断，两者通过 `effect.deliver` 声明投递方式。自然请求 `request.before` 的 `when` 支持 `timeWindow: { start: "23:00", end: "06:00", timeZone: local }`、`humanActivity: { withinSeconds: 300 }` 和可选条件树 `condition`。时间采用 Host 本机时区，开始包含、结束不包含；两个时间必须不同。近期真人输入根据持久入队事件的 `source.kind: user` 与首次入队时间确定；插件消息、自动续跑和继承的 fork 历史不刷新在场时间。人工审批暂未作为在场证据。
+规则领域统一使用 `@leolee9086/dsh-rule-engine@0.8.0`。同步通知、请求改写、文档/条目和事件提醒复用同一 Engine，条件树、来源、动作身份与提交策略由库持有；Host 连接原生 Session、工具审批、存储 ACK 和实际交付。请求/显示同时支持原坐标补丁与 `transform` 顺序文本动作，保留酒馆宏、捕获/trim、深度和编辑条件。`registerCondition` / `registerAction` 提供版本化编译扩展，能力目录包含参数 schema；替换/卸载会使依赖该能力的计划失效。架构、扩展与验收见[统一引擎迁移验收](docs/unified-engine-migration.md)。
 
-`effect.deliver.model.once: window` 要求声明时间窗口，在当前会话、来源和规则身份内每个窗口最多投递一次。跨午夜按开始日期归属；正文编辑、压缩、候选清理和重启保留去重，次晚可重新提醒，即使上晚正文仍可见。窗口依据原生提醒提交和待投递 inbox 消息重建；仅在内存中准备的预约可回滚，已提交的窗口事实不受候选缓存清理影响。`surface` 沿用可见上下文去重。
+规则入口接受引擎统一的 `schemaVersion: 2` 声明。`on` 是阶段数组，`match` 是统一条件树，`actions` 可以声明多个有独立 ID 的动作；通知正文在动作 `template`，投递策略在 `delivery.model`，执行前拒绝在 `deny: { dangerous: true, reason }`。`event` 描述工具名、参数、错误码、输出模式与原生事件名；自然请求 `request.before` 支持 `event.timeWindow: { start: "23:00", end: "06:00", timeZone: local }` 与 `event.humanActivity: { withinSeconds: 300 }`。旧 `reminder/v1` 至 `reminder/v4` 不执行，来源插件需要直接提交统一声明。已提交消息中的旧字段仅读作投递、窗口和配额事实。时间采用 Host 本机时区，开始包含、结束不包含；两个时间必须不同。近期真人输入根据持久入队事件的 `source.kind: user` 与首次入队时间确定；插件消息、自动续跑和继承的 fork 历史不刷新在场时间。人工审批暂未作为在场证据。
+
+`delivery.model.once: window` 要求声明时间窗口，在当前会话、来源和规则身份内每个窗口最多投递一次。跨午夜按开始日期归属；正文编辑、压缩、候选清理和重启保留去重，次晚可重新提醒，即使上晚正文仍可见。窗口依据原生提醒提交和待投递 inbox 消息重建；仅在内存中准备的预约可回滚，已提交的窗口事实不受候选缓存清理影响。`surface` 沿用可见上下文去重。每个动作的 `cooldownMs` 限制新激活，激活时间随原生交接保存；重启恢复同一时钟，sticky 已激活的续投不受新激活冷却拦截。
 
 生产 Host 不再打开、读取或续写 `context_care_reminders`，旧候选文件保持原样，包含旧格式或损坏数据也不参与启动。规则定义与原生 Session 决定恢复；候选、seen、窗口和 sticky 数组只是可丢弃的内存投影。通过独立 `createReminderRuntime` 显式接入旧 writer 的调用方仍保留原存储兼容接口，该接口不参与生产 Host 的投递。
 
 ### 工具阻断的边界
 
-`effect.kind: deny-tool` 只在 `on: tool.before-execute` 上成立，规则用 `when.tool` 指定工具名，命中时该次调用在工具体执行前被拒，拒绝理由作为错误结果回到模型，工具本身不会运行。**没有命中的工具调用照常执行**：本会话规则里没有适用项时，评估结论就是放行，而不是“缺票据所以拒绝”。
+通知动作的 `deny` 只在 `stage: tool.before-execute` 上成立，规则用 `event.tool` 指定工具名，命中时该次调用在工具体执行前被拒，拒绝理由作为错误结果回到模型，工具本身不会运行。**没有命中的工具调用照常执行**：本会话规则里没有适用项时，评估结论就是放行，而不是“缺票据所以拒绝”。
 
 票据用于把异步评估和同步守卫对齐，按注册表生成的执行令牌关联，在守卫读取后结算。已完成结论没有额外的时间有效期；后续 hook 或审批等待不会把它变成“评估已过期”。规则超时只约束实际评估，缺票据、未完成评估和服务关闭仍明确拒绝。准备阶段抛出的异常保留原始 Error、cause 和堆栈，工具结果包含阶段及原始消息；只有实际身份查询失败才归入 identity，原生记录读取与解析分别标记，未分类异常明确显示 unclassified。命中拒绝规则使用规则自己的理由，与准备故障分开报告。
 
-存在 `deny-tool` 时，执行前规则的新增、替换或卸载会让**已在途**的票据失效，要求该次调用重新评估；之后的调用照常评估。执行前的纯提醒也可能通过优先级、互斥组影响拒绝结果，因此保留这种检查。其它事件阶段的提醒来源刷新不会作废工具票据；没有拒绝规则时，纯提醒刷新也不会阻断工具。
+存在动作 `deny` 时，执行前规则的新增、替换或卸载会让**已在途**的票据失效，要求该次调用重新评估；之后的调用照常评估。执行前的纯提醒也可能通过优先级、互斥组影响拒绝结果，因此保留这种检查。其它事件阶段的提醒来源刷新不会作废工具票据；没有拒绝规则时，纯提醒刷新也不会阻断工具。
 
 待投递提醒和正在准备的请求使用各自的生命周期：来源**新增**不会作废它们，来源**移除**会撤销依赖该来源的计划。工具票据则按上面的执行前授权边界判断变化。
 
@@ -80,17 +82,17 @@ Host 行 `dsh-context-care/requests` 通过官方 `llm/stream` waterfall 拦截�
 
 已有 `/requests` Host 行提供 `reminderRules`，通过服务注册表复用先注册的实例。规则来源可来自思源或其它插件；无需增加基础运行插件。思源来源由思源插件内部订阅和读取，使用其已启用核心及凭据，不受模型工具的逐端点审批设置影响；模型主动调用思源工具仍按原有端点策略审批。成功的工具结果触发判定，下一自然模型请求的 pre-step 收集提醒，参与原有预算维护并经原生 `user/message` 提交。
 
-TypeScript 来源插件可从 `dsh-context-care/reminders` 导入 `ReminderService`、`ReminderSource`、`ReminderRuleInput` 与 `ReminderSourceHandle` 类型；类型由实际运行时和校验 schema 派生。此入口也导出纯领域工厂 `createReminderRuntime`，不挂载 Host 服务。来源插件按使用的方法从 `ReminderService` 取 `Pick`，在 Cordis 服务增强中使用完整服务类型。
+TypeScript 来源插件可从 `dsh-context-care/reminders` 导入 `ReminderService`、`ReminderSource` 与 `ReminderSourceHandle` 类型；类型由实际运行时和校验 schema 派生。此入口也导出纯领域工厂 `createReminderRuntime`，不挂载 Host 服务。来源插件按使用的方法从 `ReminderService` 取 `Pick`，在 Cordis 服务增强中使用完整服务类型。
 
-来源插件使用 `ctx.inject(['reminderRules'], ...)`，在 effect 中调用 `registerSource({ sourceId, plugin, revision, rules, sessionId?, scope? }, { acceptSession? })`，持有返回的 `replace` / `dispose` 句柄。`validateRule(rule)` 只接受 `reminder/v4`。工具成功规则声明 `on: tool.succeeded`、`when.tool`、可选参数正则、提醒 `text`、`effect.kind: remind` 和 `effect.deliver.model.once: surface`；`priority` 默认 0，同组 `exclusiveGroup` 按优先级选取。未知字段报错。
+来源插件使用 `ctx.inject(['reminderRules'], ...)`，在 effect 中调用 `registerSource({ sourceId, plugin, revision, rules, sessionId?, scope? }, { acceptSession? })`，持有返回的 `replace` / `dispose` 句柄。`validateRule(rule)` 校验统一引擎声明。工具成功规则声明 `on: [tool.succeeded]`、`event.tool` 与可选参数正则、`match` 条件及 `actions` 中的通知动作，正文在 `template`、投递在 `delivery.model.once: surface`；`priority` 默认 0，同组 `exclusiveGroup` 按优先级选取。未知字段报错。
 
-只在工具超时后提醒时，使用 `on: tool.failed` 和 `when: { tool: 'pwsh', error: { code: 'TOOL_TIMEOUT' } }`。失败规则必须声明精确错误码，成功规则不能声明 `when.error`。Host 超时策略恢复上游信号并完成工具结算后，服务检查 `result.error.info.code`，在下一请求边界交付。成功文本或普通异常消息里出现 timeout 不会误触发。工具内部业务超时、网络超时与转后台任务可能使用不同结果语义，应按实际结构化错误码配置。
+只在工具超时后提醒时，使用 `on: [tool.failed]` 和 `event: { tool: 'pwsh', error: { code: 'TOOL_TIMEOUT' } }`。失败规则必须声明精确错误码，成功规则不能声明 `event.error`。Host 超时策略恢复上游信号并完成工具结算后，服务检查 `result.error.info.code`，在下一请求边界交付。成功文本或普通异常消息里出现 timeout 不会误触发。工具内部业务超时、网络超时与转后台任务可能使用不同结果语义，应按实际结构化错误码配置。
 
 ### 接收范围与跨会话额度
 
-来源与规则均可声明 `scope: { sessionIds: ['session-a'], agentPresets: ['writing'] }`。各列表内取并集，列表、条件及来源/规则范围间取交集；未声明维度不限，空列表拒绝。旧 `source.sessionId` 与 `acceptSession` 继续生效。思源插件的会话规则来源核心决定候选来源，与会话默认操作核心独立。
+来源使用 `scope`，规则使用 `recipient`，字段均为 `{ sessionIds: ['session-a'], agentPresets: ['writing'] }`。各列表内取并集，列表、条件及来源/规则范围间取交集；未声明维度不限，空列表拒绝。旧 `source.sessionId` 与 `acceptSession` 继续生效。思源插件的会话规则来源核心决定候选来源，与会话默认操作核心独立。
 
-`scope.condition` 可按当前预设名称与模型组合筛选：
+来源的 `scope.condition` 或规则的 `recipient.condition` 可按当前预设名称与模型组合筛选：
 
 ```yaml
 scope:
@@ -117,11 +119,11 @@ scope:
 
 条件沿用规则引擎的 `all` / `any` / `not` 与 `compare` 语法，比较支持 `eq`、`ne`、`contains`、`exists`，区分大小写。`exists` 不带 `value`，其它比较带字符串 `value`。缺失事实不满足比较（包括 `ne`）；可用 `not` 包裹 `exists` 明确匹配缺失。每组 1–64 项，整棵树最多 128 节点、深度 16，比较文本最多 4096 字符。`sessionIds` / `agentPresets` 列表最多 128 项，每项最多 256 字符。
 
-Host 从当前预设投影读取选择，再从注册表读取真实名称；模型按待生效选择、最近请求、当前默认模型的顺序读取。匹配、候选保存、额度预留及最终交付都会重新核对，事件附带的身份不覆盖 Host 事实。`scope.condition` 筛接收会话，`when.condition` 筛触发事件及分析器事实。
+Host 从当前预设投影读取选择，再从注册表读取真实名称；模型按待生效选择、最近请求、当前默认模型的顺序读取。匹配、候选保存、额度预留及最终交付都会重新核对，事件附带的身份不覆盖 Host 事实。`scope.condition` / `recipient.condition` 筛接收会话，`match` 筛触发事件及分析器事实。
 
 服务的 `catalog` 和 `filterMessages` 返回 Promise，调用方必须 `await`；界面通过异步目录显示当前适用规则。同步 `controlCatalog` 只为开关系统提供规则定义，投递仍由运行时按当前会话条件判定。
 
-在 `effect.deliver.model` 中添加 `shared: { reset: 'lifetime', lifetime: 'campaign-1', limit: 2 }`，可让符合范围的多个会话合计消费两次提醒。`limit: 1` 表示合计一次；自然请求和输出规则也可用 `shared: { reset: 'window', limit: 1 }`，要求声明 `when.timeWindow`。`once` 控制会话内去重，`shared` 控制跨会话总次数。共享身份包含来源、规则和生命周期名或窗口；编辑正文/revision、压缩和重启保留已消费次数。更换生命周期名或进入下一窗口才获得新额度。
+在 `delivery.model` 中添加 `shared: { reset: 'lifetime', lifetime: 'campaign-1', limit: 2 }`，可让符合范围的多个会话合计消费两次提醒。`limit: 1` 表示合计一次；自然请求和输出规则也可用 `shared: { reset: 'window', limit: 1 }`，要求声明 `event.timeWindow`。`once` 控制会话内去重，`shared` 控制跨会话总次数。共享身份包含来源、规则和生命周期名或窗口；编辑正文/revision、压缩和重启保留已消费次数。更换生命周期名或进入下一窗口才获得新额度。
 
 共享额度以 Session 中已提交的提醒消息为消费依据，以原生 inbox 中已经获得名额的待投递消息为预约。`queued: true` 记录已接纳但尚未预留的冻结匹配，不占共享名额；请求边界获准后使用原消息 ID 提交。名额不足时，实际 claim 仍保留可恢复的未交付匹配，下一自然请求重试，不自动注入额外轮次。尚未交给 inbox 的预约只在当前 Host 的串行调度中存在。服务不再打开、读写 `context_care_reminder_claims`，也不删除旧文件。空缓存通过原生 `sessionQuery` 读取完整逻辑会话目录（包括磁盘上的冷会话），不为恢复额度激活旧 Agent、不重新执行规则。`user/message` 提交才消费额度，接纳本身不消费；明确取消 inbox 消息释放未消费预约，已提交的消费不被迟到回滚释放。缺少原生会话查询或 inbox 投影时明确报告无法恢复，不把未知历史当作零消费。它不提供跨独立 Host 进程的原子协调。额度更新默认最多 8 MiB，可用 `reminders.maxClaimBytes` 调整。额度和候选更新均不等待旧侧表 ACK；可编辑的容量和开关设置仍由各自配置存储持有。
 
@@ -131,41 +133,47 @@ Host 从当前预设投影读取选择，再从注册表读取真实名称；模
 
 ### 输出模式与显式中止续接
 
-v4 示例（思源插件 0.8.0 可直接从 callout 贡献）：
+统一引擎声明示例（来源插件应原样贡献以下字段）：
 
 ```yaml
-format: reminder/v4
+schemaVersion: 2
+sourceId: example
 id: verify-completion
-on: assistant.output
-text: 请核对验收条件和实际结果，再报告完成情况。
-when:
+revision: 1
+on: [assistant.output]
+select:
+  view: original
+  roles: [assistant]
   blockTypes: [text, reasoning]
-  pattern:
-    kind: literal
-    text: 已全部完成
-effect:
-  kind: remind
-  deliver:
-    model:
-      once: surface
+match: { kind: always }
+event:
+  blockTypes: [text, reasoning]
+  pattern: { kind: literal, text: 已全部完成 }
+actions:
+  - id: model
+    kind: notify
+    stage: assistant.output
+    enabledDefault: true
+    template: 请核对验收条件和实际结果，再报告完成情况。
+    delivery:
+      model: { once: surface }
 ```
 
 `pattern` 还支持 `{ kind: keywords, values: [已完成, 全部通过], mode: any }`（`all` 要求同块包含所有词）或 `{ kind: regex, regex: '已经?全部完成', flags: u }`。普通文字与供应商提供的可读 reasoning 可匹配，隐藏内容不可读取；不同 attempt、块索引和类型不会拼接。默认命中保留内存候选，冷启动可从已提交的原生输出重建，下一次自然请求交付，空闲会话不会被唤醒。
 
-显式设置 `effect.deliver.model.interrupt: abort-resume` 时，服务完成范围、额度预留及最终有效性检查后取消当前 attempt，并用同一个提醒消息续接。`reminders.maxInterruptsPerTurn` 默认 1；设为 0 或额度耗尽时保留候选到下一自然请求。命中处理完成前 attempt 已结束，也使用普通边界交付。
+显式设置 `delivery.model.interrupt: abort-resume` 时，服务完成范围、额度预留及最终有效性检查后取消当前 attempt，并用同一个提醒消息续接。`reminders.maxInterruptsPerTurn` 默认 1；设为 0 或额度耗尽时保留候选到下一自然请求。命中处理完成前 attempt 已结束，也使用普通边界交付。
 
 输出检测使用每块最近 `maxStreamChars`（默认32768）字符的滑动窗口，每 `streamEveryChars`（256）字符或 `streamFlushMs`（50ms）派发；`maxStreamBlocks` 默认64。采样身份来自原生 step 或前次 assistant 结算位置，时间来自原生 chunk；定时器使用确定的截止时间，下一 chunk 先处理已到期的前缀。终止时间来自已提交的 `assistant/message` 或 `assistant/attempt`，没有结算的 abandoned 流不会产生完整采样。实时观察与原生流重放共用这一折叠逻辑。待处理队列受 `maxStreamPending`（32帧）和 `maxStreamPendingBytes`（4MiB）约束，块数或队列超限会记录诊断并停止该 attempt 检测，普通模型输出继续。模式所需跨度应小于保留窗口。完整范围、共享与超时 callout 见[思源规则教程](https://github.com/leolee9086/dsh-plugin-siyuan/blob/main/docs/规则编写教程.md#12-指定接收会话与共享次数)。
 
 `registerAnalyzer({ ref, revision, module, exportName? })` 注册本地 ESM 模块，默认导出 `analyze({ event, context })`，可以返回 Promise，结果为 JSON 对象。每个分析器每轮执行一次，读取相同基础输入；结果只在匹配阶段汇总到 `facts.<ref>`。例如返回 `{ language: 'ts' }` 的 `typescript` 分析器可以配合：
 
 ```yaml
-when:
-  tool: read
-  condition:
-    kind: compare
-    field: facts.typescript.language
-    op: eq
-    value: ts
+event: { tool: read }
+match:
+  kind: compare
+  field: facts.typescript.language
+  op: eq
+  value: ts
 ```
 
 已观察到原生 `tool/call` 的模型工具，从对应 `tool/result` 提交后触发成功/失败规则；PTC 子调用从 `tool/ptc-dispatch` 读取实际子调用、根调用、参数和错误码。触发时间取原生结果时间，顶层工具的匹配上下文不包含刚提交的结果，保留原有评估边界；结果一旦提交，即使执行期的取消信号稍后触发也不会抹掉其提醒。工具自己的 presentation meta 不被改写。未经过原生调用日志的程序化执行仍通过实时 `tools/result` 处理。
@@ -178,7 +186,7 @@ when:
 
 通常无需手动发布；生产观察器会从 Session 提交触发。已有生产者可用 `publishCustomEvent({ sessionId, name, native: { type: 'session-event', seq } })` 指定已提交位置；日志中的事件类型必须符合绑定，越界、继承边界外或缺少锚点的输入明确失败。旧参数 `eventId`、`at`、`facts` 不能覆盖原生身份、时间与 payload。无原生恢复端口的独立 runtime 仍提供旧无绑定接口供兼容使用。
 
-执行前规则也可绑定实际 `tool/call` 或 `tool/ptc-dispatch-start`，锚点类型为 `tool-call`，由调用记录恢复参数、时间和根调用。PTC 模式对直接名称的拒绝发生在前置管线之前：完整原生路由错误会排除该 before 触发，但真实 `tool.failed` 和原始事件仍保留；普通未知名称的 `UNKNOWN_TOOL` 不会被误排除。当前取消恢复保守跳过 `ABORTED_BEFORE_DISPATCH`；该码可能产生于钩子前或钩子后，不能据此断言钩子未发生。已完成的真实钩子匹配在结束时交给原生 inbox，钩子后取消可以凭该交接恢复；没有交接的 `ABORTED_BEFORE_DISPATCH` 不被猜成已完成钩子。重放只恢复模型提醒，deny-tool 的拒绝结论仍必须属于当前真实工具执行令牌。
+执行前规则也可绑定实际 `tool/call` 或 `tool/ptc-dispatch-start`，锚点类型为 `tool-call`，由调用记录恢复参数、时间和根调用。PTC 模式对直接名称的拒绝发生在前置管线之前：完整原生路由错误会排除该 before 触发，但真实 `tool.failed` 和原始事件仍保留；普通未知名称的 `UNKNOWN_TOOL` 不会被误排除。当前取消恢复保守跳过 `ABORTED_BEFORE_DISPATCH`；该码可能产生于钩子前或钩子后，不能据此断言钩子未发生。已完成的真实钩子匹配在结束时交给原生 inbox，钩子后取消可以凭该交接恢复；没有交接的 `ABORTED_BEFORE_DISPATCH` 不被猜成已完成钩子。重放只恢复模型提醒，`deny` 的拒绝结论仍必须属于当前真实工具执行令牌。
 
 输出流可从 `assistant/message`／`assistant/attempt` 的原生定时 chunks 恢复为 `assistant-output` 锚点采样；交接按输出 attempt 和规则抑制独立规则的重复 judge；同一次采样已有交接证据的互斥选择也不重复判定。不同前缀仍可有不同赢家：没有交接证据的互斥选择按原优先级重算，已交接规则只参与阻挡，不再生成候选。冷重放不会发起中断。旧版本的进程内输出 attemptId 由交接事件所在的原生游标、输出 turn／step 与规则身份关联到此前已开始的输出，后续重试仍有自己的身份。
 
@@ -192,7 +200,7 @@ Host 内 Session 访问集中于 `contextCareSessionLog`：live 直接使用原�
 
 请求规划的顶层工具配对信息按操作内最终不可变请求复用；级联复制只借未变消息的原始键信息，实际改写消息失效，非原始值 ID 按真正的复制结果重新读取。显式注入锚点在同一块索引内按需建立首匹配目录，保持原 Array.find 的首个 model 块语义，与补丁的末 ID 查找分开；没有显式锚点时不建目录。关闭操作同时释放这些投影，独立 preview 不缓存可变请求身份。
 
-显示规划在 Host 统一 SessionCache 内建立本次同步操作的规则首身份、显示首块/锚点和动作依赖结构，逐证据只计算自己的控制结果；成功或失败都立即清除，不跨 await 保留政策。过滤后代按原 path 前缀和重复编号顺序惰性分组，同一组不重复物化；注入沿原优先级与同位顺序一次合并输出，不逐条移动整个数组。当前偏好、UTF-16 基线、重复编号首匹配、可执行前缀和更早模板错误、签名/不透明过滤拒绝与原结果字节预算保持不变。替换候选仍沿原补丁引擎校验，后续性能审计继续，不以本轮代替整体完成。
+显示规划在 Host 统一 SessionCache 内建立本次同步操作的规则首身份、显示首块/锚点和动作依赖结构，逐证据只计算自己的控制结果；成功或失败都立即清除，不跨 await 保留政策。过滤后代按原 path 前缀和重复编号顺序惰性分组，同一组不重复物化；注入沿原优先级与同位顺序一次合并输出，不逐条移动整个数组。当前偏好、UTF-16 基线、重复编号首匹配、可执行前缀和更早模板错误、签名/不透明过滤拒绝与原结果字节预算保持不变。替换候选复用本次首块/同编号目录，只向原补丁引擎提交受影响编号的基线行与累计范围；无关块不重复校验，最终复用原引擎结果并重建原全局顺序。保留同编号重复行、跨块重复动作编号、优先级覆盖和全部原错误；同块累计范围仍由原引擎重评，后续性能审计继续，不以本轮代替整体完成。
 
 工作台来源目录只在本次同步调用归一化一份已校验文档并按来源分组，所有动作共用一份状态切面；严格匹配结束后和失活结算分别读取新鲜状态，同步控制目录不跨 await。失活成员检查复用最终已应用键集，原生投递确认回调按精确事件/动作对象对识别排队任务，并只建立一次条目目录。预览不确认状态、暂停与恢复的历史准入、冷却、真实预约/回滚/持久化 ACK 保持不变。显示与工具前置选择在各自同步批次内复用目录，matcher 后另建决策批次；实际投递仍现场复查。没有相关规则时不额外建目录，不新增独立长期文档/动作账本。
 
@@ -212,9 +220,11 @@ Host 内 Session 访问集中于 `contextCareSessionLog`：live 直接使用原�
 
 Worker 错误回执只传经过检查的名称和消息；judge 异常字段不合法或不可读取时，明确记录 `matcher-error-serialization-failed`，batch 其余规则仍按原预算和互斥顺序处理。连错误回执都无法发送时，线程实际报错退出，Host 等待退出后释放占用，不能静默留下永远等不到结果的任务。入口模块加载失败和启动期限超限均按启动故障报告。事件快照与规则结果复用 JSON 校验器，但每次仍执行原校验，不缓存判定结果或省掉字节限制。
 
-0.13.5 原生日志迁移已通过同树验收：`release:check` 461/461、完整 Source 178/178，默认 Worker 基准 18/18 语义一致且源码稳定。真实整 Host 卸载、原生取消和空缓存重放均通过；单规则 batch 仍慢于逐条，不宣称全面提速。完整结果与历史限制见 [reminder/v4 验收记录](docs/reminder-v4-acceptance.md)。
+0.13.5 原生日志迁移已通过同树验收：`release:check` 461/461、完整 Source 178/178，默认 Worker 基准 18/18 语义一致且源码稳定。真实整 Host 卸载、原生取消和空缓存重放均通过；单规则 batch 仍慢于逐条，不宣称全面提速。该数字只代表原版本；当前迁移结果与职责边界见 [统一引擎迁移验收](docs/unified-engine-migration.md)，历史结果见 [原提醒实现验收记录](docs/reminder-v4-acceptance.md)。
 
-模型投递按来源和规则身份去重，revision 不重置额度。当前 surface 或本次待注入消息已有提醒时抑制重复；fork 继承提醒同样抑制。原生 inbox 接纳的冻结匹配保留稳定 messageId，后续请求获得共享名额后交付，消费由实际 user/message 提交确认。空缓存重启从原生接纳、claim、取消和提交恢复，不读取旧候选文件。没有实时 Agent 时程序化交接明确拒绝，打开 Agent 后同一触发可重试。运行中来源替换会使旧候选失效，即使随后恢复相同正文也不会复活旧候选。已提交提醒继续按可见性去重，压缩移除后新事件可重新触发。
+模型投递按来源、规则和动作身份去重，revision 不重置额度。当前 surface 或本次待注入消息已有提醒时抑制重复；fork 继承提醒同样抑制。原生 inbox 接纳的冻结匹配保留稳定 messageId，后续请求获得共享名额后交付，消费由实际 user/message 提交确认。空缓存重启从原生接纳、claim、取消和提交恢复，不读取旧候选文件。没有实时 Agent 时程序化交接明确拒绝，打开 Agent 后同一触发可重试。运行中来源替换会使旧候选失效，即使随后恢复相同正文也不会复活旧候选。已提交提醒继续按可见性去重，压缩移除后新事件可重新触发。
+
+规则运行使用同一个 Host 拥有的 `createEngine` 实例：文档来源进入共享注册表，工作台请求/显示规划与事件投递调用库内能力。正则、Worker 池、证据校验、模板、条件/计数、依赖排序、预算与冲突、动作状态、CAS、窗口/sticky/额度及恢复算法都在 `@leolee9086/dsh-rule-engine`；插件不保留这些算法的另一份实现。原生事件目录与消息品牌类型只在环境适配层加入。`EventFieldShape` 统一使用引擎自动生成的公共类型，插件生成器只生成事件名和 payload 数据，源码和产物均禁止转发引擎 API。端口契约、转发与类型复核见 [引擎契约复核](docs/engine-contract-review.md)。共享 SessionCache 继续由 `contextCareSessionLog` 持有，库通过类型化缓存端口使用，不增加第二份 Session 历史缓存。
 
 ## 模型作用域提醒
 
@@ -338,7 +348,7 @@ ctx.effect(() => ctx.contextCareControls.register({
 
 同源 GET/PATCH `/context-care/rules?sessionId=...` 使用公开 Connection 鉴权；未挂载 Connection 返回 503，未鉴权返回 401/403。PATCH 接受 revision 与一个动作切换、暂停或 reset；拒绝非法 Origin、媒体类型、超限正文和坏 JSON，响应 no-store。客户端在发布响应给视图之前校验嵌套规则与动作，坏响应和写失败明确显示。
 
-v2 规则由 AI 编写为声明，或由外部插件通过 `contextCareWorkbench.register` 贡献文档；本插件负责校验、匹配、执行、会话开关与来源状态。DSH 内不提供规则 JSON、文档、变量或模板的编辑器，代码编辑能力由独立插件承担。后端已支持严格 Handlebars 模板、类型化 JSON 输入绑定、条目注入、请求副本替换与过滤，以及通过正式工具策略和审批执行的输出触发程序。预览使用同一规划逻辑且不写入文档、动作队列或会话日志；实际派发记录请求差异并保留提交原文。来源按贡献对象和会话范围显示。原内部 `contextCareWorkbench` 名称保留，它不代表界面工作台。
+v2 规则由 AI 编写为声明，或由外部插件通过 `contextCareWorkbench.register` 贡献文档；共享引擎负责校验、匹配、模板、执行调度、文档/变量与会话开关策略；本插件提供原生事件、Session 共享缓存、实际存储与工具审批、消息交付和 UI/HTTP 对接。DSH 内不提供规则 JSON、文档、变量或模板的编辑器，代码编辑能力由独立插件承担。后端已支持严格 Handlebars 模板、类型化 JSON 输入绑定、条目注入、请求副本替换与过滤，以及通过正式工具策略和审批执行的输出触发程序。预览使用同一规划逻辑且不写入文档、动作队列或会话日志；实际派发记录请求差异并保留提交原文。来源按贡献对象和会话范围显示。原内部 `contextCareWorkbench` 名称保留，它不代表界面工作台。
 
 `output.delta` 在真实请求流的可等待 chunk 边界检测，仅使用当前流块的正文或思考文本；不扫描完整历史、不处理未完成工具参数。流身份包含会话、请求、attempt 和块索引，没有提交序号的流不伪造 `seq/path`。支持实时取消、依赖取消成功的续接和 next-step 提醒；同一规则在一个流块内只触发一次，即使匹配范围随文本增长或声明 `dedupe: none`。开关、来源或变量版本改变会重置未触发文本，结束和取消清理流状态。requests Host 配置 `maxDeltaChars`（默认 32768，每块 UTF-16 字符）和 `maxDeltaBlocks`（默认 16）限制保留量；超限明确报错并停止该请求，不静默裁切后改变正则锚点。没有开启的流式动作时不保留流文本。
 
@@ -431,11 +441,11 @@ UI 优先显示当前进程最近一次请求边界的独立数值采样，关�
 
 ## 安装
 
-运行环境需要 Node.js 22.19.0 或更新版本。开发树通过标准包依赖使用 `@leolee9086/dsh-rule-engine@0.3.0` 与独立分块库 `@leolee9086/dsh-session-blocks@0.1.0`，不再直接依赖查询插件，也没有内嵌分块副本。分块库 0.1.0 已发布到 npm，并已通过普通 `pnpm install` 安装及消费者分块/改写/匹配验证。发行版本使用上述标准 npm 依赖。
+运行环境需要 Node.js 22.19.0 或更新版本。当前开发树通过标准 npm 精确依赖使用 `@leolee9086/dsh-rule-engine@0.8.0` 与独立分块库 `@leolee9086/dsh-session-blocks@0.1.0`，没有内嵌副本或引擎源码解析覆盖。引擎承担统一规则、请求/显示规划、事件交付与恢复，并补齐通知通道、完成观察、循环/流式提醒、精确路由提示和请求改写事务；插件保留原生环境接入及呈现。必要环境端口显式提供，事件形状类型从库的同一生成源取得；0.8.0 补齐共同条件、顺序文本、ACK 后提交与扩展能力。职责与当前验证见 [统一引擎迁移验收](docs/unified-engine-migration.md)，早期迁移过程见 [提醒领域迁移验收](docs/reminder-residual-migration.md)及 [引擎契约复核](docs/engine-contract-review.md)。配套引擎发行后，执行 `pnpm install --frozen-lockfile`、`pnpm check`、`pnpm test` 和 `pnpm build` 即使用锁定依赖；本轮归档安装验收使用已生成的实际包。旧发行标签保留其当时依赖，不能用当前开发树验证代替旧标签内容。
 
 刚发布的依赖受 pnpm 的 `minimumReleaseAge` 政策约束。本机 pnpm 11.7.0 与 12.6.0 的冻结锁文件安装都因两个版本未满24小时而失败；pnpm 11.7.0 的普通 `add` 成功，但自动在消费目录记录了两个精确版本的 `minimumReleaseAgeExclude`。这与无豁免安装不同。保持该政策且没有精确版本批准的环境应等待其发布时间窗口满足后再安装；本仓库不分发豁免，不修改消费者的全局设置。
 
-GitHub 标签已包含客户端构建产物；包没有 `prepare`、`prepack` 或安装生命周期脚本。官方插件管理器的包来源可直接填写 `github:leolee9086/dsh-context-care#v0.14.17`。普通 pnpm 安装不需要 `allowBuilds`、`--ignore-scripts` 或 `blockExoticSubdeps` 例外。v0.8.0 的安装契约问题和历史验证限制保留在更新记录中。
+GitHub 标签已包含客户端构建产物；包没有 `prepare`、`prepack` 或安装生命周期脚本。官方插件管理器的包来源可直接填写 `github:leolee9086/dsh-context-care#v0.14.18`。普通 pnpm 安装不需要 `allowBuilds`、`--ignore-scripts` 或 `blockExoticSubdeps` 例外。v0.8.0 的安装契约问题和历史验证限制保留在更新记录中。
 
 ### 安装发行包
 
@@ -449,10 +459,10 @@ Host 代码更新后需要重启 DSH，再刷新页面；重新启用条目不�
 
 ### 从 GitHub 安装
 
-使用固定的 `v0.14.17` 标签：
+使用固定的 `v0.14.18` 标签：
 
 ```sh
-dsh plugin --profile web add "github:leolee9086/dsh-context-care#v0.14.17"
+dsh plugin --profile web add "github:leolee9086/dsh-context-care#v0.14.18"
 ```
 
 构建产物 `lib/` 已入库，装完即可用 —— 不需要额外构建，也不需要手工打包上传 tgz。带上标签安装，版本不会跟着分支漂。

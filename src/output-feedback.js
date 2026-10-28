@@ -1,4 +1,5 @@
-import { detectOutputPatterns, patternTrigger } from './output-patterns.js'
+import { detectOutputPatterns, patternTrigger } from '@leolee9086/dsh-rule-engine'
+
 import { createSessionOutputFeedback } from '../lib/session-output-feedback.js'
 
 /**

@@ -1,6 +1,7 @@
-import { createTemplates } from './templates.js'
-import { validateDocument as validate } from './workbench-store.js'
-import { importWorkbench as convert } from './workbench-import.js'
+import { createTemplates, validateDocument as validate, importWorkbench as convert } from '@leolee9086/dsh-rule-engine'
+
+
+
 
 // Public pure entry: converting data never mounts services, saves documents or executes tools.
 // A fresh template registry keeps conversions independent of other callers.

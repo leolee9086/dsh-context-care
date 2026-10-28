@@ -10,7 +10,8 @@ interface EntryState { materialization?: { text: string }; lastInactiveAt?: numb
 interface Harness {
   open(t: test.TestContext): Promise<{ session: Session; configureEntries(count: number): Promise<void>; setEntriesActive(value: boolean): Promise<void>;
     entryState(): Record<string, EntryState>; confirm(planned: Plan): Promise<void>; pauseEntry(paused: boolean): Promise<void>; configureCatalog(count: number): () => void;
-    catalog(): { sourceId: string; plugin: string; registration: string; rules: { id: string; title: string; actions: { id: string; available: boolean }[] }[] }[]; anchorLookups(): number; anchorScans(): number; configureAnchors(anchor: string): Promise<void>; configure(filters?: boolean | 'cascade'): Promise<void>; display(seq: number): Promise<{ changed: boolean; before: { text: string }[]; after: { text: string }[]; records: { actionId: string }[] }>;
+    catalog(): { sourceId: string; plugin: string; registration: string; rules: { id: string; title: string; actions: { id: string; available: boolean }[] }[] }[]; anchorLookups(): number; anchorScans(): number; configureAnchors(anchor: string): Promise<void>; configure(filters?: boolean | 'cascade'): Promise<void>; display(seq: number): Promise<{ changed: boolean; before: { text: string }[]; after: { text: string }[]; records: { actionId: string; status: string; reason?: string }[]; patches: { status: string }[] }>;
+    configureDisplayPatches(): Promise<void>; pauseDisplayPatches(paused: boolean): Promise<void>;
     configureDisplay(anchor: string): Promise<void>; pauseDisplay(paused: boolean): Promise<void>; displayWork(name: string): number;
     preview(request: GenerateOptions): Promise<Plan>; cacheNames(): string[]; projectionWork(): number; pairBuilds(): number; pairWork(): number; pairMessages(): number; actionWork(): number; controlIdentityFinds(): number; byteSerializations(request: GenerateOptions): number; numericComparisons(): number; removalCollators(): number; catalogReads(): number; recordReads(): number; tokenReads(): number; pauseFilter(paused: boolean): Promise<void>;
     reconcile(): Promise<void>; http(): Promise<void>; probe(): Promise<void>; runs(): number; displayCalls(): number }>
@@ -18,6 +19,42 @@ interface Harness {
 
 /** Run in the real Loader composition; spy methods delegate to native Session. */
 export function registerWorkbenchPerformanceCases(harness: Harness): void {
+  test('long native display patches recheck only affected block groups with authoritative overlap outcomes', { timeout: 120000 }, async t => {
+    const fixture = await harness.open(t), { session } = fixture
+    const append = (content: { type: 'text'; text: string }[]) => session.append('assistant/message', { turn: 1, step: 1, stream: [],
+      usage: { inputTokens: 1, outputTokens: 1 }, message: createMessage({ role: 'assistant', source: { kind: 'model', provider: 'care-test', model: 'care-test' }, content }) }, { surfaceOp: 'append' })
+    for (let index = 0; index < 1000; index++) append([{ type: 'text', text: `OLD_PATCH_HISTORY ${index}` }])
+    const current = append(Array.from({ length: 512 }, (_, index) => ({ type: 'text' as const, text: `REPLACE_BODY ${index}` })))
+    await fixture.configureDisplayPatches()
+    const reads = t.mock.method(session, 'eventAt'), snapshots = t.mock.method(session, 'snapshotEvents'), derive = t.mock.method(session, 'deriveMessages')
+    const loop = monitorEventLoopDelay({ resolution: 10 }); loop.enable(); t.after(() => loop.disable()); await yieldToHost()
+    const cpuStart = process.cpuUsage(), start = performance.now()
+    const timed = async <T>(run: () => Promise<T>) => { const began = performance.now(); const value = await run(); return { ms: performance.now() - began, value } }
+    const [cold, http, other] = await Promise.all([timed(() => fixture.display(current.seq)), timed(fixture.http), timed(fixture.probe)])
+    const output = cold.value
+    assert.equal(output.changed, true); assert.equal(output.before.length, 512); assert.equal(output.after.length, 512); assert.equal(output.records.length, 1536)
+    assert.equal(output.patches.length, 512); assert.ok(output.patches.every(result => result.status === 'planned'))
+    for (let index = 0; index < 512; index++) {
+      assert.equal(output.before[index].text, `REPLACE_BODY ${index}`); assert.equal(output.after[index].text, `PATCHED ${index}`)
+      assert.deepEqual(output.records.slice(index * 3, index * 3 + 3).map(record => record.status), ['planned', 'skipped', 'skipped'])
+    }
+    assert.equal(fixture.displayWork('display-plan-patches'), 2048, 'each block validates two new ranges, visits one conflicting interval and materializes one final row')
+    assert.ok(!fixture.cacheNames().some(name => name.startsWith('display-plan-')))
+    const firstReads = reads.mock.callCount(), warm = await timed(() => fixture.display(current.seq))
+    assert.deepEqual(warm.value, output); assert.equal(reads.mock.callCount(), firstReads)
+    assert.equal(fixture.displayWork('display-plan-patches'), 4096)
+    await fixture.pauseDisplayPatches(true); const paused = await fixture.display(current.seq)
+    assert.equal(paused.changed, false); assert.equal(fixture.displayWork('display-plan-patches'), 4096, 'no replacement initializes patch work when policy is paused')
+    await fixture.pauseDisplayPatches(false); assert.deepEqual(await fixture.display(current.seq), output)
+    const next = append([{ type: 'text', text: 'REPLACE_BODY NEW' }]), fresh = await fixture.display(next.seq)
+    assert.equal(fresh.after[0].text, 'PATCHED NEW'); assert.equal(reads.mock.callCount(), firstReads + 1)
+    assert.equal(fixture.displayWork('display-plan-patches'), 6148); assert.ok(!fixture.cacheNames().some(name => name.startsWith('display-plan-')))
+    assert.equal(snapshots.mock.callCount(), 0); assert.equal(derive.mock.callCount(), 0)
+    await yieldToHost(); loop.disable(); const cpu = process.cpuUsage(cpuStart)
+    t.diagnostic(`workbench-display-patches ${JSON.stringify({ events: session.seq, blocks: 512, records: 1536, patchWorkPerCut: 2048, coldMs: cold.ms, warmMs: warm.ms, httpMs: http.ms, otherAgentMs: other.ms, cpuUserMs: cpu.user / 1000, cpuSystemMs: cpu.system / 1000, loopMaxMs: loop.max / 1e6, nativeReads: reads.mock.callCount(), wallMs: performance.now() - start })}`)
+    assert.ok(cold.ms < 5000 && http.ms < 1000 && other.ms < 1500 && loop.max / 1e6 < 1000)
+  })
+
   test('long native display reuses one dependency structure and exact anchor directory per cut', { timeout: 120000 }, async t => {
     const fixture = await harness.open(t), { session } = fixture
     const append = (content: { type: 'text'; text: string }[]) => session.append('assistant/message', { turn: 1, step: 1, stream: [],
@@ -228,7 +265,7 @@ export function registerWorkbenchPerformanceCases(harness: Harness): void {
     const timed = async (run: () => Promise<unknown>) => { const start = performance.now(); const value = await run(); return { ms: performance.now() - start, value } }
     const [planned, http, other] = await Promise.all([timed(() => fixture.preview(request)), timed(fixture.http), timed(fixture.probe)])
     const result = planned.value as Awaited<ReturnType<typeof fixture.preview>>
-    assert.equal(result.applied.length, 500, 'both matching child occurrences retain their action records')
+    assert.equal(result.applied.length, 500, `both matching child occurrences retain their action records: ${JSON.stringify(result.records.slice(0, 2))}`)
     const controlIdentityFinds = fixture.controlIdentityFinds()
     assert.equal(controlIdentityFinds, 0, '500 live control selections do not recursively search rule/action arrays')
     const numericComparisons = fixture.numericComparisons() - beforeNumeric, removalCollators = fixture.removalCollators() - beforeCollators

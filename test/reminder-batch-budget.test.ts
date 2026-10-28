@@ -1,8 +1,10 @@
+import { createBoundedMatcher } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
+import { eventRule } from './event-rule.js'
 import assert from 'node:assert/strict'
 import { after } from 'node:test'
-import { createBoundedMatcher } from '../src/bounded-matcher.js'
-import { createReminderRuntime } from '../lib/reminder-runtime/runtime.js'
+
+import { createReminderRuntime } from './reminder-runtime-fixture.ts'
 
 const matcher = createBoundedMatcher({ timeoutMs: 5000, startupMs: 5000 })
 after(async () => { await matcher.close() })
@@ -15,7 +17,7 @@ await matcher.warmup()
  * 全是 a 的串会直接匹配 (a+)+$，根本不会回溯；末尾换个字符才会炸。
  */
 const trap = 'a'.repeat(40) + '!'
-const rule = (id: string, extra: Record<string, unknown>) => ({ format: 'reminder/v4', id, ...extra })
+const rule = (id: string, fields: Record<string, unknown>, action: Record<string, unknown>) => eventRule('tool.before-execute', { id, ...fields }, action)
 
 /**
  * 一条规则把 worker 跑死，同批的其它规则不该被它连累。
@@ -37,14 +39,11 @@ test('批量里一条规则卡死，其余规则仍然各自拿到自己的答�
   t.after(() => runtime.close())
 
   runtime.registerSource({ sourceId: 'isolation', plugin: 'test', revision: 1, rules: [
-    rule('hang', { on: 'tool.before-execute', text: '卡死', priority: 30,
-      when: { tool: 'blocked', arguments: { command: { regex: '(a+)+$' } } },
-      effect: { kind: 'deny-tool', dangerous: true, reason: '不该命中', deliver: { model: { once: 'surface' } } } }),
-    rule('quiet', { on: 'tool.before-execute', text: '不匹配', priority: 20,
-      when: { tool: 'blocked', arguments: { command: { regex: 'never-matches-this' } } },
-      effect: { kind: 'deny-tool', dangerous: true, reason: '不该命中', deliver: { model: { once: 'surface' } } } }),
-    rule('notice', { on: 'tool.before-execute', text: 'NOTICE', priority: 10,
-      when: { tool: 'blocked' }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } }),
+    rule('hang', { priority: 30, event: { tool: 'blocked', arguments: { command: { regex: '(a+)+$' } } } },
+      { template: '卡死', deny: { dangerous: true, reason: '不该命中' } }),
+    rule('quiet', { priority: 20, event: { tool: 'blocked', arguments: { command: { regex: 'never-matches-this' } } } },
+      { template: '不匹配', deny: { dangerous: true, reason: '不该命中' } }),
+    rule('notice', { priority: 10, event: { tool: 'blocked' } }, { template: 'NOTICE' }),
   ] })
 
   const started = Date.now()

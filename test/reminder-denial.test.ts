@@ -1,9 +1,12 @@
+import { createDenialTickets, executeEventMatch as executeReminderMatch, createBoundedMatcher } from '@leolee9086/dsh-rule-engine'
+import type { EventRuntimeOptions as RuntimeOptions } from '@leolee9086/dsh-rule-engine'
 import test, { after, type TestContext } from 'node:test'
+import { eventRule } from './event-rule.js'
 import assert from 'node:assert/strict'
-import { createDenialTickets } from '../lib/reminder-runtime/denial.js'
-import { createReminderRuntime, type RuntimeOptions } from '../lib/reminder-runtime/runtime.js'
-import { executeReminderMatch } from '../lib/reminder-runtime/matcher.js'
-import { createBoundedMatcher } from '../src/bounded-matcher.js'
+
+import { createReminderRuntime } from './reminder-runtime-fixture.ts'
+
+
 // 真实执行端口：匹配、判定器、线程池全是真的，测试只驱动事件与边界。
 const matcher = createBoundedMatcher({ timeoutMs: 2000, startupMs: 5000 })
 after(async () => { await matcher.close() })
@@ -23,10 +26,9 @@ function runtime(t: TestContext, options: Partial<RuntimeOptions> = {}) {
   return instance
 }
 
-const denyRule = (reason: string, tool = 'blocked') => ({ format: 'reminder/v4', id: 'blocked', on: 'tool.before-execute',
-  text: '这次调用被规则拦下', when: { tool }, effect: { kind: 'deny-tool', dangerous: true, reason, deliver: { model: { once: 'surface' } } } })
-const remindRule = { format: 'reminder/v4', id: 'notice', on: 'tool.succeeded', text: 'NOTICE', when: { tool: 'probe' },
-  effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } }
+const denyRule = (reason: string, tool = 'blocked') => eventRule('tool.before-execute', { id: 'blocked', event: { tool } },
+  { template: '这次调用被规则拦下', deny: { dangerous: true, reason } })
+const remindRule = eventRule('tool.succeeded', { event: { tool: 'probe' } })
 
 /** One tool call through the real pre-execute then guard sequence. */
 let calls = 0
@@ -127,9 +129,8 @@ const exits: Exit[] = [
   { name: '本会话没有前置规则时放行', rules: [remindRule], expected: 'allow' },
   { name: '会话连任何规则都没有时放行', rules: [], expected: 'allow' },
   { name: '前置规则存在但工具名不同时放行', rules: [denyRule('不得删除文件')], expected: 'allow' },
-  { name: '工具名相同但参数条件不满足时放行', rules: [{ format: 'reminder/v4', id: 'blocked', on: 'tool.before-execute',
-    text: '只能读 D 盘', when: { tool: 'blocked', arguments: { path: { regex: '^D:' } } },
-    effect: { kind: 'deny-tool', dangerous: true, reason: '只能读 D 盘', deliver: { model: { once: 'surface' } } } }],
+  { name: '工具名相同但参数条件不满足时放行', rules: [eventRule('tool.before-execute', { id: 'blocked', event: { tool: 'blocked', arguments: { path: { regex: '^D:' } } } },
+    { template: '只能读 D 盘', deny: { dangerous: true, reason: '只能读 D 盘' } })],
     drive: instance => callWith(instance, 'blocked', undefined, {}) , expected: 'allow' },
   { name: '规则范围不含本会话时放行', rules: [denyRule('不得删除文件')], scope: { sessionIds: ['other'] }, expected: 'allow' },
   { name: '规则被开关关闭时放行，不把停用当成拒绝', rules: [denyRule('不得删除文件')],

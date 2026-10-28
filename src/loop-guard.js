@@ -35,7 +35,7 @@
  */
 
 import { producedBy } from './producer-source.js'
-import { describeHit, detectDegradation } from './loop-patterns.js'
+import { describeHit, detectDegradation } from '@leolee9086/dsh-rule-engine'
 
 /**
  * 取会话里最近一条助手回复的全部文本（思考块 + 正文块）。
@@ -83,11 +83,7 @@ export function detectLoop(session, only, afterSeq = -1, history) {
  * @param {boolean} cleanupActive 请求层清理的执行者在不在（index.js 由 `ctx.inject(['requestRewrite'])` 维护）。
  * @returns {boolean} 该不该注入提醒。
  */
-export function loopNeedsReminder(hit, cleanupActive) {
-  if (hit === undefined) return false
-  if (hit.severity === 'mild') return true
-  return cleanupActive !== true
-}
+
 
 /**
  * 判断刚刚是不是已经提醒过一次了 —— 连着注入两条一样的提醒只会刷屏，

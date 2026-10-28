@@ -1,3 +1,4 @@
+import { ScopedPromptConfig, selectScopedPrompts, loopNeedsReminder, REWRITER_NAME, createStreamWatch, createStreamNoticeActions, shouldNotify, planDeliveryInputs, collectDeliveryInputs, filterDeliveryMessages } from '@leolee9086/dsh-rule-engine'
 import { z } from 'zod'
 import { ensureSessionLog } from '../lib/session-log.js'
 import { snoozeOutput, snoozeResult } from '../lib/reminder-runtime/snooze.js'
@@ -12,18 +13,18 @@ import { createSummaryExecutor } from './summary-executor.js'
 import { repairSummaryImages } from './image-repair.js'
 import { runMaintenance } from './maintenance-journal.js'
 import { createMaintenanceOperations } from './maintenance-operations.js'
-import { ScopedPromptConfig, selectScopedPrompts } from './scoped-prompts.js'
+
 import { contextCareProjection } from './projection.js'
 import { selectClearRange, selectRestRange, selectMaintenanceRange } from './selection.js'
 import { createProposalExecutor } from './summary-proposals.js'
 import { maintenancePassLimit } from './summary-request.js'
 import { clearRange } from './deep-rest.js'
-import { alreadyWarned, detectLoop, loopNeedsReminder, loopNoticeText } from './loop-guard.js'
-import { createStreamWatch } from './stream-watch.js'
+import { alreadyWarned, detectLoop, loopNoticeText } from './loop-guard.js'
+
 import { installNoticeRules } from './notice-rules.js'
 import { NOTICE_CHANNEL, sharedNoticeChannel } from './notice-channel.js'
 import { lastAssistantMessage, lastAssistantText, lastUserMessage, textOf } from './prompt-text.js'
-import { createRequestRewriter, REWRITER_NAME } from './request-rewrite.js'
+import { createRequestRewriter } from './request-rewrite.js'
 import { createTransformLog } from './transform-log.js'
 import { createRewriteJournal } from './rewrite-journal.js'
 import { CARE_SOURCE, LOOP_IDS, runtimeControlSource, legacyControlSource, controlledEngineRules, controlledGuidance, controlledState } from './control-catalog.js'
@@ -36,7 +37,6 @@ export const Config = z.object({
   fatigueExponent: z.number().optional(), retainRatio: z.number().optional(),
   rangeStrategy: z.enum(['basic-prefix', 'target-prefix']).optional(), expectedCheckpointTokens: z.number().int().nonnegative().optional(),
   minFreshTokens: z.number().int().optional(), minNoteChars: z.number().int().optional(), maxNoteChars: z.number().int().optional(),
-  providerUsageRatio: z.number().optional(),
   softBudgetRatio: z.number().optional(), hardBudgetRatio: z.number().optional(),
   hysteresisRatio: z.number().optional(), maxPasses: z.number().int().optional(),
   auxiliaryBudgetRatio: z.number().optional(),
@@ -136,9 +136,7 @@ export function previousState(session, history) {
  * to the model, but it does append another user message and can make the status look like
  * a countdown. Keep the notification keyed to the text the model can actually read.
  */
-export function shouldNotify(previous, text, _state) {
-  return previous?.text !== text
-}
+
 
 /** Attach tools and durable boundary-time status, leaving the compaction provider unchanged. */
 export function apply(ctx, raw = {}) {
@@ -191,6 +189,7 @@ function careFacts(current, log) {
 export function installContextCare(ctx, raw, compactionSource) {
   const resolveCompaction = typeof compactionSource === 'function' ? compactionSource : () => compactionSource
   const spec = resolveConfig(raw)
+  const engine = ctx.contextCareRequests.engine
   const controls = ctx.contextCareRequests.controls
   const enabled = (sessionId, ruleId, actionId) => controls.enabled(String(sessionId), CARE_SOURCE, ruleId, actionId)
   const stateText = (agent, state, outcome, explicit = false) => controlledState(state, outcome,
@@ -222,7 +221,6 @@ export function installContextCare(ctx, raw, compactionSource) {
   if (typeof ctx.tokenMeter.estimateMessage !== 'function') {
     throw new Error('context-care requires the public tokenMeter.estimateMessage estimator')
   }
-  if (raw?.providerUsageRatio !== undefined) ctx.logger.warn('context-care: providerUsageRatio is deprecated; tokenMeter owns input calibration')
   // This gate is the only automatic maintenance decision in context-care. The
   // Basic backend is configured with auto:false in the authored composition so
   // it remains an executor for explicit requests, never a second controller.
@@ -248,8 +246,8 @@ export function installContextCare(ctx, raw, compactionSource) {
 
   // ---------------------------------------------------------- 提示规则
   //
-  // 规则由别的插件声明(索引插件的 memoryNoticeRules 服务),本插件是它的消费者:
-  // 判断什么时候该提醒、提醒什么,都在这里发生。规则本身不属于本插件。
+  // 规则由别的插件声明(索引插件的 memoryNoticeRules 服务)。
+  // 引擎库负责判定、冷却与命中证据；本插件提供原生事实并创建提醒消息。
   // ---------------------------------------------------------- 变换记录
   //
   // Evaluations attached to delivered notices already live in the Session log; runtime diagnostics use the logger.
@@ -276,6 +274,7 @@ export function installContextCare(ctx, raw, compactionSource) {
   const recordHit = (layer, record, where) => transformLog.record({ ...record, ...where, layer })
 
   const noticeRules = installNoticeRules(ctx, {
+    engine,
     plugin: name, history,
     rulesFor: (sessionId, evidence) => controlledEngineRules(controls, String(sessionId), 'notify', evidence),
     onHit: (record, where) => recordHit('notice', record, where),
@@ -285,7 +284,7 @@ export function installContextCare(ctx, raw, compactionSource) {
   //
   // 通用通道:别的插件有话要告诉模型时,注册一个源;这里在每个请求边界问一遍。
   // 通道不认识「召回」「分数」这些东西 —— 它只知道要通知什么、什么时候能通知。
-  const noticeChannel = sharedNoticeChannel({ warn: message => ctx.logger.warn(message) })
+  const noticeChannel = sharedNoticeChannel({ engine, warn: message => ctx.logger.warn(message) })
   // 两个入口都会跑到这里,而服务名只有一个 —— 已经有了就不再注册。
   // 注册两次会让插件的 agent 行挂载失败(见 notice-channel.js 里的报错原文)。
   if (ctx.get(NOTICE_CHANNEL) === undefined) {
@@ -313,6 +312,7 @@ export function installContextCare(ctx, raw, compactionSource) {
   let cleanupActive = false
   ctx.inject(['requestRewrite'], (scope) => {
     const rewrite = createRequestRewriter({
+      engine,
       // 跟提醒规则共用一个服务:规则里用 placement 区分它该在哪一层生效。
       rules: sessionId => controlledEngineRules(controls, sessionId, 'transform'),
       cleanPatterns: sessionId => {
@@ -350,11 +350,31 @@ export function installContextCare(ctx, raw, compactionSource) {
   //   · pre-step 路径是兜底 —— 阈值没到、或者哪个模式没命中，下一个请求边界仍会提醒一次。
   // 两条路共用同一份文案；窗口参数共用 stream-watch 的常量，只有阈值不同：
   // 掐断宁可漏也不误杀（长清单、代码、表格都可能出现稀疏重复）。
-  const abortCounts = new Map()
-  /** 连着掐断这么多次就不再自动续，把控制权交回人。 */
-  const MAX_AUTO_RESUME = 1
-  /** 已提醒过的 (会话, 模式)；用户一说话就清空，所以下一轮真的再犯还会提醒。 */
-  const noticeSent = new Set()
+  // 词表/阈值与文案属于声明；去重、续接额度及动作顺序由库管理。
+  const streamNotices = createStreamNoticeActions({
+    maxAutoResume: 1,
+    key: agent => String(agent.id),
+    epoch: (agent, trigger) => controls.epoch(String(agent.session.id), CARE_SOURCE, `stream-${trigger.id}`),
+    enabled: (agent, trigger, actionId) => enabled(agent.session.id, `stream-${trigger.id}`, actionId),
+    available: trigger => WATCH_NOTICES[trigger.id] !== undefined,
+    notice({ agent, trigger, hit }) {
+      const wording = WATCH_NOTICES[trigger.id]
+      const state = agent.session === undefined ? undefined : previousState(agent.session, history)
+      agent.inject(notice(watchPlugin(trigger.id), trigger.id === 'line-repeat' ? loopNoticeText(hit, false) : wording.text(hit, state),
+        trigger.id === 'line-repeat' ? 'Output loop detected' : wording.summary, undefined,
+        { contextCareTrace: { trigger: 'stream-watch', detector: trigger.id, evidence: hit } }))
+    },
+    abort({ agent, hit }) {
+      agent.cancel({ kind: 'hook', reason: `output loop: ${hit.line}` }, { keepInbox: true })
+    },
+    resume({ agent, trigger, hit, includeNotice }) {
+      const wording = WATCH_NOTICES[trigger.id]
+      const text = includeNotice ? wording.text(hit)
+        : '上一轮输出因循环已中止，现在续接任务。'
+      agent.steer(notice(watchPlugin(trigger.id), text, wording.summary, undefined,
+        { contextCareTrace: { trigger: 'stream-resume', detector: trigger.id, evidence: hit } }))
+    },
+  })
 
   const streamWatch = createStreamWatch({
     enabled: (agent, trigger, actionId) => enabled(agent.session.id, `stream-${trigger.id}`, actionId),
@@ -405,55 +425,7 @@ export function installContextCare(ctx, raw, compactionSource) {
         actions: ['notice'],
       },
     ],
-    actions: {
-      /**
-       * 只提醒，不打断：把话注入下一步，让模型自己纠正。
-       * 适合「这一轮本身没坏、只是念头跑偏」的情况。
-       */
-      notice({ agent, trigger, hit }) {
-        if (trigger.id === 'line-repeat' && enabled(agent.session.id, 'stream-line-repeat', 'resume')
-          && (abortCounts.get(String(agent.id)) ?? 0) < MAX_AUTO_RESUME) return
-        const wording = WATCH_NOTICES[trigger.id]
-        if (wording === undefined) return
-        const key = `${String(agent.id)}:${trigger.id}:${controls.epoch(String(agent.session.id), CARE_SOURCE, `stream-${trigger.id}`)}`
-        // 同一个用户回合里只提醒一次。这里**不能**扫 surface 判断：提醒的后面紧跟着那条
-        // 运行时上下文（疲劳度/唤醒值），它也是 user 消息，扫描到的永远是它。
-        // 所以自己记账，等用户说话时清空（见下面的 pre-step）。
-        if (noticeSent.has(key)) return
-        noticeSent.add(key)
-        // 文案可能需要最近一次状态报告里的数值（上下文焦虑用它给证据）。
-        // previousState 只扫 surface 尾部、是同步的；这里不能 await sample()。
-        const state = agent.session === undefined ? undefined : previousState(agent.session, history)
-        agent.inject(notice(watchPlugin(trigger.id), trigger.id === 'line-repeat' ? loopNoticeText(hit, false) : wording.text(hit, state),
-          trigger.id === 'line-repeat' ? 'Output loop detected' : wording.summary, undefined,
-          { contextCareTrace: { trigger: 'stream-watch', detector: trigger.id, evidence: hit } }))
-      },
-      /** 掐断这一轮。已生成的部分由 agent-loop 自己落成 interrupted 消息，不会静默丢。 */
-      abort({ agent, hit }) {
-        const key = String(agent.id)
-        agent.cancel({ kind: 'hook', reason: `output loop: ${hit.line}` }, { keepInbox: true })
-        abortCounts.set(key, (abortCounts.get(key) ?? 0) + 1)
-      },
-      /**
-       * 唤醒并说明原因。
-       *
-       * 顺序必须在 abort 之后：cancel 让当前活动变成 aborted，这条 steer 才会被分类成
-       * next-turn 并置上 wakeRequested，driver 收敛后才会开新 turn 把消息交给模型。
-       * 反过来先 steer 再 cancel 是白干 —— 消息会躺在 inbox 里没人读。
-       *
-       * UI 只显示一个「已停止」、不显示原因，所以原因得由这条消息自己说清楚。
-       */
-      resume({ agent, trigger, hit }) {
-        const key = String(agent.id)
-        if ((abortCounts.get(key) ?? 0) > MAX_AUTO_RESUME) return false
-        const wording = WATCH_NOTICES[trigger.id]
-        if (wording === undefined) return
-        const text = enabled(agent.session.id, `stream-${trigger.id}`, 'notice') ? wording.text(hit)
-          : '上一轮输出因循环已中止，现在续接任务。'
-        agent.steer(notice(watchPlugin(trigger.id), text, wording.summary, undefined,
-          { contextCareTrace: { trigger: 'stream-resume', detector: trigger.id, evidence: hit } }))
-      },
-    },
+    actions: streamNotices.actions,
     onError(error, context) {
       ctx.logger.warn(`context-care: stream-watch ${context}: ${error instanceof Error ? error.message : String(error)}`)
     },
@@ -720,25 +692,15 @@ export function installContextCare(ctx, raw, compactionSource) {
   }, { prepend: true })
 
   async function collectInputs(agent, signal, accepted, current) {
-    // Frozen queued input owns the match, not a delivery slot. collect replaces
-    // approved entries with model-ready messages; quota-blocked entries stay pending.
-    const messages = accepted.filter(message => message.source?.kind !== 'plugin:dsh-context-care:reminder'
-      || !message.source.reminder.handoff?.queued)
+    let messages = planDeliveryInputs(accepted)
     const reminders = ctx.get('reminderRules')
     if (reminders) {
       try {
         const sessionId = String(agent.session.id), visible = history.messages(agent.session)
         // Presence reads only the recent log tail; it does not materialize a full-session snapshot.
         const recent = history.live(agent.session)
-        await reminders.prepareRequest?.({ sessionId, events: recent, visible, accepted, signal })
-        const collected = await reminders.collect({ sessionId, visible, accepted, signal })
-        const replacements = new Map(collected.map(message => [message.id, message]))
-        const ordered = accepted.flatMap(message => {
-          const replacement = replacements.get(message.id)
-          if (replacement) { replacements.delete(message.id); return [replacement] }
-          return message.source?.kind === 'plugin:dsh-context-care:reminder' && message.source.reminder.handoff?.queued ? [] : [message]
-        })
-        messages.splice(0, messages.length, ...ordered, ...replacements.values())
+        try { messages = await collectDeliveryInputs(reminders, { sessionId, events: recent, visible, accepted, signal }) }
+        finally { recent[Symbol.dispose]() }
       }
       catch (error) { if (signal.aborted) throw error; ctx.logger.warn(`context-care: 规则提醒收集失败: ${error.message}`) }
     }
@@ -776,14 +738,8 @@ export function installContextCare(ctx, raw, compactionSource) {
     // Let normal admission and existing automatic safety compaction settle first.
     const decision = await next()
     if (decision.kind === 'reject' || signal.aborted) return decision
-    // 用户说过话，就允许流式监视重新提醒：清掉这个会话的提醒记账。
-    // 判据放在这里而不是流式监听里 —— 只有请求边界才看得到"这一批消息里有没有真人说的话"。
-    if (decision.messages.some(message => message.source?.kind === 'user')) {
-      const prefix = `${String(agent.id)}:`
-      for (const key of [...noticeSent]) {
-        if (key.startsWith(prefix)) noticeSent.delete(key)
-      }
-    }
+    // 原生边界确认真人输入，库据此重新允许本回合的提醒。
+    if (decision.messages.some(message => message.source?.kind === 'user')) streamNotices.humanInput(agent)
     // One implementation owns one agent. When this agent's own scope registered
     // the tool (a preset mounted `/agent`), that scoped registration shadows
     // this global one, and the scoped instance must be the only one notifying
@@ -883,30 +839,24 @@ export function installContextCare(ctx, raw, compactionSource) {
       current = { state: { fatigue: 'unknown', fatigueValue: null, wakefulness: 'unknown', wakefulnessValue: null } }
     }
     if (deepCompleted) messages = messages.filter(message => message !== restRequest)
-    const reminderService = ctx.get('reminderRules')
-    if (reminderService) {
-      for (;;) {
-        const filtered = await reminderService.filterMessages(String(agent.session.id), history.messages(agent.session), messages)
-        const denied = messages.filter(message => !filtered.includes(message))
-        messages = filtered
-        if (!denied.length) break
-        await reminderService.rollback(String(agent.session.id), denied)
-          .catch(error => ctx.logger.warn(`reminder rollback: ${error.message}`))
-        // 回滚会让出执行权；再次筛选剩余消息，直至最后一次核对后可直接交付。
+    const commitInputs = filtered => {
+      controls.sample(String(agent.session.id), current.state)
+      const text = stateText(agent, current.state, outcome, requested)
+      const previous = previousState(agent.session, history)
+      if (!text || (!requested && !shouldNotify(previous, text, current.state))) {
+        // 即便状态没变，只要循环提醒挂上了就得把消息带回去。
+        return filtered.length === decision.messages.length && filtered.every((message, index) => message === decision.messages[index])
+          ? decision : { ...decision, messages: filtered }
       }
+      filtered.push(notice(statePlugin, text, 'Context state', current.state,
+        { contextCareTrace: { trigger: requested ? 'rest-result' : 'budget-state', budget: current.budget, outcome } }))
+      return { ...decision, messages: filtered }
     }
-
-    controls.sample(String(agent.session.id), current.state)
-    const text = stateText(agent, current.state, outcome, requested)
-    const previous = previousState(agent.session, history)
-    if (!text || (!requested && !shouldNotify(previous, text, current.state))) {
-      // 即便状态没变，只要循环提醒挂上了就得把消息带回去。
-      return messages.length === decision.messages.length && messages.every((message, index) => message === decision.messages[index])
-        ? decision : { ...decision, messages }
-    }
-    messages.push(notice(statePlugin, text, 'Context state', current.state,
-      { contextCareTrace: { trigger: requested ? 'rest-result' : 'budget-state', budget: current.budget, outcome } }))
-    return { ...decision, messages }
+    const reminderService = ctx.get('reminderRules')
+    return reminderService ? filterDeliveryMessages({ runtime: reminderService, sessionId: String(agent.session.id), messages,
+      visible: () => history.messages(agent.session), commit: commitInputs,
+      onRollbackError: error => ctx.logger.warn('reminder rollback: ' + (error instanceof Error ? error.message : String(error))) })
+      : commitInputs(messages)
     })
   }, { prepend: true })
 

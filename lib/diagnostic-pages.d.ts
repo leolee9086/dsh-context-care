@@ -15,9 +15,8 @@ export interface DiagnosticRecordDelta<R> {
 export interface DiagnosticRecordFeed<R> {
     consume(cursor: object): DiagnosticRecordDelta<R>;
 }
-export type DiagnosticRecords<R> = readonly R[] | DiagnosticRecordFeed<R>;
-export type DiagnosticRecordInput<R> = readonly R[] | DiagnosticRecordDelta<R>;
-export declare const isDiagnosticDelta: <R>(records: DiagnosticRecordInput<R>) => records is DiagnosticRecordDelta<R>;
+export type DiagnosticRecords<R> = DiagnosticRecordFeed<R>;
+export type DiagnosticRecordInput<R> = DiagnosticRecordDelta<R>;
 /** The owning Session cache contains this feed. Consumers hold only their cursor;
  * weak readers cannot retain disposed page projections or abandoned subscriptions.
  * Coalesce pending edits by record identity instead of retaining a revision log. */
@@ -27,8 +26,6 @@ export declare function createDiagnosticRecordFeed<R>(compare: (left: R, right: 
     snapshot(): readonly R[];
     consume(cursor: object): DiagnosticRecordDelta<R>;
 };
-/** Whole-list compatibility callers may replace arrays; production passes deltas. */
-export declare function createDiagnosticRecordChanges<R>(): (records: DiagnosticRecordInput<R>) => DiagnosticRecordDelta<R>;
 /** Sorted scalar candidates. Updates inspect only changed records; array shifts
  * move references but never re-parse or re-sort the complete historical list. */
 export declare function createDiagnosticOrder<R>(compare: (left: R, right: R) => number): {
@@ -55,7 +52,7 @@ export interface DiagnosticIndex<T> {
 export declare function createDiagnosticIndex<T>(): DiagnosticIndex<T>;
 /** Keep relation buckets stable across immutable record-list revisions. */
 export declare function createDiagnosticRelations<R, K>(keys: (record: R) => readonly K[], compare?: (left: R, right: R) => number): {
-    update(records: DiagnosticRecordInput<R>, rekey?: boolean): ReadonlySet<K>;
+    update(records: DiagnosticRecordInput<R>): ReadonlySet<K>;
     rekey(records: Iterable<R>): ReadonlySet<K>;
     get(key: K): readonly R[];
 };

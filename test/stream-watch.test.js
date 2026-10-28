@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   appendText, createStreamWatch, createView, DETECTORS, LINE_WINDOW, TEXT_LIMIT, viewTail,
-} from '../src/stream-watch.js'
+} from '@leolee9086/dsh-rule-engine'
 
 const start = (watch, agent) => watch.observe(agent, { type: 'start', turn: 1, step: 1 })
 const delta = (watch, agent, type, text) => watch.observe(agent, { type: 'chunk', chunk: { type, text } })

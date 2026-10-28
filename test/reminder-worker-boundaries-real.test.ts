@@ -1,15 +1,15 @@
+import { createBoundedMatcher, MatcherFailure, compileSnapshotCondition as compileReminderCondition, CountLimits, BatchAnswer, BatchResult, RuleEventInput as Event, EventMatchResult as MatchResult } from '@leolee9086/dsh-rule-engine'
+import type { EventWork as Work, MatcherTiming } from '@leolee9086/dsh-rule-engine'
 import test, { type TestContext } from 'node:test'
+import { eventRule } from './event-rule.js'
 import assert from 'node:assert/strict'
-import { copyFile, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { pathToFileURL } from 'node:url'
 import { z } from 'zod'
-import { createBoundedMatcher, MatcherFailure } from '../src/bounded-matcher.js'
-import type { MatcherTiming } from '../lib/matcher/pool.js'
-import { compileReminderCondition, CountLimits } from '../lib/reminder-runtime/conditions.js'
-import { BatchAnswer, BatchResult, Event, MatchResult, type Work } from '../lib/reminder-runtime/state.js'
-import { createReminderRuntime } from '../lib/reminder-runtime/runtime.js'
+
+import { createReminderRuntime } from './reminder-runtime-fixture.ts'
 import { JudgeParams, readTrace, type JudgeParamsValue } from './fixtures/reminder-execution-real.ts'
 import { openRealReminderStorage } from './fixtures/reminder-persistence-real.ts'
 
@@ -179,19 +179,10 @@ test('real worker startup: closing during a claimed warmup releases its waiting 
 test('real runtime startup: a missing installed worker reports startup failure and recovers after the entry is restored',
   { timeout: 30000 }, async t => {
     const root = await mkdtemp(join(tmpdir(), 'care-missing-worker-'))
-    const copied = join(root, 'lib', 'matcher')
-    await mkdir(copied, { recursive: true })
-    await writeFile(join(root, 'package.json'), JSON.stringify({ type: 'module' }))
-    // Copy the shipped pool bytes unchanged, but leave its worker entry genuinely absent.
-    // The failure comes from Node's real module loader, not an injected executor.
-    for (const name of ['pool.js', 'progress.js']) {
-      await copyFile(new URL(`../lib/matcher/${name}`, import.meta.url), join(copied, name))
-    }
-    const loaded: unknown = await import(pathToFileURL(join(copied, 'pool.js')).href)
-    if (loaded === null || typeof loaded !== 'object' || !('createBoundedMatcher' in loaded)
-      || typeof loaded.createBoundedMatcher !== 'function') throw new Error('copied production matcher export missing')
-    const createCopiedMatcher = loaded.createBoundedMatcher as typeof createBoundedMatcher
-    const matcher = createCopiedMatcher({ maxIdle: 1, startupMs: 5000, timeoutMs: 2000 })
+    // The real engine pool supervises an actually absent entry. No copied plugin
+    // implementation or replacement executor can hide a module-loader failure.
+    const workerEntry = join(root, 'worker.mjs')
+    const matcher = createBoundedMatcher({ maxIdle: 1, startupMs: 5000, timeoutMs: 2000, workerURL: pathToFileURL(workerEntry) })
     const store = await openRealReminderStorage(join(root, 'storage'))
     const runtime = createReminderRuntime({ config: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 }, dispatches: true,
       execute: (input, signal, timing) => matcher.detect(input, signal, timing),
@@ -202,12 +193,8 @@ test('real runtime startup: a missing installed worker reports startup failure a
     })
     const tracePath = join(root, 'judge.jsonl')
     runtime.registerDetector(detector)
-    runtime.registerSource({ sourceId: 'startup-policy', plugin: 'test', revision: 1, rules: [{
-      format: 'reminder/v4', id: 'policy', on: 'tool.before-execute', text: 'Real startup boundary', when: { tool: 'probe' },
-      judge: { ref: detector.ref, revision: 1, params: JudgeParams.parse({
-        label: 'after-restore', tracePath, mode: 'quick', ok: false, value: null,
-      }) }, effect: { kind: 'deny-tool', dangerous: true, reason: 'A real policy match', deliver: { model: { once: 'surface' } } },
-    }] })
+    runtime.registerSource({ sourceId: 'startup-policy', plugin: 'test', revision: 1, rules: [eventRule('tool.before-execute', { id: 'policy', event: { tool: 'probe' }, judge: { ref: detector.ref, revision: 1, params: JudgeParams.parse({ label: 'after-restore', tracePath, mode: 'quick', ok: false, value: null }) } },
+      { template: 'Real startup boundary', deny: { dangerous: true, reason: 'A real policy match' } })] })
     const prepare = async (callId: string) => {
       const key = {}
       await runtime.prepareToolExecution({ key, sessionId: 'boundary', callId, rootCallId: callId, name: 'probe', arguments: {} })
@@ -219,8 +206,9 @@ test('real runtime startup: a missing installed worker reports startup failure a
     const broken = await prepare('worker-missing')
     const failedDisk = await store.readDisk('boundary')
     assert.deepEqual(readTrace(tracePath), [], 'a missing worker cannot have invoked the judge')
-    // A real source junction repairs the installation layout without patching any code.
-    await symlink(fileURLToPath(new URL('../src/', import.meta.url)), join(root, 'src'), 'junction')
+    // A custom entry explicitly starts the public transport, exactly like the
+    // plugin's entry; the pool auto-launches only its own default worker URL.
+    await writeFile(workerEntry, `import { runRuleWorker } from ${JSON.stringify(import.meta.resolve('@leolee9086/dsh-rule-engine'))}\nrunRuleWorker()\n`)
     const recovered = await prepare('worker-restored')
     t.diagnostic(JSON.stringify({ broken, recovered, diagnostics: failedDisk.diagnostics, stats: matcher.getStats() }))
     assert.deepEqual(broken, { kind: 'deny', reason: '提醒匹配线程未能启动，本次调用未执行' })

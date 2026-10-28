@@ -7,7 +7,5 @@
     // A TS test may exercise a shipped JS module (the template engine) directly.
     "allowJs": true
   },
-  // Tests reach the published JS engine through lib declarations, so the
-  // ambient module declaration for that package must stay in the program.
-  "include": ["test/**/*.ts", "src/reminder-runtime/rule-engine.d.ts"]
+  "include": ["test/**/*.ts"]
 }

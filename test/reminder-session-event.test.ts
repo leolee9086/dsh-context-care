@@ -1,12 +1,14 @@
+import type { MessageView, ConditionNode } from '@leolee9086/dsh-rule-engine'
+import { executeEventMatch as executeReminderMatch, EventRule as ReminderRule, compileEventActions as compileRule, createBoundedMatcher } from '@leolee9086/dsh-rule-engine'
 import test, { after } from 'node:test'
+import { eventRule } from './event-rule.js'
+
 import assert from 'node:assert/strict'
-import { createReminderRuntime } from '../lib/reminder-runtime/runtime.js'
-import { executeReminderMatch } from '../lib/reminder-runtime/matcher.js'
-import { ReminderRule, compileRule } from '../lib/reminder-runtime/schema.js'
-import { SESSION_EVENT_COUNT, SESSION_EVENT_TYPES,
+import { createReminderRuntime } from './reminder-runtime-fixture.ts'
+
+import { SESSION_EVENT_COUNT, SESSION_EVENT_TYPES, SESSION_EVENT_PAYLOAD_SHAPES,
   SESSION_EVENT_SOURCE_VERSION } from '../lib/reminder-runtime/generated/session-events.js'
-import type { MessageView } from '../lib/reminder-runtime/request-context.js'
-import { createBoundedMatcher } from '../src/bounded-matcher.js'
+
 const matcher = createBoundedMatcher({ timeoutMs: 2000, startupMs: 5000 })
 after(async () => { await matcher.close() })
 const port = (input: Parameters<typeof matcher.detect>[0], signal: AbortSignal, timing: Parameters<typeof matcher.detect>[2]) =>
@@ -17,10 +19,9 @@ const texts = (messages: MessageView[]) => messages.map(message =>
   (message.content ?? []).map(block => block.text ?? '').join(''))
 const committed = (type: string, seq = 1, data: unknown = {}) => ({ type: 'session.event', sessionId: 's',
   callId: `${type}#${seq}`, rootCallId: `${type}#${seq}`, name: type, clock: { at: 1000 }, arguments: data })
-const rule = (eventType: string, condition?: unknown) => ({ format: 'reminder/v4', id: 'notice',
-  on: 'session.event', text: '看到了 ' + eventType,
-  when: { eventType, ...(condition === undefined ? {} : { condition }) },
-  effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } })
+const rule = (eventType: string, condition?: ConditionNode) => eventRule('session.event',
+  { event: { eventType }, ...(condition === undefined ? {} : { match: condition }) }, { template: '看到了 ' + eventType })
+const catalog = { names: new Set(SESSION_EVENT_TYPES), shapes: new Map(Object.entries(SESSION_EVENT_PAYLOAD_SHAPES)) }
 
 function fixture(t: { after: (fn: () => unknown) => void }) {
   // Evaluate the real condition tree in-process instead of stubbing the result out.
@@ -62,24 +63,22 @@ test('模板能读到本次日志事件的冻结载荷', async t => {
       String((snapshot as { event?: { arguments?: { tool?: unknown } } }).event?.arguments?.tool)) }, execute: port })
   t.after(() => runtime.close())
   runtime.registerSource({ sourceId: 'log', plugin: 'test', revision: 1,
-    rules: [{ ...rule('tool/result'), text: '工具 {{event.arguments.tool}} 结束了' }] })
+    rules: [{ ...rule('tool/result'), actions: rule('tool/result').actions.map(action => ({ ...action, template: '工具 {{event.arguments.tool}} 结束了' })) }] })
   await runtime.submit(committed('tool/result', 4, { tool: 'read' }))
   assert.deepEqual(texts(await runtime.collect({ sessionId: 's', visible: [] })), ['工具 read 结束了'])
 })
 
 test('事件类型必须是名字；名字本身在编译时校验', () => {
-  const base = { format: 'reminder/v4', id: 'r', on: 'session.event', text: 't',
-    when: { eventType: 'tool/result' },
-    effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } }
-  assert.equal(ReminderRule.safeParse({ ...base, when: { eventType: 42 } }).success, false)
-  assert.equal(ReminderRule.safeParse({ ...base, when: { eventType: '' } }).success, false)
+  const base = rule('tool/result')
+  assert.equal(ReminderRule.safeParse({ ...base, event: { eventType: 42 } }).success, false)
+  assert.equal(ReminderRule.safeParse({ ...base, event: { eventType: '' } }).success, false)
   assert.equal(ReminderRule.safeParse(base).success, true)
   // Whether the name exists is decided where declarations are known, not here.
-  assert.throws(() => compileRule({ ...base, when: { eventType: 'tool/not-a-real-event' } }),
+  assert.throws(() => compileRule({ ...base, event: { eventType: 'tool/not-a-real-event' } }),
     /未声明的事件类型 tool\/not-a-real-event/)
-  const compiled = compileRule(base)
-  if (compiled.on !== 'session.event') throw new Error('expected a session.event rule')
-  assert.equal(compiled.when.eventType, 'tool/result')
+  const [compiled] = compileRule(base, undefined, undefined, catalog)
+  if (compiled?.stage !== 'session.event') throw new Error('expected a session.event rule')
+  assert.equal(compiled.event.eventType, 'tool/result')
 })
 
 test('声明过的自定义事件能按名匹配，重复发布被幂等键挡住', async t => {
@@ -88,10 +87,8 @@ test('声明过的自定义事件能按名匹配，重复发布被幂等键挡�
     shape: { kind: 'object', fields: { level: null, detail: { kind: 'object', fields: { note: null }, index: null } }, index: null } }])
   t.after(dispose)
   runtime.registerSource({ sourceId: 'custom', plugin: 'test', revision: 1,
-    rules: [{ format: 'reminder/v4', id: 'n', on: 'session.event', text: '累了',
-      when: { eventType: 'care/fatigue-high',
-        condition: { kind: 'compare', field: 'event.arguments.detail.note', op: 'exists' } },
-      effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } }] })
+    rules: [eventRule('session.event', { id: 'n', event: { eventType: 'care/fatigue-high' },
+      match: { kind: 'compare', field: 'event.arguments.detail.note', op: 'exists' } }, { template: '累了' })] })
   assert.equal(runtime.handlesSessionEvent('care/fatigue-high'), true)
   await runtime.publishCustomEvent({ sessionId: 's', name: 'care/fatigue-high', eventId: 'e-1',
     at: 5000, facts: { level: 'high', detail: { note: 'x' } } })
@@ -102,10 +99,8 @@ test('声明过的自定义事件能按名匹配，重复发布被幂等键挡�
   assert.deepEqual(await runtime.collect({ sessionId: 's', visible: [] }), [])
   // A declared name still checks selectors against its declared shape.
   assert.throws(() => runtime.registerSource({ sourceId: 'bad', plugin: 'test', revision: 1,
-    rules: [{ format: 'reminder/v4', id: 'n', on: 'session.event', text: 't',
-      when: { eventType: 'care/fatigue-high',
-        condition: { kind: 'compare', field: 'event.arguments.details', op: 'exists' } },
-      effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } }] }),
+    rules: [eventRule('session.event', { id: 'n', event: { eventType: 'care/fatigue-high' },
+      match: { kind: 'compare', field: 'event.arguments.details', op: 'exists' } }, { template: 't' })] }),
   /不存在于事件 care\/fatigue-high 的载荷中/)
   // Withdrawing the declaration takes the name with it.
   dispose()
@@ -140,32 +135,25 @@ test('native custom declarations validate atomically and keep independent owners
 test('未声明的事件名在加载时被拒，不能悄悄永不命中', t => {
   const runtime = fixture(t)
   assert.throws(() => runtime.registerSource({ sourceId: 'ghost', plugin: 'test', revision: 1,
-    rules: [{ format: 'reminder/v4', id: 'n', on: 'session.event', text: 't',
-      when: { eventType: 'care/never-declared' },
-      effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } }] }),
+    rules: [rule('care/never-declared')] }),
   /未声明的事件类型 care\/never-declared/)
   // A built-in name is still accepted, and a typo in one is not.
   assert.throws(() => runtime.registerSource({ sourceId: 'typo', plugin: 'test', revision: 1,
-    rules: [{ format: 'reminder/v4', id: 'n', on: 'session.event', text: 't',
-      when: { eventType: 'tool/results' },
-      effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } }] }),
+    rules: [rule('tool/results')] }),
   /未声明的事件类型 tool\/results/)
 })
 
 test('阻断只能在执行前声明，日志事件不能拒绝已经发生的事', () => {
-  const deny = { format: 'reminder/v4', id: 'r', on: 'session.event', text: 't',
-    when: { eventType: 'tool/result' },
-    effect: { kind: 'deny-tool', dangerous: true, reason: '已发生的事不能拒绝', deliver: { model: { once: 'surface' } } } }
+  const deny = eventRule('session.event', { id: 'r', event: { eventType: 'tool/result' } },
+    { template: 't', deny: { dangerous: true, reason: '已发生的事不能拒绝' } })
   assert.equal(ReminderRule.safeParse(deny).success, false)
 })
 
 test('载荷字段在加载时对照发行结构校验，拼错即报错', t => {
   const runtime = fixture(t)
-  const source = (condition: unknown, sourceId: string) => ({ sourceId, plugin: 'test', revision: 1,
-    rules: [{ format: 'reminder/v4', id: 'n', on: 'session.event', text: 't',
-      when: { eventType: 'tool/result', condition },
-      effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } }] })
-  const compare = (field: string) => ({ kind: 'compare', field, op: 'exists' })
+  const source = (condition: ConditionNode, sourceId: string) => ({ sourceId, plugin: 'test', revision: 1,
+    rules: [eventRule('session.event', { id: 'n', event: { eventType: 'tool/result' }, match: condition }, { template: 't' })] })
+  const compare = (field: string): ConditionNode => ({ kind: 'compare', field, op: 'exists' })
   // Declared fields resolve, including nested ones and array elements.
   for (const field of ['event.arguments.turn', 'event.arguments.message.isError',
     'event.arguments.message.content.0.type', 'event.name', 'event.clock.at']) {
@@ -178,9 +166,9 @@ test('载荷字段在加载时对照发行结构校验，拼错即报错', t => 
   }
   // A count reads its text through source.field, so that path is checked too.
   assert.throws(() => runtime.registerSource(source({ kind: 'count',
-    source: { kind: 'text', field: 'event.arguments.nope', projection: 'raw', locale: 'zh-CN' },
+    source: { kind: 'text', field: 'event.arguments.nope', projection: 'raw', locale: 'zh-CN', metaPrefixes: [] },
     pattern: { kind: 'literal', text: 'x' }, metric: 'occurrences', window: { kind: 'current-block' },
-    compare: { op: 'gte', value: 1 },
+    compare: { op: 'gte', value: 1 }, evaluate: 'complete',
     limits: { maxTextChars: 1000, maxCandidates: 100, maxUnits: 100, maxEvidence: 4 } }, 'bad-count')),
   /不存在于事件 tool\/result 的载荷中/)
   // Analyzer facts have no released schema, so they stay dynamic.

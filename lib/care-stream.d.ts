@@ -14,12 +14,12 @@ export declare const CareSubscription: z.ZodObject<{
     seq: z.ZodOptional<z.ZodNumber>;
     status: z.ZodDefault<z.ZodEnum<{
         "": "";
-        unknown: "unknown";
-        cancelled: "cancelled";
         queued: "queued";
-        running: "running";
+        cancelled: "cancelled";
+        unknown: "unknown";
         failed: "failed";
         "waiting-approval": "waiting-approval";
+        running: "running";
         succeeded: "succeeded";
         skipped: "skipped";
     }>>;

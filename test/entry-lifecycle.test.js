@@ -1,8 +1,8 @@
+import { entryPolicy, deliveredEntry, deactivatedEntry, validateDocument, createTemplates } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { entryPolicy, deliveredEntry, deactivatedEntry, entryTurn } from '../src/entry-lifecycle.js'
-import { validateDocument } from '../src/workbench-store.js'
-import { createTemplates } from '../src/templates.js'
+import { entryTurn } from '../src/entry-lifecycle.js'
+
 import { nativeSession } from './fixtures/native-session.ts'
 
 const entry = extra => ({ id: 'entry', revision: 1, title: 'Entry', enabledDefault: true, template: 'TEXT',

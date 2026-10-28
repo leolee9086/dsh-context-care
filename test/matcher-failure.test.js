@@ -1,9 +1,8 @@
+import { createBoundedMatcher, MatcherFailure, normalizeRuleV2 } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { createBoundedMatcher, MatcherFailure } from '../src/bounded-matcher.js'
-import { normalizeRuleV2 } from '@leolee9086/dsh-rule-engine'
 
 const rule = pattern => normalizeRuleV2({ schemaVersion: 2, sourceId: 'failure-test', id: 'regex', revision: 1,
   on: ['output.complete'], select: { view: 'original', roles: ['assistant'], blockTypes: ['text'] },
@@ -15,7 +14,7 @@ test('matching starts from a parent with process-only flags and an inline module
   // These flags belong to the parent process and Node rejects them in Worker.execArgv.
   const source = `
     import assert from 'node:assert/strict'
-    import { createBoundedMatcher } from ${JSON.stringify(new URL('../src/bounded-matcher.js', import.meta.url).href)}
+    import { createBoundedMatcher } from '@leolee9086/dsh-rule-engine'
     const matcher = createBoundedMatcher()
     try { assert.equal((await matcher.detect(${JSON.stringify(input('!$'))})).length, 1) }
     finally { await matcher.close() }

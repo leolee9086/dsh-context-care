@@ -1,5 +1,6 @@
+import { RuleStateError as ControlError } from '@leolee9086/dsh-rule-engine'
 import { z } from 'zod'
-import { ControlError } from './rule-controls.js'
+
 import { runtimePage } from './rule-runtime-data.js'
 import { PreviewWire } from './rule-runtime-wire.js'
 import { ensureSessionLog } from '../lib/session-log.js'
@@ -37,7 +38,7 @@ export function installWorkbenchRoute(ctx, path = '/context-care/workbench') {
         respond(200, runtimePage(service.inspect(agent), page)); return
       }
       if (req.method === 'GET') {
-        respond(200, { ...service.store.read(id, { presetId: service.presetId(agent) }), turnId: service.turnId(agent), sources: service.sources(id), executors: service.executors.catalog() }); return
+        respond(200, { ...service.store.read(id, { presetId: service.presetId(agent) }), turnId: service.turnId(agent), sources: service.sources(id), executors: service.executors.catalog(), extensions: service.extensionCatalog() }); return
       }
       if (req.headers.origin) {
         let originHost

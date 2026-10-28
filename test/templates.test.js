@@ -1,6 +1,6 @@
+import { createTemplates } from '@leolee9086/dsh-rule-engine'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createTemplates } from '../src/templates.js'
 
 test('prompt rendering is strict, literal and single-pass', () => {
   const templates = createTemplates()

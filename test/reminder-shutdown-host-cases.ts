@@ -1,4 +1,5 @@
 import test, { type TestContext } from 'node:test'
+import { eventRule } from './event-rule.js'
 import assert from 'node:assert/strict'
 import { setTimeout as delay } from 'node:timers/promises'
 import { readFile } from 'node:fs/promises'
@@ -33,12 +34,8 @@ export function registerShutdownHostCases(harness: Harness): void {
       runtime.registerDetector({ ref: 'shutdown', revision: 1,
         module: new URL('./fixtures/reminder-execution-real.ts', import.meta.url).href })
       const source: ReminderSource = { sourceId: 'host-drain', plugin: 'test', revision: 1, rules: [
-        { format: 'reminder/v4', id: 'notice', on: 'tool.succeeded', text: 'HOST_DRAIN_NOTICE',
-          when: { tool: 'read' }, judge: { ref: 'shutdown', revision: 1, params: { label: 'frozen', tracePath, mode: 'quick', ok: true, value: null } },
-          effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } },
-        { format: 'reminder/v4', id: 'unfinished', on: 'tool.succeeded', text: 'UNFINISHED_NOTICE',
-          when: { tool: 'blocked' }, judge: { ref: 'shutdown', revision: 1, params: { label: 'unfinished', tracePath, mode: 'cpu', heartbeatPath, ok: true, value: null } },
-          effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } },
+        eventRule('tool.succeeded', { event: { tool: 'read' }, judge: { ref: 'shutdown', revision: 1, params: { label: 'frozen', tracePath, mode: 'quick', ok: true, value: null } } }, { template: 'HOST_DRAIN_NOTICE' }),
+        eventRule('tool.succeeded', { id: 'unfinished', event: { tool: 'blocked' }, judge: { ref: 'shutdown', revision: 1, params: { label: 'unfinished', tracePath, mode: 'cpu', heartbeatPath, ok: true, value: null } } }, { template: 'UNFINISHED_NOTICE' }),
       ] }
       runtime.registerSource(source)
       await runtime.submit({ type: 'tool.succeeded', sessionId, name: 'read', arguments: {}, callId: 'seed', rootCallId: 'seed' })

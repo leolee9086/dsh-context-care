@@ -1,10 +1,9 @@
+import { createRuleStore as createWorkbenchStore, variableSnapshot, validateDocument, validateDocumentSet, createBoundedMatcher, createTemplates } from '@leolee9086/dsh-rule-engine'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createWorkbenchStore, variableSnapshot, validateDocument, validateDocumentSet } from '../src/workbench-store.js'
-import { createBoundedMatcher } from '../src/bounded-matcher.js'
+
 import { createActionRuns, createExecutorRegistry } from '../src/action-runs.js'
 import { releaseResources } from '../src/resource-cleanup.js'
-import { createTemplates } from '../src/templates.js'
 
 const deferred = () => { let resolve; const promise = new Promise(value => { resolve = value }); return { promise, resolve } }
 const document = (id = 'doc') => ({ schemaVersion: 2, id, revision: 1, title: id, variables: [

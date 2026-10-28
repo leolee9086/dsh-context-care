@@ -1,6 +1,7 @@
+import { REWRITER_NAME } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createRequestRewriter, REWRITER_NAME } from '../src/request-rewrite.js'
+import { createRequestRewriter } from '../src/request-rewrite.js'
 
 test('request transform cooldown and surface memory belong to each session', async () => {
   const records = []
@@ -54,7 +55,9 @@ test('命中会留下记录', async () => {
 
 test('规则来源是坏数据时抛错，不静默放过', async () => {
   const rewrite = createRequestRewriter({ rules: () => [{ id: 'broken' }], onRecord: () => {} })
-  await assert.rejects(() => rewrite({ body: 'secret', url: 'https://api.example.com/v1/chat' }), /rule source/)
+  await assert.rejects(() => rewrite({ body: 'secret', url: 'https://api.example.com/v1/chat' }), /explicit order/)
+  const wrongSource = createRequestRewriter({ rules: () => ({ id: 'broken' }), onRecord() {} })
+  await assert.rejects(() => wrongSource({ body: 'secret', url: 'https://api.example.com/v1/chat' }), /rule source/)
 })
 
 test('规则第一次生效时费一次缓存，之后不再费', async () => {

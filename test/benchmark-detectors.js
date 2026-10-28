@@ -1,10 +1,8 @@
+import { createBoundedMatcher, createDetectorRegistry, normalizeRuleV2 } from '@leolee9086/dsh-rule-engine'
 // Reproducible real-worker measurements; timings are observations, never test thresholds.
 // Run with node --import ./test/shared-packages.js test/benchmark-detectors.js.
 import assert from 'node:assert/strict'
 import { performance } from 'node:perf_hooks'
-import { normalizeRuleV2 } from '@leolee9086/dsh-rule-engine'
-import { createBoundedMatcher } from '../src/bounded-matcher.js'
-import { createDetectorRegistry } from '../src/detector-registry.js'
 
 const declaration = match => normalizeRuleV2({ schemaVersion: 2, sourceId: 'benchmark', id: 'marker', revision: 1,
   on: ['output.delta'], select: { view: 'original', roles: ['assistant'], blockTypes: ['text'] }, match,

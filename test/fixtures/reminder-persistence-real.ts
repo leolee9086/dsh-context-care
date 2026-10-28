@@ -1,3 +1,5 @@
+import { REMINDER_DOMAIN, DeliveryState as SessionState, jsonCopy, CLAIM_DOMAIN } from '@leolee9086/dsh-rule-engine'
+import type { DeliveryStateValue as StateValue } from '@leolee9086/dsh-rule-engine'
 import type { Context } from '@deepseek-ai/cordis'
 import type { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import { mkdtemp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
@@ -7,8 +9,6 @@ import { pathToFileURL } from 'node:url'
 import { pbkdf2 } from 'node:crypto'
 import { performance } from 'node:perf_hooks'
 import { z } from 'zod'
-import { REMINDER_DOMAIN, SessionState } from '../../src/reminder-runtime/state.ts'
-import { CLAIM_DOMAIN } from '../../src/reminder-runtime/claims.ts'
 
 type StorageService = Context['storage']
 type Backend = Parameters<StorageService['backend']['register']>[1]
@@ -51,7 +51,11 @@ export async function openRealReminderStorage(existingRoot?: string) {
   const facility = new DomainConstructor(ctx, { backend: 'json' })
   const domain = await facility.open(REMINDER_DOMAIN)
   const claimDomain = await facility.open(CLAIM_DOMAIN)
-  const sessions = domain.table('sessions')
+  const sessionTable = domain.table('sessions')
+  // Domain input is durable JSON. Runtime diagnostics contain unknown values until
+  // this real storage parser accepts the JSON snapshot, just as on normal I/O.
+  const sessions = { get: (id: string) => sessionTable.get(id),
+    put: (id: string, state: StateValue) => sessionTable.put(id, REMINDER_DOMAIN.tables.sessions.valueSchema.parse(jsonCopy(state))) }
   const claims = claimDomain.table('claims')
   if (!claims.get('global')) await claims.put('global', { buckets: [] })
   let closed = false

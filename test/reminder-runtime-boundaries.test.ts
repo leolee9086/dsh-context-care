@@ -1,15 +1,13 @@
 import test from 'node:test'
+import { eventRule } from './event-rule.js'
 import assert from 'node:assert/strict'
 import { ZodError } from 'zod'
 // pnpm test builds the same runtime that the public JS adapter imports.
-import { createReminderRuntime } from '../lib/reminder-runtime/runtime.js'
+import { createReminderRuntime } from './reminder-runtime-fixture.ts'
 import { asBatch } from './batch-execute.ts'
 
 const config = { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 }
-const source = () => ({ sourceId: 'boundary-source', plugin: 'test', revision: 1, rules: [{
-  format: 'reminder/v4', id: 'notice', on: 'tool.succeeded', text: 'ORIGINAL_NOTICE',
-  when: { tool: 'probe' }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
-}] })
+const source = () => ({ sourceId: 'boundary-source', plugin: 'test', revision: 1, rules: [eventRule('tool.succeeded', { event: { tool: 'probe' } }, { template: 'ORIGINAL_NOTICE' })] })
 const event = (callId = 'probe-1') => ({ sessionId: 'boundary-session', callId, rootCallId: callId,
   name: 'probe', arguments: { file_path: 'original.ts' } })
 
@@ -128,7 +126,7 @@ test('runtime detaches registration, submitted events and returned snapshots fro
   runtime.registerSource(definition)
   const rule = definition.rules[0]
   assert.ok(rule)
-  rule.text = 'MUTATED_SOURCE'
+  rule.actions[0].template = 'MUTATED_SOURCE'
   const pending = runtime.submit(submitted)
   submitted.arguments.file_path = 'mutated.ts'
   await pending

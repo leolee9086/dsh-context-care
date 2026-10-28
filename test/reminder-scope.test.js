@@ -1,6 +1,6 @@
+import { matchesScope, normalizeScope } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { matchesScope, normalizeScope } from '../src/reminder-runtime/scope.js'
 
 test('an empty scope accepts identities with or without a preset', () => {
   const scope = normalizeScope()

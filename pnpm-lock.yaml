@@ -9,20 +9,11 @@ importers:
   .:
     dependencies:
       '@leolee9086/dsh-rule-engine':
-        specifier: 0.3.0
-        version: 0.3.0
+        specifier: 0.8.0
+        version: 0.8.0
       '@leolee9086/dsh-session-blocks':
         specifier: 0.1.0
         version: 0.1.0
-      ajv:
-        specifier: ^8.20.0
-        version: 8.20.0
-      handlebars:
-        specifier: ^4.7.10
-        version: 4.7.10
-      mdast-util-from-markdown:
-        specifier: ^2.1.0
-        version: 2.1.0
       react:
         specifier: ^18.3.1
         version: 18.3.1
@@ -669,8 +660,8 @@ packages:
     resolution: {integrity: sha512-EriSTlt5OC9/7SXkRSCAhfSxxoSUgBm33OH+IkwbdpgoqsSsUg7y3uh+IICI/Qg4BBWr3U2i39RpmycbxMq4ew==}
     engines: {node: ^12.0.0 || ^14.0.0 || >=16.0.0}
 
-  '@leolee9086/dsh-rule-engine@0.3.0':
-    resolution: {integrity: sha512-VoPIZKxHjapSw66Fg45w6F06Uqg2nDv4eJ7loIO38JvyJw7bzcrfxS1+dtb/jWxDaoP7MQGRvKTEXtMpeweftA==}
+  '@leolee9086/dsh-rule-engine@0.8.0':
+    resolution: {integrity: sha512-9P/bzoDPhvDIL/TYpPlpu+jfX6NP8knkXLByJKbQmyYRa/8uCjQodQqwx15wJ9DgMZZeOvnuoJXWOCwK0908/g==}
 
   '@leolee9086/dsh-session-blocks@0.1.0':
     resolution: {integrity: sha512-weUQ6Mx6oCT/d6wI8CmvrorODp9WAuzy8FwqWW0V3xrbt74SioLVBB48yu/3ZxTg3ZP172ZwFAHbNmovitNDuw==}
@@ -2014,7 +2005,15 @@ snapshots:
 
   '@eslint-community/regexpp@4.12.2': {}
 
-  '@leolee9086/dsh-rule-engine@0.3.0': {}
+  '@leolee9086/dsh-rule-engine@0.8.0':
+    dependencies:
+      ajv: 8.20.0
+      handlebars: 4.7.10
+      mdast-util-from-markdown: 2.1.0
+      yaml: 2.9.1
+      zod: 4.6.7
+    transitivePeerDependencies:
+      - supports-color
 
   '@leolee9086/dsh-session-blocks@0.1.0': {}
 

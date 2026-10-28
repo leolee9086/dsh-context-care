@@ -1,11 +1,13 @@
+import { restoreDeliveryEntries as restoreReminderEntries, restoreDeliveryState as restoreReminderState, DeliveryState as SessionState } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
+import { eventRule } from './event-rule.js'
 import assert from 'node:assert/strict'
-import { restoreReminderEntries, restoreReminderState } from '../lib/reminder-runtime/restore.js'
-import { createReminderRuntime } from '../lib/reminder-runtime/runtime.js'
-import { SessionState } from '../lib/reminder-runtime/state.js'
+
+import { createReminderRuntime } from './reminder-runtime-fixture.ts'
+
 import { preV4State } from './fixtures/reminder-upgrade.ts'
 
-for (const format of ['reminder/v1', 'reminder/v2', 'reminder/v3']) {
+for (const format of ['reminder/v1', 'reminder/v2', 'reminder/v3', 'reminder/v4']) {
   test(`upgrade retires ${format} candidates without replaying or erasing receipts`, async t => {
     const input = preV4State(format), original = structuredClone(input)
     const writes = new Map<string, ReturnType<typeof restoreReminderState>['state']>()
@@ -25,18 +27,17 @@ for (const format of ['reminder/v1', 'reminder/v2', 'reminder/v3']) {
     t.after(() => runtime.close())
     assert.deepEqual(await runtime.collect({ sessionId: 'upgrade-session', visible: [] }), [])
     assert.throws(() => runtime.registerSource({ sourceId: 'old', plugin: 'test', revision: 1,
-      rules: [input.candidates[0]!.rule] }), /reminder\/v4/)
+      rules: [input.candidates[0]!.rule] }), /schema|order|unknown field/)
     // Reopening the saved record has no more retirement work or duplicate audit.
     const reopened = await restoreReminderEntries(writes, () => { assert.fail('upgrade wrote twice') }, 200)
     assert.deepEqual(reopened, entries)
   })
 }
 
-test('mixed state preserves v4 pending candidates and sticky clocks', () => {
+test('mixed state preserves canonical pending candidates and sticky clocks', () => {
   const old = preV4State()
   const current = SessionState.parse({ seen: [], diagnostics: [], candidates: [{ ...old.candidates[0], id: 'current',
-    rule: { format: 'reminder/v4', id: 'notice', on: 'tool.succeeded', when: { tool: 'probe' },
-      text: 'CURRENT_NOTICE', effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } } }],
+    rule: eventRule('tool.succeeded', { event: { tool: 'probe' } }, { template: 'CURRENT_NOTICE' }) }],
     stickies: [{ key: 'sticky', activationId: 'activation', sourceId: 'source', ruleId: 'notice',
       sessionId: 'upgrade-session', text: 'STICKY', title: 'Sticky', clock: 'human-turn',
       remaining: 2, cooldown: 3, charged: true, lastHumanId: 'human-1' }] })
@@ -46,11 +47,14 @@ test('mixed state preserves v4 pending candidates and sticky clocks', () => {
   assert.deepEqual(state.stickies, current.stickies)
 })
 
-test('corrupt v4 and unknown formats reject without saving other records', async () => {
-  for (const format of ['reminder/v4', 'reminder/v5', 'broken']) {
-    await assert.rejects(restoreReminderEntries([
-      ['legacy', preV4State()], ['corrupt-session', preV4State(format)],
-    ], () => { assert.fail('validation failure must precede writes') }), /reminder-state-restore-failed: corrupt-session/)
+test('corrupt canonical records and malformed receipts reject before saving other records', async () => {
+  for (const fault of [
+    { ...preV4State(), candidates: [{ ...preV4State().candidates[0], rule: { schemaVersion: 2 } }] },
+    { ...preV4State(), candidates: [{ id: 'missing-identity' }] },
+    null,
+  ]) {
+    await assert.rejects(restoreReminderEntries([['legacy', preV4State()], ['corrupt-session', fault]],
+      () => { assert.fail('validation failure must precede writes') }), /reminder-state-restore-failed: corrupt-session/)
   }
 })
 

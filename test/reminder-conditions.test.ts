@@ -1,8 +1,7 @@
+import { compileSnapshotCondition as compileReminderCondition, evaluateSnapshotCondition as matchReminderCondition, executeEventMatch as executeReminderMatch } from '@leolee9086/dsh-rule-engine'
+import type { SnapshotCondition as ReminderCondition, TextCountResult } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { compileReminderCondition, matchReminderCondition, type ReminderCondition } from '../lib/reminder-runtime/conditions.js'
-import type { TextCountResult } from '../lib/reminder-runtime/text-count.js'
-import { executeReminderMatch } from '../lib/reminder-runtime/matcher.js'
 
 const text = '目标目标。普通。'
 const snapshot = { event: { output: { text } }, tool: { output: { text } }, facts: {}, context: {} }

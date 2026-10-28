@@ -1,9 +1,11 @@
+import type { RuleDeclaration as ReminderRuleInput } from '@leolee9086/dsh-rule-engine'
+import { isDefiniteStorageFailure, createBoundedMatcher } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
+import { eventRule } from './event-rule.js'
 import assert from 'node:assert/strict'
 import { rm } from 'node:fs/promises'
-import { createReminderRuntime, type ReminderRuleInput } from '../src/reminder-runtime/runtime.ts'
-import { isDefiniteStorageFailure } from '../src/reminder-runtime/persistence.ts'
-import { createBoundedMatcher } from '../src/bounded-matcher.js'
+import { createReminderRuntime } from './reminder-runtime-fixture.ts'
+
 import { openRealReminderStorage, obstructRecord } from './fixtures/reminder-persistence-real.ts'
 
 test('real request: unrelated scopes do not extend the current presence lookback', async t => {
@@ -12,11 +14,10 @@ test('real request: unrelated scopes do not extend the current presence lookback
     config: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 },
     execute: (input, signal, timing) => matcher.detect(input, signal, timing) })
   t.after(async () => { await runtime.close(); await matcher.close() })
-  const rule: ReminderRuleInput = { format: 'reminder/v4', id: 'presence', on: 'request.before', text: 'RECENT',
-    when: { humanActivity: { withinSeconds: 1 } }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } }
+  const rule = eventRule('request.before', { id: 'presence', event: { humanActivity: { withinSeconds: 1 } } }, { template: 'RECENT' })
   runtime.registerSource({ sourceId: 'here', plugin: 'test', revision: 1, rules: [rule] })
   runtime.registerSource({ sourceId: 'elsewhere', plugin: 'test', revision: 1, scope: { sessionIds: ['other'] },
-    rules: [{ ...rule, when: { humanActivity: { withinSeconds: 300 } } }] })
+    rules: [{ ...rule, event: { humanActivity: { withinSeconds: 300 } } }] })
   const reads: number[] = []
   const recent = { length: 1000000, at(index: number) {
     reads.push(index)
@@ -53,12 +54,8 @@ test('real request: failed claim and snooze cannot suppress delivery; acknowledg
       await store.close()
       await rm(store.root, { recursive: true })
     })
-    const rule: ReminderRuleInput = {
-      format: 'reminder/v4', id: 'night', on: 'request.before', text: 'A real request reminder',
-      when: { timeWindow: { start: '23:00', end: '06:00', timeZone: 'local' },
-        humanActivity: { withinSeconds: 300 } },
-      effect: { kind: 'remind', deliver: { model: { once: 'window' } } },
-    }
+    const rule: ReminderRuleInput = eventRule('request.before', { id: 'night', event: { timeWindow: { start: '23:00', end: '06:00', timeZone: 'local' }, humanActivity: { withinSeconds: 300 } } },
+      { template: 'A real request reminder', delivery: { model: { once: 'window' } } })
     runtime.registerSource({ sourceId: 'real-request', plugin: 'test', revision: 1, rules: [rule] })
     const human = { id: 'human', role: 'user', content: [{ type: 'text', text: 'Continue' }], source: { kind: 'user' } }
     await matcher.warmup()

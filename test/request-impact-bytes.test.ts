@@ -1,8 +1,7 @@
+import { publicRequestBytes, requestImpact, createRequestPlanCache } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { publicRequestBytes } from '../lib/request-impact-bytes.js'
-import { requestImpact } from '../src/request-impact.js'
-import { createRequestPlanCache } from '../lib/request-plan-cache.js'
+
 import { createSessionCache } from '../lib/session-cache.js'
 import { planRequestV2 } from '../src/request-plan.js'
 
@@ -11,7 +10,8 @@ const input = () => ({ provider: 'p', model: 'm', system: '中文🙂', tools: [
 
 test('public request bytes preserve full fields order Unicode and exclusions without truncation', () => {
   const request = { messages: [], system: '中🙂', temperature: 0, maxTokens: 12, stop: ['STOP'], reasoningEffort: 'high',
-    tools: [{ name: '工具' }], provider: 'p', model: 'm', signal: new AbortController().signal, privateField: 'not public' }
+    tools: [{ name: '工具' }], provider: 'p', model: 'm', signal: new AbortController().signal,
+    get privateField(): never { throw new Error('private-request-field-read') } }
   const expected = '{"provider":"p","model":"m","reasoningEffort":"high","temperature":0,"maxTokens":12,"stop":["STOP"],"system":"中🙂","tools":[{"name":"工具"}],"messages":[]}'
   assert.deepEqual(publicRequestBytes(request), Buffer.from(expected, 'utf8'))
   const large = input(); assert.ok(publicRequestBytes(large).length > 8192)

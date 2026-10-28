@@ -1,6 +1,6 @@
+import { withPlanningToken } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { withPlanningToken } from '../lib/planning-token.js'
 
 test('planning token serializes unchanged owners once per synchronous pass and rejects escaped predicates', () => {
   let reads = 0

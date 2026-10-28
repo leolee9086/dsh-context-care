@@ -1,7 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { indexRequestBlocks, orderRequestRemovals } from '../lib/request-block-index.js'
-import { groupRulesBySource, indexFirstRules } from '../lib/request-rule-index.js'
+import { indexRequestBlocks, orderRequestRemovals, groupRulesBySource, indexFirstRules } from '@leolee9086/dsh-rule-engine'
 
 test('explicit anchors lazily retain the first model id without changing last-id patch lookup', () => {
   let reads = 0

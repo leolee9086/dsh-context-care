@@ -1,12 +1,11 @@
+import { createRequestPlanCache, requestImpact, createTemplates, normalizeRuleV2, detectRulesV2, applyBlockPatchesV2 } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createSessionCache } from '../lib/session-cache.js'
-import { createRequestPlanCache } from '../lib/request-plan-cache.js'
+
 import { modelRequestBlocks, projectRequestMessage } from '../src/request-blocks.js'
-import { requestImpact } from '../src/request-impact.js'
+
 import { planRequestV2 } from '../src/request-plan.js'
-import { createTemplates } from '../src/templates.js'
-import { normalizeRuleV2, detectRulesV2 } from '@leolee9086/dsh-rule-engine'
 
 test('explicit model anchors keep first-match placement and unavailable anchors skip dependent actions', t => {
   const cache = createSessionCache(); t.after(() => cache.close())
@@ -36,6 +35,31 @@ test('explicit model anchors keep first-match placement and unavailable anchors 
     assert.equal(missing.request, request); assert.equal(missing.records[0].reason, 'injection-anchor-unavailable')
   }
   assert.equal(request.messages.length, 2)
+})
+
+test('multiple argument edits preserve full snapshots, binding baseline, conflicts and dependent skips', () => {
+  const request = { messages: [{ role: 'assistant', content: [{ type: 'tool-call', id: 'one', name: 'inspect', arguments: '{"nested":{"x":1,"y":2},"list":[1,2],"a/b":3}' }] },
+    { role: 'tool', toolCallId: 'one', content: [{ type: 'text', text: 'RESULT' }] }] }
+  const before = structuredClone(request), blocks = modelRequestBlocks('args', request, 'one', { byId: new Map() }, 'turn')
+  const edit = (id, path, value, dependsOn = []) => ({ id, kind: 'replace', stage: 'request.assemble', enabledDefault: true, patch: { kind: 'tool-arguments', path, value }, dependsOn })
+  const rule = normalizeRuleV2({ schemaVersion: 2, sourceId: 'test', id: 'args-many', revision: 1, title: 'Arguments', on: ['request.assemble'],
+    select: { view: 'model', roles: ['assistant'], blockTypes: ['tool-call'] }, match: { kind: 'always' }, actions: [
+      edit('first', '/nested/x', 9), edit('bound', '/nested/y', { bind: 'tool.arguments.nested.x' }),
+      edit('overlap', '/nested', {}), { id: 'child', kind: 'notify', stage: 'request.assemble', enabledDefault: true, template: 'NO', dependsOn: ['overlap'] },
+      edit('list', '/list/0', 7), edit('escaped', '/a~1b', 4), edit('again', '/list/0', 99),
+    ] })
+  const events = detectRulesV2({ rules: [rule], blocks, stage: 'request.assemble' })
+  const input = { request, blocks, rules: [rule], events, templates: createTemplates(), snapshot: {}, decision: () => ({ enabled: true }) }
+  const planned = planRequestV2(input), records = planned.records
+  assert.deepEqual(records.map(row => row.status), ['planned', 'planned', 'skipped', 'skipped', 'planned', 'planned', 'skipped'])
+  assert.equal(records[2].reason, 'overlapping-argument-patch'); assert.equal(records[3].reason, 'dependency-not-planned')
+  assert.equal(records[0].before, request.messages[0].content[0].arguments)
+  assert.equal(records[1].before, records[0].after); assert.equal(records[4].before, records[1].after); assert.equal(records[5].before, records[4].after)
+  assert.deepEqual(JSON.parse(planned.request.messages[0].content[0].arguments), { nested: { x: 9, y: 1 }, list: [7, 2], 'a/b': 4 })
+  assert.equal(planned.scheduled.length, 0); assert.deepEqual(request, before)
+  const missingBinding = { ...rule, actions: [edit('bad', '/__proto__/x', { bind: 'tool.arguments.missing' })] }
+  assert.throws(() => planRequestV2({ ...input, rules: [missingBinding] }), /missing binding/)
+  assert.throws(() => planRequestV2({ ...input, rules: [{ ...rule, actions: [edit('bad', '/__proto__/x', 1)] }] }), /unsafe-path/)
 })
 
 test('cached tool arguments invalidate only their message and paired filtering preserves old cuts', t => {
@@ -85,6 +109,63 @@ test('cache-budget replanning does not reproject unchanged messages or leak muta
   assert.equal(cache.report().find(row => row.name === 'request-plan-actions')?.work, 1, 'budget replanning shares only the immutable action structure')
   assert.equal(cache.report().find(row => row.name === 'request-plan-pairs')?.work, 3, 'one baseline and one final two-message candidate are indexed, not every retry')
   assert.equal(cache.report().find(row => row.name === 'request-model-projection')?.work, 1)
+})
+
+test('request text batches match original patch decisions and final text without replaying old blocks', () => {
+  const request = { system: 'SYSTEM🙂', messages: Array.from({ length: 20 }, (_, index) => ({ role: 'user', content: [{ type: 'text', text: `0123456789🙂ABCDE:${index}` }] })) }
+  const original = structuredClone(request), blocks = modelRequestBlocks('batch', request, 'one', { byId: new Map() }, 'turn')
+  const actions = [{ id: 'z-first', kind: 'replace', stage: 'request.assemble', dependsOn: [], template: 'ONE' },
+    { id: 'a-second', kind: 'replace', stage: 'request.assemble', dependsOn: ['z-first'], template: 'TWO🙂' },
+    { id: 'z-third', kind: 'replace', stage: 'request.assemble', dependsOn: ['a-second'], template: 'THREE' },
+    { id: 'notice', kind: 'notify', stage: 'request.assemble', dependsOn: ['z-third'], template: 'NOTICE' }]
+  const rules = [{ sourceId: 's', id: 'r', priority: 3, actions }]
+  const events = blocks.filter(block => block.messageIndex >= 0).flatMap((block, index) => [
+    { sourceId: 's', ruleId: 'r', ruleRevision: 1, occurrenceId: `e:${index}`, stage: 'request.assemble', blockId: block.id, block, ranges: [[0, 3], [8, 8]], captures: [] },
+    { sourceId: 's', ruleId: 'r', ruleRevision: 1, occurrenceId: `f:${index}`, stage: 'request.assemble', blockId: block.id, block, ranges: [[4, 5]], captures: [] }])
+  const committed = [], statuses = [], scheduled = []
+  for (const event of events) {
+    const outcomes = new Map()
+    for (const action of actions) {
+      if (action.dependsOn.some(id => outcomes.get(id) === false)) { statuses.push('skipped'); outcomes.set(action.id, false); continue }
+      if (action.kind === 'replace') {
+        const candidates = event.ranges.map(range => ({ blockId: event.blockId, actionId: `${event.occurrenceId}:${action.id}`, priority: 3, range, text: action.template }))
+        if (!applyBlockPatchesV2(blocks, [...committed, ...candidates]).results.some(row => row.actionId === candidates[0].actionId && row.status === 'planned')) { statuses.push('skipped'); outcomes.set(action.id, false); continue }
+        committed.push(...candidates)
+      } else scheduled.push(event.occurrenceId)
+      statuses.push('planned'); outcomes.set(action.id, true)
+    }
+  }
+  const expected = applyBlockPatchesV2(blocks, committed)
+  let rawReads = 0
+  for (const block of blocks) { const raw = block.raw; Object.defineProperty(block, 'raw', { get() { rawReads++; return raw }, enumerable: true }) }
+  const result = planRequestV2({ request, blocks, rules, events, templates: { render: value => value }, snapshot: {}, decision: () => ({ enabled: true }) })
+  assert.deepEqual(result.records.slice(0, statuses.length).map(row => row.status), statuses)
+  assert.deepEqual(result.records.slice(statuses.length), expected.results)
+  assert.deepEqual(result.request.messages.map(message => message.content[0].text), expected.blocks.slice(1).map(block => block.text))
+  assert.deepEqual(result.scheduled.map(row => row.event.occurrenceId), scheduled)
+  assert.equal(result.request.system, request.system); assert.deepEqual(request, original)
+  assert.ok(rawReads < events.length * actions.length * 4, `request planning reads ${rawReads} raw bodies, not every body per candidate`)
+})
+
+test('request injection merge retains system and message order, identities, filtering and byte budget', () => {
+  const request = { system: 'BASE', messages: [{ id: 'one', role: 'user', content: [{ type: 'text', text: 'ONE' }] },
+    { id: 'two', role: 'user', content: [{ type: 'text', text: 'TWO' }] }] }
+  const original = structuredClone(request), blocks = modelRequestBlocks('inject', request, 'one', { byId: new Map() }, 'turn')
+  const targets = [{ role: 'system', anchor: 'start' }, { role: 'system', anchor: 'end' }, { role: 'user', anchor: 'start' },
+    { role: 'user', anchor: 'end' }, { role: 'assistant', anchor: 'depth', depth: 1 }, { role: 'user', anchor: blocks[2].id, position: 'before' }]
+  const actions = targets.map((target, index) => ({ id: `a:${index}`, kind: 'inject', stage: 'request.assemble', dependsOn: [], template: `INJECT_${index}`, target: { view: 'model', ...target } }))
+  actions.push({ id: 'filter', kind: 'filter', stage: 'request.assemble', dependsOn: [] })
+  const rule = { sourceId: 's', id: 'r', priority: 2, actions }, event = { sourceId: 's', ruleId: 'r', ruleRevision: 1, occurrenceId: 'e', stage: 'request.assemble', blockId: blocks[1].id, block: blocks[1], ranges: [], captures: [] }
+  const input = { request, blocks, rules: [rule], events: [event], templates: { render: value => value }, snapshot: {}, decision: () => ({ enabled: true }) }
+  const result = planRequestV2(input)
+  assert.equal(result.request.system, 'INJECT_0\nBASE\nINJECT_1')
+  assert.deepEqual(result.request.messages.map(message => message.content[0].text), ['INJECT_2', 'INJECT_4', 'INJECT_5', 'TWO', 'INJECT_3'])
+  for (const message of result.request.messages.filter(message => message.id.startsWith('context-care:'))) {
+    assert.match(message.id, /^context-care:[a-f0-9]{64}$/); assert.equal(message.source.kind, 'plugin:dsh-context-care:workbench')
+  }
+  assert.deepEqual(planRequestV2(input).request, result.request); assert.deepEqual(request, original)
+  assert.deepEqual(planRequestV2({ ...input, maxRequestBytes: result.impact.afterBytes }).request, result.request)
+  assert.throws(() => planRequestV2({ ...input, maxRequestBytes: result.impact.afterBytes - 1 }), /request-byte-budget-exceeded/)
 })
 
 test('real request replacement invalidates only its message and keeps patched results writable', t => {

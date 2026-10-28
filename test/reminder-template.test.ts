@@ -1,9 +1,10 @@
+import type { MessageView } from '@leolee9086/dsh-rule-engine'
+import { createTemplates, createBoundedMatcher } from '@leolee9086/dsh-rule-engine'
 import test, { after } from 'node:test'
+import { eventRule } from './event-rule.js'
 import assert from 'node:assert/strict'
-import { createReminderRuntime } from '../lib/reminder-runtime/runtime.js'
-import { createTemplates } from '../src/templates.js'
-import type { MessageView } from '../lib/reminder-runtime/request-context.js'
-import { createBoundedMatcher } from '../src/bounded-matcher.js'
+import { createReminderRuntime } from './reminder-runtime-fixture.ts'
+
 const matcher = createBoundedMatcher({ timeoutMs: 2000, startupMs: 5000 })
 after(async () => { await matcher.close() })
 const port = (input: Parameters<typeof matcher.detect>[0], signal: AbortSignal, timing: Parameters<typeof matcher.detect>[2]) =>
@@ -12,9 +13,7 @@ const port = (input: Parameters<typeof matcher.detect>[0], signal: AbortSignal, 
 const config = { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 }
 const templates = createTemplates()
 const probe = (id: string) => ({ sessionId: 's', callId: id, rootCallId: id, name: 'probe', arguments: { path: 'a.ts' } })
-const rule = (text: string, extra: Record<string, unknown> = {}) => ({ format: 'reminder/v4', id: 'notice',
-  on: 'tool.succeeded', text, when: { tool: 'probe' },
-  effect: { kind: 'remind', deliver: { model: { once: 'surface' } } }, ...extra })
+const rule = (text: string, delivery: NonNullable<import('@leolee9086/dsh-rule-engine').ActionDeclaration['delivery']> = { model: { once: 'surface' } }) => eventRule('tool.succeeded', { event: { tool: 'probe' } }, { template: text, delivery })
 const texts = (messages: MessageView[]) => messages.map(message =>
   (message.content ?? []).map(block => block.text ?? '').join(''))
 const ids = (visible: MessageView[]) => visible.flatMap(message => message.id === undefined ? [] : [message.id])
@@ -69,8 +68,7 @@ test('非法模板与未知变量在加载期报错，不进入投递', async t 
 test('sticky 激活复用首次渲染的正文而不重新渲染', async t => {
   const runtime = fixture(t)
   runtime.registerSource({ sourceId: 'tpl-sticky', plugin: 'test', revision: 1,
-    rules: [rule('来自 {{event.name}}', { effect: { kind: 'remind', deliver: { model: { once: 'none',
-      sticky: { lifetime: 2, cooldown: 0 } } } } })] })
+    rules: [rule('来自 {{event.name}}', { model: { once: 'none', sticky: { lifetime: 2, cooldown: 0 } } })] })
   await runtime.submit(probe('first'))
   const first = await runtime.collect({ sessionId: 's', visible: [] })
   assert.deepEqual(texts(first), ['来自 probe'])

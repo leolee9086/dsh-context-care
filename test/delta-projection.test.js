@@ -1,6 +1,7 @@
+import { createDeltaProjection } from '@leolee9086/dsh-rule-engine'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createDeltaProjection } from '../src/delta-projection.js'
+
 const projection = options => createDeltaProjection({ sessionId: 's', requestId: 'request', attemptId: 'attempt', turnId: 'turn', ...options })
 const chunk = (text, index = 0, type = 'text-delta') => ({ type, index, text })
 

@@ -1,4 +1,6 @@
+import { completionStateKey, createCompletionObserver } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
+import { eventRule } from './event-rule.js'
 import assert from 'node:assert/strict'
 import { pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
@@ -9,7 +11,7 @@ const pluginModule = path => import(process.env.DSH_TEST_PLUGIN_ROOT
   ? pathToFileURL(resolve(process.env.DSH_TEST_PLUGIN_ROOT, 'src', path)).href : new URL(`../src/${path}`, import.meta.url).href)
 const [plugin, hostPlugin, completionPlugin, requestPlugin, displayPlugin] = await Promise.all(
   ['index.js', 'host.js', 'completion-host.js', 'request-host.js', 'display-host.js'].map(pluginModule))
-import { completionStateKey, createCompletionObserver, createCompletionStateStore } from '../src/completion-observer.js'
+import { createCompletionStateStore } from '../src/completion-observer.js'
 import { producedBy } from '../src/producer-source.js'
 import { captureInputPricing } from '../src/input-pricing.js'
 import { journalCalibration, calibrationHeaderKey } from '../src/input-calibration.js'
@@ -199,6 +201,75 @@ test('reminder capacity API saves global settings and restores them through real
   await owned.close(reopened)
 })
 
+test('unified registry serves document and event sources from one Host-owned engine with session isolation', async t => {
+  const owned = await fixture(t, false), ctx = await owned.open(), workbench = ctx.contextCareWorkbench
+  const agent = await ctx.agentLoop.create('unified-registry', { provider: 'care-test', model: 'care-test' })
+  const other = await ctx.agentLoop.create('unified-other', { provider: 'care-test', model: 'care-test' })
+  await workbench.store.edit(agent.id, { revision: 0, operation: 'put-document', document: {
+    schemaVersion: 2, id: 'shared', revision: 1, title: 'Shared registry', rules: [{ schemaVersion: 2, id: 'replace', revision: 1,
+      on: ['request.assemble'], select: { view: 'model', roles: ['user'], blockTypes: ['text'] }, match: { kind: 'regex', pattern: 'BEFORE' },
+      actions: [{ id: 'rewrite', kind: 'replace', stage: 'request.assemble', enabledDefault: true, template: 'AFTER' }] }],
+  } })
+  const runtime = ctx.get('reminderRules'), rule = eventRule('tool.succeeded', { event: { tool: 'registry_probe' } })
+  const owner = runtime.registerSource({ sourceId: 'shared-events', plugin: 'test', sessionId: String(agent.id), revision: 1, rules: [rule] })
+  const query = id => workbench.engine.rules({ sessionId: String(id) })
+  assert.deepEqual(query(agent.id).map(rule => rule.sourceId).sort(), ['context-care:document:shared', 'shared-events'])
+  assert.deepEqual(query(other.id), [])
+  assert.deepEqual(runtime.rules({ sessionId: String(agent.id) }), query(agent.id))
+  const request = { messages: [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'BEFORE' }] })] }
+  assert.equal((await workbench.preview(agent, request)).request.messages[0].content[0].text, 'AFTER')
+  await owner.dispose()
+  const replacement = runtime.registerSource({ sourceId: 'shared-events', plugin: 'test', sessionId: String(agent.id), revision: 1, rules: [rule] })
+  await owner.dispose()
+  assert.equal(query(agent.id).filter(rule => rule.sourceId === 'shared-events').length, 1)
+  await replacement.dispose(); assert.deepEqual(query(agent.id).map(rule => rule.sourceId), ['context-care:document:shared'])
+  const engine = workbench.engine
+  await owned.close(ctx); assert.deepEqual(engine.sources(), []); assert.deepEqual(engine.rules(), [])
+})
+
+test('multi-action sticky survives empty Host caches with independent controls and frozen native bodies', async t => {
+  const owned = await fixture(t, false, {}, {}, { reminders: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
+  let ctx = await owned.open(), runtime = ctx.get('reminderRules')
+  const options = { provider: 'care-test', model: 'care-test' }, sessionId = 'multi-sticky-cold'
+  const rule = eventRule('tool.succeeded', { event: { tool: 'multi_probe' } }, { template: 'FIRST_STICKY', cooldownMs: 3600000,
+    delivery: { model: { once: 'none', sticky: { lifetime: 3, cooldown: 0 } } } })
+  rule.actions.unshift({ ...rule.actions[0], id: 'second', template: 'SECOND_STICKY', dependsOn: ['model'] })
+  const source = { sourceId: 'multi-sticky', plugin: 'test', sessionId, revision: 1, rules: [rule] }
+  runtime.registerSource(source)
+  const adapter = new CompletionAdapter(Array.from({ length: 3 }, () => ({ blocks: [{ type: 'text', text: 'Continue.' }] })))
+  ctx.llm.registerAdapter(['care-test'], adapter)
+  const agent = await ctx.agentLoop.create(sessionId, options)
+  await runtime.submit({ sessionId, name: 'multi_probe', callId: 'activation', rootCallId: 'activation' })
+  assert.deepEqual(agent.inbox.nextStep.map(message => message.content[0].text), ['FIRST_STICKY', 'SECOND_STICKY'])
+  await completionTurn(ctx, agent)
+  const notices = session => session.snapshotEvents().filter(event => event.type === 'user/message' && event.data.source.kind === 'plugin:dsh-context-care:reminder').map(event => event.data)
+  const first = notices(agent.session)
+  assert.deepEqual(first.map(message => message.source.reminder.handoff.actionId), ['model', 'second'])
+  const seed = agent.session.snapshotEvents()
+  await owned.close(ctx)
+  const fresh = await fixture(t, false, {}, {}, { reminders: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
+  ctx = await fresh.open(); runtime = ctx.get('reminderRules'); runtime.registerSource(source)
+  const coldAdapter = new CompletionAdapter(Array.from({ length: 3 }, () => ({ blocks: [{ type: 'text', text: 'Continue.' }] })))
+  ctx.llm.registerAdapter(['care-test'], coldAdapter)
+  const restored = (await ctx.agents.create({ sessionId, seed, agentOptions: options })).agent
+  const deliveries = createSessionDeliveries(ctx); t.after(() => deliveries.close())
+  const cold = await deliveries.read(sessionId, '')
+  assert.equal(cold.actionStarts.size, 2, 'native handoffs retain independent action clocks')
+  await runtime.submit({ sessionId, name: 'multi_probe', callId: 'during-cooldown', rootCallId: 'during-cooldown' })
+  assert.deepEqual(restored.inbox.nextStep, [], 'a new trigger cannot reactivate either action during cooldown')
+  assert.deepEqual(cold.stickies.map(value => [value.actionId, value.remaining, value.text]), [['model', 2, 'FIRST_STICKY'], ['second', 2, 'SECOND_STICKY']])
+  const controls = ctx.contextCareControls
+  await controls.patch(sessionId, { revision: controls.revision(sessionId), sourceId: source.sourceId, ruleId: rule.id, actionId: 'second', enabled: false })
+  await completionTurn(ctx, restored)
+  assert.deepEqual(notices(restored.session).slice(first.length).map(message => message.content[0].text), ['FIRST_STICKY'])
+  await controls.patch(sessionId, { revision: controls.revision(sessionId), sourceId: source.sourceId, ruleId: rule.id, actionId: 'second', enabled: true })
+  await completionTurn(ctx, restored)
+  const latest = notices(restored.session).slice(first.length)
+  assert.deepEqual(latest.map(message => message.content[0].text), ['FIRST_STICKY', 'FIRST_STICKY', 'SECOND_STICKY'])
+  assert.equal(new Set(notices(restored.session).map(message => String(message.id))).size, first.length + latest.length)
+  assert.equal(ctx.storageDomain.get('context_care_reminders'), undefined)
+})
+
 test('native handoff rejects a missing live Agent and accepts the same trigger after it opens', async t => {
   const owned = await fixture(t, false, {}, {}, { reminders: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
   const ctx = await owned.open(), service = ctx.get('reminderRules')
@@ -215,10 +286,7 @@ test('native handoff rejects a missing live Agent and accepts the same trigger a
     agentOptions: { provider: 'care-test', model: 'care-test' } })
   await completionTurn(ctx, initial.agent)
   await initial.dispose()
-  ctx.effect(() => service.registerSource({ sourceId: 'needs-agent', plugin: 'test', revision: 1, rules: [{
-    format: 'reminder/v4', id: 'notice', on: 'tool.succeeded', when: { tool: 'programmatic_probe' }, text: 'ACCEPTED_ON_RETRY',
-    effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
-  }] }).dispose)
+  ctx.effect(() => service.registerSource({ sourceId: 'needs-agent', plugin: 'test', revision: 1, rules: [eventRule('tool.succeeded', { event: { tool: 'programmatic_probe' } }, { template: 'ACCEPTED_ON_RETRY' })] }).dispose)
   const event = { sessionId: 'handoff-needs-agent', callId: 'retry-publication', rootCallId: 'retry-publication',
     name: 'programmatic_probe', arguments: {} }
   await assert.rejects(service.submit(event), /reminder-native-inbox-agent-unavailable/)
@@ -242,10 +310,7 @@ test('reminder service connects tool results to logged pre-step messages through
   assert.ok(service)
   const { ensureReminderService } = await pluginModule('reminder-runtime/index.js')
   assert.equal(await ensureReminderService(ctx, {}, ctx.contextCareControls), service)
-  ctx.effect(() => service.registerSource({ sourceId: 'integration-reminder', plugin: 'test', revision: 1, rules: [{
-    format: 'reminder/v4', id: 'ts', on: 'tool.succeeded', text: '禁止使用 any',
-    when: { tool: 'reminder_read', arguments: { file_path: { regex: '\\.ts$' } } }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
-  }] }).dispose)
+  ctx.effect(() => service.registerSource({ sourceId: 'integration-reminder', plugin: 'test', revision: 1, rules: [eventRule('tool.succeeded', { id: 'ts', event: { tool: 'reminder_read', arguments: { file_path: { regex: '\\.ts$' } } } }, { template: '禁止使用 any' })] }).dispose)
   ctx.effect(() => ctx.tools.register({ name: 'reminder_read', description: 'Read fixture text',
     parameters: { type: 'object', properties: { file_path: { type: 'string' } }, required: ['file_path'] },
     output: { schema: { type: 'object' }, render: () => [{ type: 'text', text: 'export const value = 1' }] },
@@ -336,10 +401,7 @@ registerNativeTriggerCases({
       parameters: { type: 'object', properties: { file_path: { type: 'string' } }, required: ['file_path'] },
       output: { schema: { type: 'string' }, render: (_args, text) => [{ type: 'text', text }] },
       async execute() { bodies++; return 'CURRENT_RESULT' } }))
-    if (handBefore) ctx.effect(() => ctx.get('reminderRules').registerSource({ sourceId: 'native-phases', plugin: 'test', revision: 1, rules: [{
-      format: 'reminder/v4', id: 'before', on: 'tool.before-execute', when: { tool: 'native_prefix_probe' },
-      text: 'BEFORE {{event.arguments.file_path}}', effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
-    }] }).dispose)
+    if (handBefore) ctx.effect(() => ctx.get('reminderRules').registerSource({ sourceId: 'native-phases', plugin: 'test', revision: 1, rules: [eventRule('tool.before-execute', { id: 'before', event: { tool: 'native_prefix_probe' } }, { template: 'BEFORE {{event.arguments.file_path}}' })] }).dispose)
     if (cancelAfterBefore || abortAt === 'after') ctx.on('tools/pre-execute', async (exec, next) => {
       const decision = await next()
       if (exec.name !== 'native_prefix_probe') return decision
@@ -478,10 +540,7 @@ registerNativeTriggerCases({
 test('committed native tool result remains a reminder trigger after execution cancellation', async t => {
   const owned = await fixture(t, false, {}, {}, { reminders: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
   const ctx = await owned.open(), runtime = ctx.get('reminderRules')
-  ctx.effect(() => runtime.registerSource({ sourceId: 'late-tool-cancel', plugin: 'test', revision: 1, rules: [{
-    format: 'reminder/v4', id: 'notice', on: 'tool.succeeded', text: 'COMMITTED_TOOL_NOTICE',
-    when: { tool: 'late_abort_probe' }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
-  }] }).dispose)
+  ctx.effect(() => runtime.registerSource({ sourceId: 'late-tool-cancel', plugin: 'test', revision: 1, rules: [eventRule('tool.succeeded', { event: { tool: 'late_abort_probe' } }, { template: 'COMMITTED_TOOL_NOTICE' })] }).dispose)
   ctx.effect(() => ctx.tools.register({ name: 'late_abort_probe', description: 'Commit before late cancellation',
     parameters: { type: 'object' }, output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
     async execute() { return 'completed tool body' } }))
@@ -533,7 +592,7 @@ test('obsolete candidate files have no production reader or writer and HTTP rout
     assert.equal(state.diagnostics.length, 0, 'retired JSON is not interpreted by the production runtime')
     assert.deepEqual(await runtime.collect({ sessionId: 'upgrade-session', visible: [] }), [])
     assert.throws(() => runtime.registerSource({ sourceId: 'old', plugin: 'test', revision: 1,
-      rules: [old.candidates[0].rule] }), /reminder\/v4/)
+      rules: [old.candidates[0].rule] }), /unknown field format/)
     const { base, cookie } = await controlCookie(ctx)
     for (const collection of ['actions', 'prompts']) {
       const response = await fetch(`${base}/context-care/${collection}?sessionId=upgrade-session&limit=20`, { headers: { cookie } })
@@ -550,9 +609,7 @@ test('a deny rule stops its own tool through the real registry and leaves other 
   const owned = await fixture(t, false, {}, {}, { reminders: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
   const ctx = await owned.open()
   ctx.effect(() => ctx.get('reminderRules').registerSource({ sourceId: 'deny-registry', plugin: 'test', revision: 1,
-    rules: [{ format: 'reminder/v4', id: 'blocked', on: 'tool.before-execute', text: '这次调用被规则拦下',
-      when: { tool: 'deny_probe' }, effect: { kind: 'deny-tool', dangerous: true, reason: '不得调用 deny_probe',
-        deliver: { model: { once: 'surface' } } } }] }).dispose)
+    rules: [eventRule('tool.before-execute', { id: 'blocked', event: { tool: 'deny_probe' } }, { template: '这次调用被规则拦下', deny: { dangerous: true, reason: '不得调用 deny_probe' } })] }).dispose)
   // The bodies record that they ran: a denial must not reach the tool at all.
   const executed = []
   for (const name of ['deny_probe', 'allow_probe']) {
@@ -582,9 +639,7 @@ test('real tool registry preserves preparation failure details and recovers afte
   const ctx = await owned.open()
   const runtime = ctx.get('reminderRules')
   ctx.effect(() => runtime.registerSource({ sourceId: 'failure-detail', plugin: 'test', revision: 1,
-    rules: [{ format: 'reminder/v4', id: 'unmatched', on: 'tool.before-execute', text: 'Unmatched denial',
-      when: { tool: 'failure_detail_probe', arguments: { block: { regex: '^yes$' } } }, effect: { kind: 'deny-tool', dangerous: true, reason: 'unmatched',
-        deliver: { model: { once: 'surface' } } } }] }).dispose)
+    rules: [eventRule('tool.before-execute', { id: 'unmatched', event: { tool: 'failure_detail_probe', arguments: { block: { regex: '^yes$' } } } }, { template: 'Unmatched denial', deny: { dangerous: true, reason: 'unmatched' } })] }).dispose)
   let executed = 0
   ctx.effect(() => ctx.tools.register({ name: 'failure_detail_probe', description: 'Observe preparation failure propagation',
     parameters: { type: 'object' }, output: { schema: { type: 'string' }, render: (_args, text) => [{ type: 'text', text }] },
@@ -769,6 +824,14 @@ registerWorkbenchPerformanceCases({ async open(t) {
     projectionWork: () => projectionCalls.mock.calls.filter(call => call.arguments[0].name === 'request-model-projection')
       .reduce((sum, call) => sum + (call.arguments[1] ?? 1), 0),
     displayWork: name => projectionCalls.mock.calls.filter(call => call.arguments[0].name === name).reduce((sum, call) => sum + (call.arguments[1] ?? 1), 0),
+    configureDisplayPatches: () => service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'display-patches', revision: 1, title: 'Display patches',
+      rules: [{ schemaVersion: 2, id: 'replace', revision: 1, on: ['display.render'],
+        select: { view: 'display', roles: ['assistant'], blockTypes: ['text'], depth: { unit: 'message', limit: 1 } }, match: { kind: 'regex', pattern: '^REPLACE_BODY' },
+        actions: [{ id: 'first', kind: 'replace', stage: 'display.render', enabledDefault: true, template: 'PATCHED' },
+          { id: 'overlap', kind: 'replace', stage: 'display.render', enabledDefault: true, dependsOn: ['first'], template: 'LOSER' },
+          { id: 'dependent', kind: 'inject', stage: 'display.render', enabledDefault: true, dependsOn: ['overlap'], template: 'MUST_NOT_APPEAR', target: { view: 'display', anchor: 'end' } }] }] } }).then(() => undefined),
+    pauseDisplayPatches: paused => ctx.contextCareControls.patch(agent.id, { revision: ctx.contextCareControls.revision(agent.id),
+      sourceId: 'context-care:document:display-patches', ruleId: 'replace', paused }).then(() => undefined),
     configureDisplay: anchor => service.store.edit(agent.id, { revision: 0, operation: 'put-document', document: { schemaVersion: 2, id: 'display-batch', revision: 1, title: 'Display batch',
       rules: [{ schemaVersion: 2, id: 'captions', revision: 1, on: ['display.render'],
         select: { view: 'display', roles: ['assistant'], blockTypes: ['text'], depth: { unit: 'message', limit: 1 } }, match: { kind: 'regex', pattern: '^DISPLAY_BODY' },
@@ -849,10 +912,7 @@ registerHistoryPerformanceCases({ async open(t) {
   const owned = await fixture(t, false), ctx = await owned.open()
   const { base, cookie } = await controlCookie(ctx)
   const runtime = ctx.get('reminderRules')
-  ctx.effect(() => runtime.registerSource({ sourceId: 'history-performance', plugin: 'test', revision: 1, rules: [{
-    format: 'reminder/v4', id: 'probe', on: 'tool.succeeded', when: { tool: 'history_performance_probe' },
-    text: 'HISTORY_PERFORMANCE_NOTICE', effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
-  }] }).dispose)
+  ctx.effect(() => runtime.registerSource({ sourceId: 'history-performance', plugin: 'test', revision: 1, rules: [eventRule('tool.succeeded', { id: 'probe', event: { tool: 'history_performance_probe' } }, { template: 'HISTORY_PERFORMANCE_NOTICE' })] }).dispose)
   ctx.llm.registerAdapter(['care-test'], new CompletionAdapter([{ blocks: [{ type: 'text', text: 'Concurrent Host turn completed.' }] }]))
   const collect = async session => runtime.collect({ sessionId: String(session.id), visible: session.deriveMessages() })
   const probe = async () => {
@@ -928,10 +988,7 @@ registerShutdownHostCases({ async open(t) {
 registerRecoveryHostCases({ async exercise(t, scenario) {
   const owned = await fixture(t, false, {}, {}, { reminders: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
   let ctx = await owned.open()
-  const source = { sourceId: 'recovery', plugin: 'test', revision: 1, rules: [{
-    format: 'reminder/v4', id: 'notice', on: 'tool.succeeded', text: 'RECOVERED_NOTICE',
-    when: { tool: 'probe' }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
-  }] }
+  const source = { sourceId: 'recovery', plugin: 'test', revision: 1, rules: [eventRule('tool.succeeded', { event: { tool: 'probe' } }, { template: 'RECOVERED_NOTICE' })] }
   const options = { provider: 'care-test', model: 'care-test' }
   let agent = (await ctx.agents.create({ sessionId: 'recovery-session', agentOptions: options })).agent
   let service = ctx.get('reminderRules'), handle = service.registerSource(source)
@@ -945,14 +1002,14 @@ registerRecoveryHostCases({ async exercise(t, scenario) {
     await owned.close(ctx)
     ctx = await owned.open(); service = ctx.get('reminderRules')
     handle = service.registerSource({ ...source, revision: 2,
-      rules: scenario.changed ? [{ ...source.rules[0], text: 'CHANGED_NOTICE' }] : source.rules })
+      rules: scenario.changed ? [{ ...source.rules[0], actions: source.rules[0].actions.map(action => ({ ...action, template: 'CHANGED_NOTICE' })) }] : source.rules })
     agent = (await ctx.agents.create({ sessionId: 'recovery-session', seed: seed.events, meta: seed.meta,
       inheritedEventCount: seed.inheritedEventCount, agentOptions: options })).agent
     // Observe the accepted frozen message before replacing its registration.
     await service.queuePending({ sessionId: String(agent.id), visible: agent.session.deriveMessages(), accepted: [...agent.inbox.nextStep] })
   }
   if (scenario.replace) {
-    handle.replace({ ...source, revision: 3, rules: [{ ...source.rules[0], text: 'TEMPORARY_NOTICE' }] })
+    handle.replace({ ...source, revision: 3, rules: [{ ...source.rules[0], actions: source.rules[0].actions.map(action => ({ ...action, template: 'TEMPORARY_NOTICE' })) }] })
     handle.replace({ ...source, revision: 4 })
   }
   ctx.llm.registerAdapter(['care-test'], new CompletionAdapter([{ blocks: [{ type: 'text', text: 'Continue after recovery.' }] }]))
@@ -970,8 +1027,7 @@ registerTimeoutHostCases({ async exercise(t, outcome, execute) {
   await ctx.loader.create({ name: '@care-test/timeout-policy' })
   await ctx.loader.await()
   ctx.effect(() => ctx.get('reminderRules').registerSource({ sourceId: 'timeout-test', plugin: 'test', revision: 1,
-    rules: [{ format: 'reminder/v4', id: 'timeout', on: 'tool.failed', text: 'TIMEOUT_ONLY_NOTICE',
-      when: { tool: 'timeout_probe', error: { code: 'TOOL_TIMEOUT' } }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } }] }).dispose)
+    rules: [eventRule('tool.failed', { id: 'timeout', event: { tool: 'timeout_probe', error: { code: 'TOOL_TIMEOUT' } } }, { template: 'TIMEOUT_ONLY_NOTICE' })] }).dispose)
   ctx.effect(() => ctx.tools.register({ name: 'timeout_probe', description: 'Exercise tool completion',
     parameters: { type: 'object' }, timeoutMs: outcome === 'cancel' ? 10000 : 30,
     output: { schema: { type: 'string' }, render: (_args, text) => [{ type: 'text', text }] },
@@ -999,10 +1055,7 @@ registerTimeoutHostCases({ async exercise(t, outcome, execute) {
 
 test('shared reminder quota limits real concurrent sessions and survives Host restart and source edits', async t => {
   const owned = await fixture(t, false, {}, {}, { reminders: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
-  const source = { sourceId: 'shared-life', plugin: 'test', revision: 1, rules: [{
-    format: 'reminder/v4', id: 'notice', on: 'request.before', text: 'SHARED_LIFETIME_NOTICE', when: {},
-    effect: { kind: 'remind', deliver: { model: { once: 'surface', shared: { reset: 'lifetime', lifetime: 'campaign-1', limit: 2 } } } },
-  }] }
+  const source = { sourceId: 'shared-life', plugin: 'test', revision: 1, rules: [eventRule('request.before', { event: {} }, { template: 'SHARED_LIFETIME_NOTICE', delivery: { model: { once: 'surface', shared: { reset: 'lifetime', lifetime: 'campaign-1', limit: 2 } } } })] }
   const ctx = await owned.open()
   ctx.effect(() => ctx.get('reminderRules').registerSource(source).dispose)
   class RecordingAdapter extends CompletionAdapter {
@@ -1029,7 +1082,7 @@ test('shared reminder quota limits real concurrent sessions and survives Host re
   const restoredRoot = await fixture(t, false)
   const resumed = await restoredRoot.open()
   resumed.effect(() => resumed.get('reminderRules').registerSource({ ...source, revision: 2,
-    rules: [{ ...source.rules[0], text: 'EDITED_SHARED_NOTICE' }] }).dispose)
+    rules: [{ ...source.rules[0], actions: source.rules[0].actions.map(action => ({ ...action, template: 'EDITED_SHARED_NOTICE' })) }] }).dispose)
   const resumedAdapter = new RecordingAdapter([{ blocks: [{ type: 'text', text: 'Still done.' }] }])
   resumed.llm.registerAdapter(['care-test'], resumedAdapter)
   await resumed.loader.create({ name: '@deepseek-ai/dsh-session-persistence-jsonl',
@@ -1055,13 +1108,9 @@ test('shared reminder cache restores accepted inbox reservations without calling
   const owned = await fixture(t, false, {}, {}, { reminders: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
   const ctx = await owned.open()
   const { createSessionClaims } = await import('../lib/reminder-runtime/session-claims.js')
-  const { changeClaims } = await import('../lib/reminder-runtime/claims.js')
+  const { changeClaims } = await import('@leolee9086/dsh-rule-engine')
   const runtime = ctx.get('reminderRules')
-  ctx.effect(() => runtime.registerSource({ sourceId: 'accepted-quota', plugin: 'test', revision: 1, rules: [{
-    format: 'reminder/v4', id: 'notice', on: 'request.before', text: 'ACCEPTED_SHARED_NOTICE', when: {},
-    effect: { kind: 'remind', deliver: { model: { once: 'surface',
-      shared: { reset: 'lifetime', lifetime: 'pending', limit: 1 } } } },
-  }] }).dispose)
+  ctx.effect(() => runtime.registerSource({ sourceId: 'accepted-quota', plugin: 'test', revision: 1, rules: [eventRule('request.before', { event: {} }, { template: 'ACCEPTED_SHARED_NOTICE', delivery: { model: { once: 'surface', shared: { reset: 'lifetime', lifetime: 'pending', limit: 1 } } } })] }).dispose)
   ctx.llm.registerAdapter(['care-test'], new CompletionAdapter([]))
   const agent = await ctx.agentLoop.create('accepted-quota-session', { provider: 'care-test', model: 'care-test' })
   await runtime.prepareRequest({ sessionId: agent.id, events: [], visible: [] })
@@ -1095,8 +1144,8 @@ test('shared reminder cache restores accepted inbox reservations without calling
 test('shared reminder window grants a new quota on the next night', async t => {
   const owned = await fixture(t, false)
   const ctx = await owned.open()
-  const { createReminderRuntime } = await pluginModule('reminder-runtime/index.js')
-  const { createBoundedMatcher } = await pluginModule('bounded-matcher.js')
+  const { createReminderRuntime } = await import('./reminder-runtime-fixture.ts')
+  const { createBoundedMatcher } = await import('@leolee9086/dsh-rule-engine')
   const { createSessionClaims } = await import('../lib/reminder-runtime/session-claims.js')
   let at = new Date(2026, 9, 14, 23).getTime()
   const claims = createSessionClaims(ctx, () => at)
@@ -1108,11 +1157,7 @@ test('shared reminder window grants a new quota on the next night', async t => {
   ctx.on('session/event', (session, event) => claims.observe(session, event))
   ctx.on('session/created', session => claims.created(session))
   ctx.effect(() => async () => { await runtime.close(); await claims.close(); await matcher.close() })
-  runtime.registerSource({ sourceId: 'shared-night', plugin: 'test', revision: 1, rules: [{
-    format: 'reminder/v4', id: 'night', on: 'request.before', text: 'Night reminder',
-    when: { timeWindow: { start: '23:00', end: '06:00' } },
-    effect: { kind: 'remind', deliver: { model: { once: 'window', shared: { reset: 'window', limit: 1 } } } },
-  }] })
+  runtime.registerSource({ sourceId: 'shared-night', plugin: 'test', revision: 1, rules: [eventRule('request.before', { id: 'night', event: { timeWindow: { start: '23:00', end: '06:00' } } }, { template: 'Night reminder', delivery: { model: { once: 'window', shared: { reset: 'window', limit: 1 } } } })] })
   for (const id of ['a', 'b', 'c']) ctx.sessions.create(id)
   await matcher.warmup()
   const prepare = sessionId => runtime.prepareRequest({ sessionId, events: [] })
@@ -2017,13 +2062,8 @@ registerScopeHostCases({ async exercise(t, scenario) {
   const owned = await fixture(t, false, {}, {}, { reminders: { ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
   const ctx = await owned.open(), service = ctx.get('reminderRules')
   ctx.effect(() => service.registerSource({ sourceId: 'scope-case', plugin: 'test', revision: 1,
-    ...(scenario.sourceScope ? { scope: scenario.sourceScope } : {}), rules: [{
-      format: 'reminder/v4', id: 'notice', on: 'tool.succeeded', text: 'SCOPED_HEADER_NOTICE',
-      ...(scenario.ruleScope ? { scope: scenario.ruleScope } : {}), when: { tool: 'scope_probe' },
-      effect: { kind: 'remind', deliver: { model: { once: 'surface', ...(scenario.sharedLimit === undefined ? {} : {
-        shared: { reset: 'lifetime', lifetime: 'scope-campaign', limit: scenario.sharedLimit },
-      }) } } },
-    }] }).dispose)
+    ...(scenario.sourceScope ? { scope: scenario.sourceScope } : {}), rules: [eventRule('tool.succeeded', { ...(scenario.ruleScope ? { recipient: scenario.ruleScope } : {}), event: { tool: 'scope_probe' } },
+      { template: 'SCOPED_HEADER_NOTICE', delivery: { model: { once: 'surface', ...(scenario.sharedLimit === undefined ? {} : { shared: { reset: 'lifetime', lifetime: 'scope-campaign', limit: scenario.sharedLimit } }) } } })] }).dispose)
   class ScopeAdapter extends CompletionAdapter {
     requests = new Map()
     async *stream(request) { this.requests.set(request.sessionId, JSON.stringify(request.messages)); yield* super.stream(request) }
@@ -2098,21 +2138,12 @@ for (const outcome of ['completed', 'failed', 'cancelled', 'legacy', 'partial'])
     }
     return () => { runtime.submit = submit }
   })
-  if (outcome !== 'legacy') ctx.effect(() => runtime.registerSource({ sourceId: 'native-output-replay', plugin: 'test', revision: 1, rules: [{
-    format: 'reminder/v4', id: 'observe', on: 'assistant.output', text: 'unused',
-    when: { blockTypes: ['text', 'reasoning'], pattern: { kind: 'literal', text: 'THIS_PATTERN_DOES_NOT_APPEAR' } },
-    effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
-  }] }).dispose)
+  if (outcome !== 'legacy') ctx.effect(() => runtime.registerSource({ sourceId: 'native-output-replay', plugin: 'test', revision: 1, rules: [eventRule('assistant.output', { id: 'observe', event: { blockTypes: ['text', 'reasoning'], pattern: { kind: 'literal', text: 'THIS_PATTERN_DOES_NOT_APPEAR' } } }, { template: 'unused' })] }).dispose)
   const tracePath = resolve(owned.root, 'output-judges.jsonl')
   const matches = { sourceId: 'native-output-matches', plugin: 'test', revision: 1,
-    rules: ['prefix', 'TEXT', 'prefix', 'TEXT'].map((text, index) => ({
-      format: 'reminder/v4', id: `r${index}`, on: 'assistant.output', text: `OUTPUT_${index}`,
-      ...(index >= 2 ? { exclusiveGroup: 'same-output-choice' } : {}),
-      when: { blockTypes: ['text'], pattern: outcome === 'partial' && index === 2
-        ? { kind: 'regex', regex: '^pref$' } : { kind: 'literal', text } },
-      judge: { ref: 'native-output', revision: 1, params: { tracePath, label: String(index) } },
-      effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
-    })) }
+    rules: ['prefix', 'TEXT', 'prefix', 'TEXT'].map((text, index) => eventRule('assistant.output', { id: `r${index}`,
+      ...(index >= 2 ? { exclusiveGroup: 'same-output-choice' } : {}), event: { blockTypes: ['text'], pattern: outcome === 'partial' && index === 2 ? { kind: 'regex', regex: '^pref$' } : { kind: 'literal', text } },
+      judge: { ref: 'native-output', revision: 1, params: { tracePath, label: String(index) } } }, { template: `OUTPUT_${index}` })) }
   function registerOutputRules(scope) {
     const rules = scope.get('reminderRules')
     scope.effect(() => rules.registerDetector({ ref: 'native-output', revision: 1,
@@ -3552,7 +3583,7 @@ test('Workbench v2 shares token and cache budgets across real Host cascade passe
   const agent = await ctx.agentLoop.create('budget-cascade', { provider: 'care-test', model: 'care-test' })
   await ctx.contextCareWorkbench.close()
   const { openWorkbenchHost } = await pluginModule('workbench-host.js')
-  const { requestImpact } = await pluginModule('request-impact.js')
+  const { requestImpact } = await import('@leolee9086/dsh-rule-engine')
   const price = text => Math.ceil(ctx.tokenMeter.estimateMessage({ role: 'user', content: [{ type: 'text', text }] }))
   const limited = await openWorkbenchHost(ctx, ctx.contextCareControls, { maxInjectedTokens: price('SECOND_LINK') })
   t.after(() => limited.close())
@@ -4337,7 +4368,6 @@ test('Workbench v2 display compares pure copies and re-renders history with curr
   assert.deepEqual((await response.json()).projections[0].after.map(block => block.text), ['FALLBACK'])
   assert.deepEqual(agent.session.snapshotEvents(), before)
 })
-
 
 test('actual display template failure stays visible while two conversation turns complete', async t => {
   const owned = await fixture(t, false); const ctx = await owned.open(); const service = ctx.contextCareWorkbench

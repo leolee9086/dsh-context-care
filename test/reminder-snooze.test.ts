@@ -1,6 +1,7 @@
+import { readSnoozeResult } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readSnoozeResult, snoozeOutput, snoozeResult } from '../src/reminder-runtime/snooze.ts'
+import { snoozeOutput, snoozeResult } from '../src/reminder-runtime/snooze.ts'
 
 const windows = [{ sourceId: 'night', ruleId: 'rest', key: '["night","rest","model","2026-10-22"]', until: 1792648800000 }]
 

@@ -1,7 +1,7 @@
+import { resolveScopedPrompts } from '@leolee9086/dsh-rule-engine'
 /** S-forge curves, separated from host lifecycle and model-facing text. */
 import { DEFAULT_MAINTENANCE, resolveMaintenanceConfig } from './maintenance-policy.js'
 import { BUDGET_DEFAULTS, resolveBudgetConfig } from './context-budget.js'
-import { resolveScopedPrompts } from './scoped-prompts.js'
 
 export function resolveConfig(raw = {}) {
   const spec = {
@@ -17,12 +17,10 @@ export function resolveConfig(raw = {}) {
     // 一份写到几百字的笔记，下一个自己不用再去翻日志就能接着干。
     minNoteChars: 1000,
     maxNoteChars: 10000,
-    // Legacy setting accepted during migration; token-meter alone owns input calibration.
-    providerUsageRatio: 2.5,
     ...raw,
   }
   for (const key of Object.keys(raw)) {
-    if (!['budgetRatio', 'wakefulnessRatio', 'fatigueExponent', 'retainRatio', 'minFreshTokens', 'minNoteChars', 'maxNoteChars', 'providerUsageRatio', 'softBudgetRatio', 'hardBudgetRatio', 'hysteresisRatio', 'maxPasses', 'auxiliaryBudgetRatio', 'safetyTokens', 'burstTokens', 'releaseMarginTokens', 'summarySafetyTokens', 'maxOverflowRetries', 'retainTokens', 'contextBudgetTokens', 'billingInputCeilingTokens', 'routeBudgets', 'summary', 'modelScopedPrompts', 'maxSummaryRepairRetries', 'maxSummaryCallsPerAction', 'rangeStrategy', 'expectedCheckpointTokens'].includes(key)) {
+    if (!['budgetRatio', 'wakefulnessRatio', 'fatigueExponent', 'retainRatio', 'minFreshTokens', 'minNoteChars', 'maxNoteChars', 'softBudgetRatio', 'hardBudgetRatio', 'hysteresisRatio', 'maxPasses', 'auxiliaryBudgetRatio', 'safetyTokens', 'burstTokens', 'releaseMarginTokens', 'summarySafetyTokens', 'maxOverflowRetries', 'retainTokens', 'contextBudgetTokens', 'billingInputCeilingTokens', 'routeBudgets', 'summary', 'modelScopedPrompts', 'maxSummaryRepairRetries', 'maxSummaryCallsPerAction', 'rangeStrategy', 'expectedCheckpointTokens'].includes(key)) {
       throw new Error(`context-care: unknown config ${key}`)
     }
   }
@@ -33,7 +31,6 @@ export function resolveConfig(raw = {}) {
   }
   if (spec.retainRatio >= spec.budgetRatio) throw new Error('context-care: retainRatio must be below budgetRatio')
   if (!Number.isFinite(spec.fatigueExponent) || spec.fatigueExponent <= 0) throw new Error('context-care: invalid fatigueExponent')
-  if (!Number.isFinite(spec.providerUsageRatio) || spec.providerUsageRatio <= 1) throw new Error('context-care: providerUsageRatio must be above 1')
   for (const key of ['minFreshTokens', 'minNoteChars', 'maxNoteChars']) {
     if (!Number.isSafeInteger(spec[key]) || spec[key] <= 0) throw new Error(`context-care: ${key} must be a positive integer`)
   }

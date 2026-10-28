@@ -1,13 +1,11 @@
 import test from 'node:test'
+import { eventRule } from './event-rule.js'
 import assert from 'node:assert/strict'
-import { createReminderRuntime, type ReminderSource } from '../lib/reminder-runtime/runtime.js'
+import { createReminderRuntime, type ReminderSource } from './reminder-runtime-fixture.ts'
 import { asBatch } from './batch-execute.ts'
 
 const source = (eventType: 'tool/call' | 'assistant/message'): ReminderSource => ({
-  sourceId: eventType, plugin: 'test', revision: 1, rules: [{
-    format: 'reminder/v4', id: eventType, on: 'session.event', when: { eventType }, text: eventType,
-    effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
-  }],
+  sourceId: eventType, plugin: 'test', revision: 1, rules: [eventRule('session.event', { id: eventType, event: { eventType } }, { template: eventType })],
 })
 
 test('adding a source never discovers old events and current explicit submissions remain deduplicated', async t => {

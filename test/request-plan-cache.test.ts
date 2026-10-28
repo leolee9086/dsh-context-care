@@ -1,10 +1,9 @@
+import { createRequestPlanCache, requestImpact, indexRequestBlocks, filteredAncestor } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createRequestPlanCache } from '../lib/request-plan-cache.js'
+
 import { createSessionCache } from '../lib/session-cache.js'
 import { planRequestV2 } from '../src/request-plan.js'
-import { requestImpact } from '../src/request-impact.js'
-import { indexRequestBlocks, filteredAncestor } from '../lib/request-block-index.js'
 
 const input = () => ({ messages: [{ id: 'input', role: 'user', content: [{ type: 'text', text: 'Keep exactly.' }] }] })
 const options = { blocks: [], rules: [], events: [], templates: {}, snapshot: {}, decision: () => ({ enabled: false }) }
@@ -73,6 +72,8 @@ test('request plans own modified cleanup payloads and preserve the original', t 
   const planned = planRequestV2({ ...options, request, analysis })
   assert.notEqual(planned.request, request)
   assert.equal(planned.request.messages.length, 1); assert.equal(request.messages.length, 2)
-  planned.request.messages[0].content[0].text = 'Edited owned result'
+  const owned = planned.request.messages[0].content[0]
+  assert.ok(owned !== null && typeof owned === 'object' && 'text' in owned)
+  owned.text = 'Edited owned result'
   assert.equal(request.messages[0].content[0].text, 'Keep exactly.')
 })

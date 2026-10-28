@@ -1,9 +1,9 @@
+import { createRequestModelProjection } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createRequestModelProjection } from '../lib/request-model-projection.js'
+
 import { createSessionCache } from '../lib/session-cache.js'
 import { modelRequestBlocks, projectRequestMessage } from '../src/request-blocks.js'
-
 
 const shared = () => ({ byId: new Map() })
 const input = () => ({ system: 'SYSTEM', messages: Array.from({ length: 1000 }, (_, index) => ({ role: 'user',

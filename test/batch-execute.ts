@@ -1,5 +1,6 @@
+import type { EventWork as Work } from '@leolee9086/dsh-rule-engine'
 import { performance } from 'node:perf_hooks'
-import type { Work } from '../lib/reminder-runtime/state.js'
+
 
 /** 只认单条 `reminder` 的判定函数，就是几乎所有测试原来写的那个形状。 */
 export type SingleExecutor = (input: Work, signal?: AbortSignal, timing?: unknown) => Promise<unknown>

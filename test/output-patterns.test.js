@@ -1,7 +1,6 @@
+import { detectOutputPatterns, OutputPatternConfig, patternTrigger, resolveScopedPrompts, selectScopedPrompts } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { detectOutputPatterns, OutputPatternConfig, patternTrigger } from '../src/output-patterns.js'
-import { resolveScopedPrompts, selectScopedPrompts } from '../src/scoped-prompts.js'
 
 import { detectorFixture } from './fixtures/detector.js'
 
@@ -20,7 +19,10 @@ test('Markdown code, quotes and local vocabulary discussion are excluded but com
   assert.equal(result.N, 1)
   assert.equal(result.exclusions.length, 1)
   assert.equal(patternTrigger(result, [result], detectorFixture), undefined)
-  assert.equal(detectOutputPatterns('~~~\n我不会做\n~~~', detectorFixture).D, null)
+  const empty = detectOutputPatterns('~~~\n我不会做\n~~~', detectorFixture)
+  assert.equal(empty.D, null)
+  const zeroThresholds = OutputPatternConfig.parse({ ...detectorFixture, thresholds: [{ minStatements: 0, minHits: 0, minHitStatements: 0, minDensity: 0, minFamilyStatements: 0 }] })
+  assert.equal(patternTrigger(empty, [empty], zeroThresholds), undefined, 'unmeasured density must not become zero-density evidence')
 })
 
 test('sparse output stays below thresholds; repeated short and window outputs trigger', () => {

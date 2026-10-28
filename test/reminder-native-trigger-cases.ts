@@ -1,10 +1,12 @@
+import type { CustomEventDescriptor } from '@leolee9086/dsh-rule-engine'
 import test, { type TestContext } from 'node:test'
+import { eventRule } from './event-rule.js'
 import assert from 'node:assert/strict'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { SessionEvent, SessionHeader, SessionLogOffset } from '@deepseek-ai/dsh-session'
-import type { ReminderService, ReminderSource, CustomEventDescriptor } from '../lib/reminder-runtime/runtime.js'
+import type { ReminderService, ReminderSource } from '../lib/reminder-runtime/runtime.js'
 import { NativeObservation, NativeSessionObservation, NativeBeforeObservation, NativeAliasObservation } from './fixtures/reminder-native-context.ts'
 
 interface NativeSeed {
@@ -56,11 +58,7 @@ export function registerNativeTriggerCases(harness: Harness) {
     t.after(() => rm(root, { recursive: true, force: true }))
     const detector = { ref: 'native-alias', revision: 1, module: new URL('./fixtures/reminder-native-context.ts', import.meta.url).href,
       exportName: 'judgeAlias' }
-    const source: ReminderSource = { sourceId: 'native-alias', plugin: 'test', revision: 1, rules: [{
-      format: 'reminder/v4', id: 'alias', on: 'session.event', when: { eventType: descriptor.name },
-      text: 'CUSTOM_NATIVE_RESULT', judge: { ref: detector.ref, revision: 1, params: { tracePath } },
-      effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
-    }] }
+    const source: ReminderSource = { sourceId: 'native-alias', plugin: 'test', revision: 1, rules: [eventRule('session.event', { id: 'alias', event: { eventType: descriptor.name }, judge: { ref: detector.ref, revision: 1, params: { tracePath } } }, { template: 'CUSTOM_NATIVE_RESULT' })] }
     const seed = await harness.capture(t)
     const cold = await harness.open(t, seed)
     const dispose = cold.runtime.registerCustomEvents([descriptor])
@@ -122,12 +120,8 @@ export function registerNativeTriggerCases(harness: Harness) {
     const descriptor: CustomEventDescriptor = { name: 'care/native-human-input', nativeEvent: 'user/message' }
     const detector = { ref: 'native-alias-handoff', revision: 1,
       module: new URL('./fixtures/reminder-native-context.ts', import.meta.url).href, exportName: 'judgeAlias' }
-    const source: ReminderSource = { sourceId: 'native-alias-handoff', plugin: 'test', revision: 1, rules: [{
-      format: 'reminder/v4', id: 'alias', on: 'session.event', when: { eventType: descriptor.name,
-        condition: { kind: 'compare', field: 'event.arguments.source.kind', op: 'eq', value: 'user' } },
-      text: 'NATIVE_ALIAS_HUMAN', judge: { ref: detector.ref, revision: 1, params: { tracePath } },
-      effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
-    }] }
+    const source: ReminderSource = { sourceId: 'native-alias-handoff', plugin: 'test', revision: 1, rules: [eventRule('session.event', { id: 'alias', event: { eventType: descriptor.name }, match: { kind: 'compare', field: 'event.arguments.source.kind', op: 'eq', value: 'user' },
+      judge: { ref: detector.ref, revision: 1, params: { tracePath } } }, { template: 'NATIVE_ALIAS_HUMAN' })] }
     const seed = await harness.captureAlias(t, descriptor, source, detector, late)
     const native = late ? [...seed.events].reverse().find(event => event.type === 'user/message' && event.data.source.kind === 'user')
       : seed.events.find(event => event.type === 'user/message' && event.data.source.kind === 'user')
@@ -155,11 +149,7 @@ export function registerNativeTriggerCases(harness: Harness) {
     const tracePath = join(root, 'actual-judge.jsonl')
     cold.runtime.registerDetector({ ref: 'native-after', revision: 1,
       module: new URL('./fixtures/reminder-native-context.ts', import.meta.url).href })
-    cold.runtime.registerSource({ sourceId: 'native-seen', plugin: 'test', revision: 1, rules: [{
-      format: 'reminder/v4', id: 'after', on: 'tool.succeeded', when: { tool: 'native_prefix_probe' },
-      text: 'AFTER {{event.arguments.file_path}}', judge: { ref: 'native-after', revision: 1, params: { tracePath } },
-      effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
-    }] })
+    cold.runtime.registerSource({ sourceId: 'native-seen', plugin: 'test', revision: 1, rules: [eventRule('tool.succeeded', { id: 'after', event: { tool: 'native_prefix_probe' }, judge: { ref: 'native-after', revision: 1, params: { tracePath } } }, { template: 'AFTER {{event.arguments.file_path}}' })] })
     const input = { sessionId: String(seed.header.id), visible: [] }
     assert.deepEqual(await cold.runtime.collect(input), [], 'legacy seen data cannot create pending trigger work')
     await submitNative(cold.runtime, seed)
@@ -178,11 +168,7 @@ export function registerNativeTriggerCases(harness: Harness) {
     const root = await mkdtemp(join(tmpdir(), 'care-native-candidate-'))
     t.after(() => rm(root, { recursive: true, force: true }))
     const tracePath = join(root, 'native-cache-authority.jsonl')
-    const source = { sourceId: 'native-cache-authority', plugin: 'test', revision: 1, rules: [{
-      format: 'reminder/v4', id: 'actual', on: 'tool.succeeded', when: { tool: 'native_prefix_probe' },
-      text: 'NATIVE {{event.arguments.file_path}}', judge: { ref: 'native-cache', revision: 1, params: { tracePath } },
-      effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
-    }] }
+    const source = { sourceId: 'native-cache-authority', plugin: 'test', revision: 1, rules: [eventRule('tool.succeeded', { id: 'actual', event: { tool: 'native_prefix_probe' }, judge: { ref: 'native-cache', revision: 1, params: { tracePath } } }, { template: 'NATIVE {{event.arguments.file_path}}' })] }
     function configure(runtime: ReminderService) {
       runtime.registerDetector({ ref: 'native-cache', revision: 1,
         module: new URL('./fixtures/reminder-native-context.ts', import.meta.url).href })
@@ -224,13 +210,8 @@ export function registerNativeTriggerCases(harness: Harness) {
     const detector = { ref: 'native-handoff', revision: 1,
       module: new URL('./fixtures/reminder-native-context.ts', import.meta.url).href }
     const source: ReminderSource = { sourceId: 'native-rule-handoff', plugin: 'test', revision: 1,
-      rules: ['first', 'second', 'choice', 'suppressed'].map((id, index) => ({
-        format: 'reminder/v4', id, on: 'tool.succeeded', priority: 10 - index,
-        ...(index >= 2 ? { exclusiveGroup: 'native-choice' } : {}),
-        when: { tool: 'native_prefix_probe' }, text: `${id} {{event.arguments.file_path}}`,
-        judge: { ref: detector.ref, revision: 1, params: { tracePath } },
-        effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
-      })) }
+      rules: ['first', 'second', 'choice', 'suppressed'].map((id, index) => eventRule('tool.succeeded', { id, priority: 10 - index,
+        ...(index >= 2 ? { exclusiveGroup: 'native-choice' } : {}), event: { tool: 'native_prefix_probe' }, judge: { ref: detector.ref, revision: 1, params: { tracePath } } }, { template: `${id} {{event.arguments.file_path}}` })) }
     const seed = await harness.capture(t, false, false, false, undefined, {
       source, detector, handoffRules: partial ? ['first', 'choice'] : ['first', 'second', 'choice'],
     })
@@ -263,12 +244,8 @@ export function registerNativeTriggerCases(harness: Harness) {
     const call = seed.events.find(event => event.type === 'tool/call' && event.data.name === 'native_prefix_probe')
     assert.ok(call && call.type === 'tool/call')
     const cold = await harness.open(t, seed), sessionId = String(seed.header.id)
-    cold.runtime.registerSource({ sourceId: 'native-collapse', plugin: 'test', revision: 1, rules: [{
-      format: 'reminder/v4', id: 'before', on: 'tool.before-execute', when: { tool: 'native_prefix_probe' }, text: 'UNREACHED BEFORE',
-      effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
-    }, { format: 'reminder/v4', id: 'failure', on: 'tool.failed', when: { tool: 'native_prefix_probe', error: { code: 'UNKNOWN_TOOL' } },
-      text: 'FAILED {{event.arguments.file_path}}', effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
-    }] })
+    cold.runtime.registerSource({ sourceId: 'native-collapse', plugin: 'test', revision: 1, rules: [eventRule('tool.before-execute', { id: 'before', event: { tool: 'native_prefix_probe' } }, { template: 'UNREACHED BEFORE' }),
+      eventRule('tool.failed', { id: 'failure', event: { tool: 'native_prefix_probe', error: { code: 'UNKNOWN_TOOL' } } }, { template: 'FAILED {{event.arguments.file_path}}' })] })
     assert.deepEqual(await cold.runtime.collect({ sessionId, visible: [] }), [])
     await submitNative(cold.runtime, seed)
     const messages = await cold.runtime.collect({ sessionId, visible: [] })
@@ -291,11 +268,7 @@ export function registerNativeTriggerCases(harness: Harness) {
     const tracePath = join(root, 'unexpected-judge.jsonl')
     cold.runtime.registerDetector({ ref: 'native-before', revision: 1,
       module: new URL('./fixtures/reminder-native-context.ts', import.meta.url).href, exportName: 'judgeBefore' })
-    cold.runtime.registerSource({ sourceId: 'native-phases', plugin: 'test', revision: 1, rules: [{
-      format: 'reminder/v4', id: 'before', on: 'tool.before-execute', when: { tool: 'native_prefix_probe' },
-      text: 'BEFORE {{event.arguments.file_path}}', judge: { ref: 'native-before', revision: 1, params: { tracePath } },
-      effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
-    }] })
+    cold.runtime.registerSource({ sourceId: 'native-phases', plugin: 'test', revision: 1, rules: [eventRule('tool.before-execute', { id: 'before', event: { tool: 'native_prefix_probe' }, judge: { ref: 'native-before', revision: 1, params: { tracePath } } }, { template: 'BEFORE {{event.arguments.file_path}}' })] })
     assert.deepEqual(await cold.runtime.collect({ sessionId: String(seed.header.id), visible: [] }), [])
     await assert.rejects(readFile(tracePath, 'utf8'), /ENOENT/, 'native receipt prevents a second judge')
     assert.equal(cold.liveCount(), 0)
@@ -309,14 +282,8 @@ export function registerNativeTriggerCases(harness: Harness) {
     const tracePath = join(root, 'cold-worker.jsonl'), module = new URL('./fixtures/reminder-native-context.ts', import.meta.url).href
     runtime.registerDetector({ ref: 'native-before', revision: 1, module, exportName: 'judgeBefore' })
     runtime.registerDetector({ ref: 'native-after', revision: 1, module })
-    runtime.registerSource({ sourceId: 'native-phases', plugin: 'test', revision: 1, rules: [{
-      format: 'reminder/v4', id: 'before', on: 'tool.before-execute', when: { tool: 'native_prefix_probe' },
-      text: 'BEFORE {{event.arguments.file_path}}', judge: { ref: 'native-before', revision: 1, params: { tracePath } },
-      effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
-    }, { format: 'reminder/v4', id: 'after', on: 'tool.succeeded', when: { tool: 'native_prefix_probe' },
-      text: 'AFTER {{event.arguments.file_path}}', judge: { ref: 'native-after', revision: 1, params: { tracePath } },
-      effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
-    }] })
+    runtime.registerSource({ sourceId: 'native-phases', plugin: 'test', revision: 1, rules: [eventRule('tool.before-execute', { id: 'before', event: { tool: 'native_prefix_probe' }, judge: { ref: 'native-before', revision: 1, params: { tracePath } } }, { template: 'BEFORE {{event.arguments.file_path}}' }),
+      eventRule('tool.succeeded', { id: 'after', event: { tool: 'native_prefix_probe' }, judge: { ref: 'native-after', revision: 1, params: { tracePath } } }, { template: 'AFTER {{event.arguments.file_path}}' })] })
     assert.deepEqual(await runtime.collect({ sessionId: String(seed.header.id), visible: [] }), [])
     await submitNative(runtime, seed, 'tool-call')
     await submitNative(runtime, seed)
@@ -337,15 +304,9 @@ export function registerNativeTriggerCases(harness: Harness) {
     const tracePath = join(root, 'phases.jsonl'), module = new URL('./fixtures/reminder-native-context.ts', import.meta.url).href
     runtime.registerDetector({ ref: 'native-before', revision: 1, module, exportName: 'judgeBefore' })
     runtime.registerDetector({ ref: 'native-after', revision: 1, module })
-    runtime.registerSource({ sourceId: 'native-phases', plugin: 'test', revision: 1, rules: [{
-      format: 'reminder/v4', id: 'before', on: 'tool.before-execute', when: { tool: 'native_prefix_probe' },
-      text: 'BEFORE {{event.arguments.file_path}}', judge: { ref: 'native-before', revision: 1, params: { tracePath } },
-      effect: deny ? { kind: 'deny-tool', dangerous: true, reason: 'Historical policy must not execute again',
-        deliver: { model: { once: 'surface' } } } : { kind: 'remind', deliver: { model: { once: 'surface' } } },
-    }, { format: 'reminder/v4', id: 'after', on: 'tool.succeeded', when: { tool: 'native_prefix_probe' },
-      text: 'AFTER {{event.arguments.file_path}}', judge: { ref: 'native-after', revision: 1, params: { tracePath } },
-      effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
-    }] })
+    runtime.registerSource({ sourceId: 'native-phases', plugin: 'test', revision: 1, rules: [eventRule('tool.before-execute', { id: 'before', event: { tool: 'native_prefix_probe' }, judge: { ref: 'native-before', revision: 1, params: { tracePath } } },
+      { template: 'BEFORE {{event.arguments.file_path}}', ...(deny ? { deny: { dangerous: true, reason: 'Historical policy must not execute again' } } : {}) }),
+      eventRule('tool.succeeded', { id: 'after', event: { tool: 'native_prefix_probe' }, judge: { ref: 'native-after', revision: 1, params: { tracePath } } }, { template: 'AFTER {{event.arguments.file_path}}' })] })
     assert.deepEqual(await runtime.collect({ sessionId: String(seed.header.id), visible: [] }), [])
     await submitNative(runtime, seed, 'tool-call')
     await submitNative(runtime, seed)
@@ -372,12 +333,7 @@ export function registerNativeTriggerCases(harness: Harness) {
     const tracePath = join(root, 'native-session-worker.jsonl')
     runtime.registerDetector({ ref: 'native-session-event', revision: 1,
       module: new URL('./fixtures/reminder-native-context.ts', import.meta.url).href, exportName: 'judgeSessionEvent' })
-    runtime.registerSource({ sourceId: 'native-session-rule', plugin: 'test', revision: 1, rules: [{
-      format: 'reminder/v4', id: 'actual-event', on: 'session.event', when: { eventType: 'tool/result' },
-      text: 'SESSION {{event.arguments.message.toolCallId}}',
-      judge: { ref: 'native-session-event', revision: 1, params: { tracePath } },
-      effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
-    }] })
+    runtime.registerSource({ sourceId: 'native-session-rule', plugin: 'test', revision: 1, rules: [eventRule('session.event', { id: 'actual-event', event: { eventType: 'tool/result' }, judge: { ref: 'native-session-event', revision: 1, params: { tracePath } } }, { template: 'SESSION {{event.arguments.message.toolCallId}}' })] })
     assert.deepEqual(await runtime.collect({ sessionId: String(seed.header.id), visible: [] }), [])
     await submitNative(runtime, seed, 'session-event')
     const messages = await runtime.collect({ sessionId: String(seed.header.id), visible: [] })
@@ -413,11 +369,7 @@ export function registerNativeTriggerCases(harness: Harness) {
     const tracePath = join(root, 'worker-observation.jsonl'), runtime = cold.runtime
     runtime.registerDetector({ ref: 'native-context', revision: 1,
       module: new URL('./fixtures/reminder-native-context.ts', import.meta.url).href })
-    runtime.registerSource({ sourceId: 'native-prefix-rule', plugin: 'test', revision: 1, rules: [{
-      format: 'reminder/v4', id: 'historical', on: 'tool.succeeded', when: { tool: 'native_prefix_probe' },
-      text: 'CANONICAL {{event.arguments.file_path}}', judge: { ref: 'native-context', revision: 1, params: { tracePath } },
-      effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
-    }] })
+    runtime.registerSource({ sourceId: 'native-prefix-rule', plugin: 'test', revision: 1, rules: [eventRule('tool.succeeded', { id: 'historical', event: { tool: 'native_prefix_probe' }, judge: { ref: 'native-context', revision: 1, params: { tracePath } } }, { template: 'CANONICAL {{event.arguments.file_path}}' })] })
     assert.equal(cold.liveCount(), 0)
     const copied = { type: 'tool.failed', sessionId: String(seed.header.id), callId: 'forged-call',
       rootCallId: 'forged-root', name: 'wrong-tool', arguments: { file_path: 'forged.ts' },

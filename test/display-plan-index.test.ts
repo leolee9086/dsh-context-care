@@ -1,13 +1,17 @@
+import { createDisplayPlanCache, indexDisplayBlocks, mergeDisplayInsertions, planDisplay as planDisplayV2, normalizeRuleV2, type V2Action, type RuleEvent, type NormalizedRuleV2 } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createSessionCache } from '../lib/session-cache.js'
-import { createDisplayPlanCache, indexDisplayBlocks, mergeDisplayInsertions } from '../lib/display-plan-index.js'
-import { planDisplayV2 } from '../src/display-plan.js'
 
 const block = (id: string, path = '0', extra = {}) => ({ id, path, view: 'display', role: 'assistant', type: 'text', text: 'BASE', raw: { type: 'text', text: 'BASE' }, ...extra })
-const action = (id: string, dependsOn: string[] = [], extra = {}) => ({ id, dependsOn, stage: 'display.render', kind: 'inject', template: id, target: { view: 'display', anchor: 'end' }, ...extra })
-const rule = (actions: ReturnType<typeof action>[], extra = {}) => ({ sourceId: 's', id: 'r', priority: 0, actions, ...extra })
-const event = (occurrenceId: string, extra = {}) => ({ sourceId: 's', ruleId: 'r', occurrenceId, blockId: 'b', ranges: [], captures: [], block: block('b'), ...extra })
+const action = (id: string, dependsOn: string[] = [], extra: Partial<V2Action> = {}): V2Action => ({ id, dependsOn, stage: 'display.render', kind: 'inject', template: id,
+  enabledDefault: true, cooldownMs: 0, dedupe: { mode: 'none' }, target: { view: 'display', anchor: 'end' }, ...extra })
+const baseRule = normalizeRuleV2({ schemaVersion: 2, sourceId: 's', id: 'r', revision: 1, on: ['display.render'], select: { view: 'display', roles: ['assistant'], blockTypes: ['text'] },
+  match: { kind: 'always' }, actions: [action('base')] })
+// Cycles and missing dependencies deliberately bypass declaration validation to exercise planning failures.
+const rule = (actions: V2Action[], extra: Partial<NormalizedRuleV2> = {}): NormalizedRuleV2 => ({ ...baseRule, actions, ...extra })
+const event = (occurrenceId: string, extra: Partial<RuleEvent> = {}): RuleEvent => ({ schemaVersion: 2, sourceId: 's', ruleId: 'r', ruleRevision: 1, occurrenceId,
+  stage: 'display.render', view: 'display', coordinate: 'utf16', sourceSeqs: [], blockId: 'b', ranges: [], captures: {}, facts: {}, block: block('b'), ...extra })
 const options = () => ({ blocks: [block('b')], rules: [rule([action('caption')])], events: [event('e')], snapshot: {}, templates: { render: (source: string) => source },
   decision: () => ({ enabled: true }), maxInjectedChars: 65536, maxBytes: 100000 })
 
@@ -87,8 +91,8 @@ test('display first rule and anchor semantics survive duplicate identities and o
   input.rules = [rule([action('first', [], { target: { view: 'display', anchor: 'b', position: 'before' } })]), rule([action('second')])]
   const output = planDisplayV2(input)
   assert.equal(output.after[0].text, 'first'); assert.equal(output.after[1].text, 'BASE'); assert.equal(output.after[2].text, 'LATER')
-  assert.equal(output.records[0].actionId, 'first'); assert.equal(output.after.filter((row: { text: string }) => row.text === 'second').length, 0)
-  input.rules[0].actions[0].target.anchor = 'missing'
+  assert.equal(output.records[0].actionId, 'first'); assert.equal(output.after.filter(row => row.text === 'second').length, 0)
+  assert.ok(input.rules[0].actions[0].target); input.rules[0].actions[0].target.anchor = 'missing'
   assert.throws(() => planDisplayV2(input), /display-anchor-unavailable/)
 })
 

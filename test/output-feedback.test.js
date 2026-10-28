@@ -1,3 +1,4 @@
+import { resolveScopedPrompts } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
@@ -5,7 +6,7 @@ import { SessionStore, SessionId } from '@deepseek-ai/dsh-session'
 import { createSessionLog } from '../lib/session-log.js'
 import { createMessage } from '@deepseek-ai/dsh-llm'
 import { openOutputFeedback } from '../src/output-feedback.js'
-import { resolveScopedPrompts } from '../src/scoped-prompts.js'
+
 import { detectorFixture } from './fixtures/detector.js'
 
 const route = { provider: 'p', model: 'a' }

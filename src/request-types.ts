@@ -1,3 +1,4 @@
+import type { selectScopedPrompts } from '@leolee9086/dsh-rule-engine'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { GenerateOptions, LlmFailure, LlmAttemptId, StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -6,7 +7,7 @@ import type { installContextCare } from './index.js'
 import type { captureInputPricing } from './input-pricing.js'
 import type { contextBudget } from './context-budget.js'
 import type { openWorkbenchHost } from './workbench-host.js'
-import type { selectScopedPrompts } from './scoped-prompts.js'
+
 import type { openOutputFeedback } from './output-feedback.js'
 import type { createSessionCompletions } from './session-completions.js'
 

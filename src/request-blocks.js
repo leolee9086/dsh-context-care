@@ -1,5 +1,6 @@
+import { ownRequestMessageBody } from '@leolee9086/dsh-rule-engine'
 import { extractRawBlocks, walkContentBlocks, parseToolArguments } from '@leolee9086/dsh-session-blocks'
-import { ownRequestMessageBody } from '../lib/request-message-body.js'
+
 
 /** Durable turn identities come from turn/start events, including inherited events after forks. */
 export function sessionTurn(session, log) {
@@ -40,14 +41,4 @@ export function modelRequestBlocks(sessionId, request, requestId, shared, curren
   }
   request.messages.forEach((message, i) => append(message, i, shared.byId.get(message.id), projection ? projection.read(message) : projectRequestMessage(message)))
   return blocks
-}
-/** Set a content path on an owned request copy. */
-export function setRequestBlock(request, block, value) {
-  if (block.messageIndex === -1) { if (value === undefined) throw new Error('request-system-filter-denied'); request.system = value.text; return }
-  let content = request.messages[block.messageIndex].content
-  const indices = block.path.split('.').map(Number)
-  for (const index of indices.slice(0, -1)) content = content[index].content
-  const index = indices.at(-1)
-  if (value === undefined) content.splice(index, 1)
-  else content[index] = value
 }

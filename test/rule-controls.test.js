@@ -1,14 +1,14 @@
+import { ControlPatch, executeEventMatch as executeReminderMatch, createNoticeChannel, createBoundedMatcher, createStreamWatch } from '@leolee9086/dsh-rule-engine'
 import test, { after } from 'node:test'
+import { eventRule } from './event-rule.js'
 import assert from 'node:assert/strict'
-import { createRuleControls, ControlPatch } from '../src/rule-controls.js'
-import { createReminderRuntime } from '../src/reminder-runtime/index.js'
+import { createRuleControls } from '@leolee9086/dsh-rule-engine'
+import { createReminderRuntime } from './reminder-runtime-fixture.ts'
 import { visibleReminderControls } from '../lib/reminder-runtime/control-view.js'
-import { createStreamWatch } from '../src/stream-watch.js'
-import { executeReminderMatch } from '../lib/reminder-runtime/matcher.js'
-import { createNoticeChannel } from '../src/notice-channel.js'
+
 import { controlledGuidance, controlledState, controlledEngineRules } from '../src/control-catalog.js'
 import { GUIDANCE, renderState } from '../src/policy.js'
-import { createBoundedMatcher } from '../src/bounded-matcher.js'
+
 const matcher = createBoundedMatcher({ timeoutMs: 2000, startupMs: 5000 })
 after(async () => { await matcher.close() })
 const port = (input, signal, timing) => matcher.detect(input, signal, timing)
@@ -29,10 +29,7 @@ test('reminder catalogs preserve scoped recipients and string policy epochs acro
   t.after(() => runtime.close())
   const unregister = controls.registerProvider(id => runtime.controlCatalog(id))
   t.after(unregister)
-  const definition = { sourceId: 'scoped', plugin: 'test', revision: 1, scope: { agentPresets: ['alpha'] }, rules: [{
-    format: 'reminder/v4', id: 'notice', on: 'tool.succeeded', text: 'SCOPED_NOTICE',
-    when: { tool: 'probe' }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
-  }] }
+  const definition = { sourceId: 'scoped', plugin: 'test', revision: 1, scope: { agentPresets: ['alpha'] }, rules: [eventRule('tool.succeeded', { event: { tool: 'probe' } }, { template: 'SCOPED_NOTICE' })] }
   runtime.registerSource(definition)
   assert.deepEqual(controls.snapshot('included').sources[0].scope, { agentPresets: ['alpha'] })
   assert.deepEqual(visibleReminderControls(controls.snapshot('excluded').sources, await runtime.catalog('excluded')), [])
@@ -222,13 +219,11 @@ test('另一来源注册后，挂起的提醒仍然按时投递', async t => {
     epoch: (id, sourceId, ruleId) => controls.epoch(id, sourceId, ruleId) })
   t.after(() => runtime.close())
   runtime.registerSource({ sourceId: 'first', plugin: 'test', revision: 1, rules: [
-    { format: 'reminder/v4', id: 'notice', on: 'tool.succeeded', text: 'STILL_DELIVERED', when: { tool: 'probe' },
-      effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } }] })
+    eventRule('tool.succeeded', { event: { tool: 'probe' } }, { template: 'STILL_DELIVERED' })] })
   await runtime.submit({ sessionId: 's', callId: 'probe', rootCallId: 'probe', name: 'probe', arguments: {} })
   assert.equal(runtime.snapshot('s').candidates.filter(candidate => candidate.status === 'pending').length, 1)
   const other = runtime.registerSource({ sourceId: 'second', plugin: 'test', revision: 1, rules: [
-    { format: 'reminder/v4', id: 'notice', on: 'tool.succeeded', text: 'OTHER', when: { tool: 'other' },
-      effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } }] })
+    eventRule('tool.succeeded', { event: { tool: 'other' } }, { template: 'OTHER' })] })
   t.after(() => other.dispose())
   const messages = await runtime.collect({ sessionId: 's', visible: [] })
   assert.equal(messages.length, 1)

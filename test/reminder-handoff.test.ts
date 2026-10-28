@@ -1,13 +1,11 @@
+import { createBoundedMatcher, candidateFromMessage } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
+import { eventRule } from './event-rule.js'
 import assert from 'node:assert/strict'
-import { createBoundedMatcher } from '../src/bounded-matcher.js'
-import { createReminderRuntime, type ReminderSource } from '../lib/reminder-runtime/runtime.js'
-import { candidateFromMessage } from '../lib/reminder-runtime/handoff.js'
 
-const source: ReminderSource = { sourceId: 'native-handoff', plugin: 'test', revision: 1, rules: [{
-  format: 'reminder/v4', id: 'notice', on: 'tool.succeeded', when: { tool: 'probe' }, text: 'FROZEN_BODY',
-  effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
-}] }
+import { createReminderRuntime, type ReminderSource } from './reminder-runtime-fixture.ts'
+
+const source: ReminderSource = { sourceId: 'native-handoff', plugin: 'test', revision: 1, rules: [eventRule('tool.succeeded', { event: { tool: 'probe' } }, { template: 'FROZEN_BODY' })] }
 
 test('native handoff validity and body override a conflicting startup candidate without a save or evaluation', async t => {
   const matcher = createBoundedMatcher({ timeoutMs: 2000, startupMs: 5000 })

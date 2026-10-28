@@ -1,3 +1,4 @@
+import type { RecipientFacts } from '@leolee9086/dsh-rule-engine'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-agent'
@@ -5,7 +6,7 @@ import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-session-projection'
 import { ensureSessionLog, type SessionLogRead } from '../session-log.js'
-import type { RecipientFacts } from './scope.js'
+
 import type { CacheKey } from '../session-cache.js'
 
 /** Read current recipient facts through the Host's shared native log access. */

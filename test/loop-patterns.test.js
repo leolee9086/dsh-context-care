@@ -1,11 +1,12 @@
+import { loopNeedsReminder, CLEANABLE_IDS, describeHit, detectDegradation } from '@leolee9086/dsh-rule-engine'
 // 判定表（loop-patterns.js）：形状认得对不对、严重度分得对不对、会不会误报。
 //
 // 这里锁的是 2026-09-25 那次真机漏报：她的会话里模型退化成「好。/做。/输出。」的短句轮转，
 // 判定表一条都没命中，于是从来没有提醒过。样本都从会话日志里原样抄来。
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { CLEANABLE_IDS, describeHit, detectDegradation } from '../src/loop-patterns.js'
-import { detectLoop as readLoop, loopNeedsReminder, loopNoticeText } from '../src/loop-guard.js'
+
+import { detectLoop as readLoop, loopNoticeText } from '../src/loop-guard.js'
 
 // Pure tests supply only their immutable event and interpreted message.
 const detectLoop = session => readLoop(session, undefined, -1, {

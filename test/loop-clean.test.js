@@ -1,11 +1,12 @@
+import { cleanTail, cleanMessage, cleanMessages, CLEAN_PATTERNS as PATTERNS, loopNeedsReminder, CLEANABLE_IDS } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { cleanTail, cleanMessage, cleanMessages, PATTERNS } from '../src/loop-clean.js'
-import { detectLoop as readLoop, loopNeedsReminder } from '../src/loop-guard.js'
+
+import { detectLoop as readLoop } from '../src/loop-guard.js'
 const detectLoop = session => readLoop(session, undefined, -1, {
   lastSurface: owner => owner.eventAt(), messageAt: owner => owner.eventAt().data.message,
 })
-import { CLEANABLE_IDS } from '../src/loop-patterns.js'
+
 
 /** 造一段像真实循环的文本:前面正常,尾巴上同一行刷了几十遍。 */
 function loopingText() {

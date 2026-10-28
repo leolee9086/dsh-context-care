@@ -1,7 +1,8 @@
+import { RuleEventInput as Event } from '@leolee9086/dsh-rule-engine'
 import { createHash } from 'node:crypto'
 import { isMainThread, threadId } from 'node:worker_threads'
 import { z } from 'zod'
-import { Event } from '../../lib/reminder-runtime/state.js'
+
 
 /** Real local judge: its verdict and facts depend on the event AND each rule's params. */
 const JudgeInput = z.object({

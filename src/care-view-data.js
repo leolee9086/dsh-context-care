@@ -5,6 +5,7 @@ import { createDiagnosticPages } from '../lib/diagnostic-pages.js'
 import { runtimePage } from './rule-runtime-data.js'
 import { visibleReminderControls } from '../lib/reminder-runtime/control-view.js'
 import { ensureSessionLog } from '../lib/session-log.js'
+import { actionRunRecords } from '@leolee9086/dsh-rule-engine'
 
 /** The composer and message markers need no journal pages or full diagnostic bodies.
  * @param {import('@deepseek-ai/cordis').Context} ctx
@@ -17,8 +18,8 @@ export function careStatus(ctx, sessionId) {
   const markers = runtime && '$displayMarkers' in runtime.state ? runtime.state.$displayMarkers : undefined
   return {
     currentState: ctx.contextCareRequests.controls.currentSample(sessionId) ?? null,
-    matchingFailures: (runtime?.runs ?? []).flatMap(run => {
-      if (run === null || typeof run !== 'object' || Array.isArray(run) || (run.kind !== 'matching' && run.kind !== 'display')) return []
+    matchingFailures: (runtime ? actionRunRecords(runtime) : []).flatMap(run => {
+      if (run.kind !== 'matching' && run.kind !== 'display') return []
       return [{ id: run.id, sourceSeqs: run.sourceSeqs }]
     }),
     displayMarkers: Array.isArray(markers) && token !== undefined ? markers.flatMap(value =>
@@ -69,8 +70,8 @@ export function createCareViewReader(ctx, journal, pages = createCarePages(ctx))
       case 'prompts': {
         const { items, admission, ...pagination } = pages(session, topic, { offset, seq, limit: 20 })
         const runtime = topic === 'actions' ? ctx.get('contextCareWorkbench')?.store.read(sessionId)?.runtime : undefined
-        const matchingFailures = (runtime?.runs ?? []).flatMap(run => {
-          if (run === null || typeof run !== 'object' || Array.isArray(run) || (run.kind !== 'matching' && run.kind !== 'display')) return []
+        const matchingFailures = (runtime ? actionRunRecords(runtime) : []).flatMap(run => {
+          if (run.kind !== 'matching' && run.kind !== 'display') return []
           return [{ id: run.id, kind: run.kind, status: run.status, reason: run.reason, count: run.count,
             updatedAt: run.updatedAt, sourceSeqs: run.sourceSeqs, diagnostic: run.result }]
         })

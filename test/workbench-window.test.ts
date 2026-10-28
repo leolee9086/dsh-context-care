@@ -1,7 +1,6 @@
+import { createBlockWindow as createWorkbenchWindow, selectBlocksV2 } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { selectBlocksV2 } from '@leolee9086/dsh-rule-engine'
-import { createWorkbenchWindow } from '../lib/workbench-window.js'
 
 interface Block { id: string; seq: number; messageId: string; turnId: string; view: string; role: string; type: string }
 const block = (seq: number, child = 0): Block => ({ id: `${seq}:${child}`, seq, messageId: `m:${seq}`, turnId: `t:${Math.floor(seq / 3)}`,
@@ -13,7 +12,7 @@ const rules = [
 ]
 
 test('workbench indexed windows preserve depth before role/type selection and old cuts', () => {
-  const select = createWorkbenchWindow(), rows: Block[] = []
+  const select = createWorkbenchWindow<Block>(), rows: Block[] = []
   let reads = 0, copies = 0
   const source = { get length() { return rows.length }, at(index: number) { reads++; return rows[index] },
     slice(from: number, to: number) { copies++; return rows.slice(from, to) } }
@@ -35,7 +34,7 @@ test('workbench indexed windows preserve depth before role/type selection and ol
 })
 
 test('workbench windows preserve noncontiguous identities and rebuild after replacements', () => {
-  const select = createWorkbenchWindow()
+  const select = createWorkbenchWindow<Block>()
   let rows = [block(0), block(1), { ...block(2), messageId: 'm:0' }, block(3)]
   const source = { get length() { return rows.length }, at: (index: number) => rows[index], slice: (from: number, to: number) => rows.slice(from, to) }
   const messageRule = [rules[0]]
@@ -49,5 +48,5 @@ test('workbench windows preserve noncontiguous identities and rebuild after repl
 test('workbench block windows retain a complete current message for display output', () => {
   const rows = [block(0), block(1), block(1, 1), block(1, 2)]
   const source = { length: rows.length, at: (index: number) => rows[index], slice: (from: number, to: number) => rows.slice(from, to) }
-  assert.deepEqual(createWorkbenchWindow()(source, [rules[2]]).map(value => value.id), ['1:0', '1:1', '1:2'])
+  assert.deepEqual(createWorkbenchWindow<Block>()(source, [rules[2]]).map(value => value.id), ['1:0', '1:1', '1:2'])
 })

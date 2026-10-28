@@ -1,10 +1,10 @@
+import { indexRequestPairs, createRequestPairProjection, createRequestPlanCache, requestImpact } from '@leolee9086/dsh-rule-engine'
+import type { RequestPairPayload } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { indexRequestPairs, createRequestPairProjection, type RequestPairPayload } from '../lib/request-pairs.js'
-import { createRequestPlanCache } from '../lib/request-plan-cache.js'
+
 import { createSessionCache } from '../lib/session-cache.js'
 import { planRequestV2 } from '../src/request-plan.js'
-import { requestImpact } from '../src/request-impact.js'
 
 function legacy(request: RequestPairPayload) {
   const calls = new Set(request.messages.flatMap(message => message.content.filter(value => (value as { type?: unknown }).type === 'tool-call').map(value => (value as { id?: unknown }).id)))

@@ -1,3 +1,4 @@
+import { RuleEventInput as Event } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -5,7 +6,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-agent'
 import { createToolEvents } from '../lib/reminder-runtime/tool-events.js'
 import { replayNativeOutput } from '../lib/reminder-runtime/native-output-events.js'
-import { Event } from '../lib/reminder-runtime/state.js'
+
 import { nativeSession } from './fixtures/native-session.ts'
 
 const config = { maxContextChars: 256, maxContextMessages: 8, maxQueued: 2, maxConcurrent: 1,

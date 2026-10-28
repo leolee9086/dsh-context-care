@@ -1,4 +1,7 @@
+import { DeliveryState as SessionState, PersistenceTimeoutError, createBoundedMatcher } from '@leolee9086/dsh-rule-engine'
+import type { RuleDeclaration as ReminderRuleInput } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
+import { eventRule } from './event-rule.js'
 import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -6,13 +9,10 @@ import { JudgeParams, readTrace, waitForTrace } from './fixtures/reminder-execut
 import { rm } from 'node:fs/promises'
 import { setTimeout as delay } from 'node:timers/promises'
 import { performance } from 'node:perf_hooks'
-import { createReminderRuntime } from '../src/reminder-runtime/runtime.ts'
-import { SessionState } from '../src/reminder-runtime/state.ts'
-import { PersistenceTimeoutError } from '../src/reminder-runtime/persistence.ts'
-import { createBoundedMatcher } from '../src/bounded-matcher.js'
+import { createReminderRuntime } from './reminder-runtime-fixture.ts'
+
 import { openRealReminderStorage, obstructRecord, occupyIoWorker } from './fixtures/reminder-persistence-real.ts'
 import type { TestContext } from 'node:test'
-import type { ReminderRuleInput } from '../src/reminder-runtime/runtime.ts'
 
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: unknown }
 const observe = <T>(task: Promise<T>): Promise<Outcome<T>> => task.then(
@@ -20,12 +20,8 @@ const observe = <T>(task: Promise<T>): Promise<Outcome<T>> => task.then(
 )
 const event = (callId: string) => ({ type: 'tool.succeeded', sessionId: 's', callId, rootCallId: callId,
   name: 'probe', arguments: {} })
-const sharedRule: ReminderRuleInput = {
-  format: 'reminder/v4', id: 'notice', on: 'tool.succeeded', text: 'Actual durable reservation',
-  when: { tool: 'probe' },
-  effect: { kind: 'remind', deliver: { model: { once: 'surface',
-    shared: { reset: 'lifetime', lifetime: 'task-2', limit: 1 } } } },
-}
+const sharedRule: ReminderRuleInput = eventRule('tool.succeeded', { event: { tool: 'probe' } }, { template: 'Actual durable reservation',
+  delivery: { model: { once: 'surface', shared: { reset: 'lifetime', lifetime: 'task-2', limit: 1 } } } })
 
 /** No fake execute/save/claim service: every operation reaches a worker or the real JSON domain. */
 async function fixture(t: TestContext, storageTimeoutMs = 1000) {
@@ -259,14 +255,8 @@ for (const denied of [false, true]) {
       const detector = { ref: 'policy-observer', revision: 1,
         module: new URL('./fixtures/reminder-execution-real.ts', import.meta.url).href, exportName: 'judge' }
       runtime.registerDetector(detector)
-      runtime.registerSource({ sourceId: 'real-policy', plugin: 'test', revision: 1, rules: [{
-        format: 'reminder/v4', id: 'policy', on: 'tool.before-execute', text: 'Policy evidence', when: { tool: 'probe' },
-        judge: { ref: detector.ref, revision: 1, params: JudgeParams.parse({
-          label: 'policy', tracePath, mode: 'quick', ok: denied, value: { denied },
-        }) },
-        effect: { kind: 'deny-tool', dangerous: true, reason: 'Explicit real policy denial',
-          deliver: { model: { once: 'surface' } } },
-      }] })
+      runtime.registerSource({ sourceId: 'real-policy', plugin: 'test', revision: 1, rules: [eventRule('tool.before-execute', { id: 'policy', event: { tool: 'probe' }, judge: { ref: detector.ref, revision: 1, params: JudgeParams.parse({ label: 'policy', tracePath, mode: 'quick', ok: denied, value: { denied } }) } },
+        { template: 'Policy evidence', deny: { dangerous: true, reason: 'Explicit real policy denial' } })] })
       const prepare = (key: object, callId: string) => runtime.prepareToolExecution({
         key, sessionId: 's', name: 'probe', arguments: {}, callId, rootCallId: callId,
       })
@@ -312,12 +302,8 @@ test('real policy: a pure reminder CPU loop cannot hold tool preparation open', 
   const detector = { ref: 'reminder-cpu', revision: 1,
     module: new URL('./fixtures/reminder-execution-real.ts', import.meta.url).href, exportName: 'judge' }
   runtime.registerDetector(detector)
-  runtime.registerSource({ sourceId: 'pure-reminder', plugin: 'test', revision: 1, rules: [{
-    format: 'reminder/v4', id: 'cpu', on: 'tool.before-execute', text: 'Nonblocking reminder', when: { tool: 'probe' },
-    judge: { ref: detector.ref, revision: 1, params: JudgeParams.parse({
-      label: 'pure-cpu', tracePath, heartbeatPath, mode: 'cpu', ok: true, value: null,
-    }) }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } },
-  }] })
+  runtime.registerSource({ sourceId: 'pure-reminder', plugin: 'test', revision: 1, rules: [eventRule('tool.before-execute', { id: 'cpu', event: { tool: 'probe' }, judge: { ref: detector.ref, revision: 1, params: JudgeParams.parse({ label: 'pure-cpu', tracePath, heartbeatPath, mode: 'cpu', ok: true, value: null }) } },
+    { template: 'Nonblocking reminder' })] })
   const controller = new AbortController()
   const key = {}
   try {

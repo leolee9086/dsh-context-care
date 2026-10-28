@@ -1,9 +1,10 @@
+import type { MessageView } from '@leolee9086/dsh-rule-engine'
+import { executeEventMatch as executeReminderMatch, createBoundedMatcher } from '@leolee9086/dsh-rule-engine'
 import test, { after } from 'node:test'
+import { eventRule } from './event-rule.js'
 import assert from 'node:assert/strict'
-import { createReminderRuntime } from '../lib/reminder-runtime/runtime.js'
-import { executeReminderMatch } from '../lib/reminder-runtime/matcher.js'
-import type { MessageView } from '../lib/reminder-runtime/request-context.js'
-import { createBoundedMatcher } from '../src/bounded-matcher.js'
+import { createReminderRuntime } from './reminder-runtime-fixture.ts'
+
 const matcher = createBoundedMatcher({ timeoutMs: 2000, startupMs: 5000 })
 after(async () => { await matcher.close() })
 const port = (input: Parameters<typeof matcher.detect>[0], signal: AbortSignal, timing: Parameters<typeof matcher.detect>[2]) =>
@@ -20,9 +21,7 @@ function fixture(t: { after: (fn: () => unknown) => void }) {
 }
 
 /** A rule that fires on every logged message, so a loop would be visible immediately. */
-const watcher = (id: string) => ({ format: 'reminder/v4', id, on: 'session.event', text: `提醒 ${id}`,
-  when: { eventType: 'user/message' },
-  effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } })
+const watcher = (id: string) => eventRule('session.event', { id, event: { eventType: 'user/message' } }, { template: `提醒 ${id}` })
 
 const message = (seq: number, extra: Record<string, unknown> = {}) => ({ type: 'session.event',
   sessionId: 's', callId: `user/message#${seq}`, rootCallId: `user/message#${seq}`, name: 'user/message',
@@ -59,9 +58,7 @@ test('跨规则循环共享次数预算，真人轮会打断链条', async t => 
 
 test('防循环不放行本该被拒绝的工具调用', async t => {
   const runtime = fixture(t)
-  runtime.registerSource({ sourceId: 'guard', plugin: 'test', revision: 1, rules: [{
-    format: 'reminder/v4', id: 'deny', on: 'tool.before-execute', text: '不许',
-    when: { tool: 'read' }, effect: { kind: 'deny-tool', dangerous: true, reason: '不许读', deliver: { model: { once: 'surface' } } } }] })
+  runtime.registerSource({ sourceId: 'guard', plugin: 'test', revision: 1, rules: [eventRule('tool.before-execute', { id: 'deny', event: { tool: 'read' } }, { template: '不许', deny: { dangerous: true, reason: '不许读' } })] })
   // Even a reminder-originated pre-execution event must still produce the denial.
   await runtime.submit({ type: 'tool.before-execute', sessionId: 's', callId: 'c1', rootCallId: 'c1',
     name: 'read', arguments: {}, origin: 'reminder', causationId: 'guard:deny', clock: { at: 1000 } })

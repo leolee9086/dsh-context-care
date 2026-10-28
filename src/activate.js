@@ -1,6 +1,7 @@
+import { shouldNotify } from '@leolee9086/dsh-rule-engine'
 import { z } from 'zod'
 import { captureInputPricing } from './input-pricing.js'
-import { installContextCare, inject as agentInject, previousState, shouldNotify } from './index.js'
+import { installContextCare, inject as agentInject, previousState } from './index.js'
 import { calculateState, renderState, resolveConfig } from './policy.js'
 import { createUserMessage } from './message.js'
 import { producedBy, producerKind } from './producer-source.js'

@@ -1,8 +1,6 @@
+import { createBoundedMatcher, createDetectorRegistry, normalizeRuleV2 } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { normalizeRuleV2 } from '@leolee9086/dsh-rule-engine'
-import { createBoundedMatcher } from '../src/bounded-matcher.js'
-import { createDetectorRegistry } from '../src/detector-registry.js'
 
 const spec = extra => ({ plugin: 'test-plugin', ref: 'test:letters', revision: 1, on: ['output.delta', 'output.complete', 'display.render'],
   paramsSchema: { type: 'object', properties: { token: { type: 'string' } }, required: ['token'], additionalProperties: false },

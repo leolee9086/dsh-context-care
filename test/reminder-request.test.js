@@ -1,11 +1,11 @@
+import { REMINDER_DOMAIN, createBoundedMatcher } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
+import { eventRule } from './event-rule.js'
 import assert from 'node:assert/strict'
-import { createReminderRuntime, REMINDER_DOMAIN } from '../src/reminder-runtime/index.js'
-import { createBoundedMatcher } from '../src/bounded-matcher.js'
+import { createReminderRuntime } from './reminder-runtime-fixture.ts'
 
-const rule = { format: 'reminder/v4', id: 'night', on: 'request.before', text: '没有紧急任务时，温和建议伙伴早点睡。',
-  when: { timeWindow: { start: '23:00', end: '06:00', timeZone: 'local' }, humanActivity: { withinSeconds: 300 } },
-  effect: { kind: 'remind', deliver: { model: { once: 'window' } } } }
+const rule = eventRule('request.before', { id: 'night', event: { timeWindow: { start: '23:00', end: '06:00', timeZone: 'local' }, humanActivity: { withinSeconds: 300 } } },
+  { template: '没有紧急任务时，温和建议伙伴早点睡。', delivery: { model: { once: 'window' } } })
 const source = { sourceId: 'notes', plugin: 'test', revision: 1, rules: [rule] }
 const date = (day, hour, minute = 0) => new Date(2026, 9, day, hour, minute).getTime()
 const message = (id = 'human', kind = 'user') => ({ id, role: 'user', content: [{ type: 'text', text: '继续' }], source: { kind } })
@@ -28,7 +28,7 @@ test('pure conversation triggers at 23:00; midnight belongs to the previous even
   const f = fixture(t)
   f.time(date(14, 22, 59)); await f.prepare(); assert.deepEqual(await f.collect(), [])
   f.time(date(14, 23)); await f.prepare(); const first = await f.collect(); assert.equal(first.length, 1)
-  assert.equal(first[0].content[0].text, rule.text)
+  assert.equal(first[0].content[0].text, rule.actions[0].template)
   f.time(date(15, 0)); await f.prepare(); assert.deepEqual(await f.collect({ committedIds: [first[0].id] }), [])
   f.time(date(15, 6)); await f.prepare(); assert.deepEqual(await f.collect(), [])
   f.time(date(15, 23)); await f.prepare(); const second = await f.collect({ visible: first }); assert.equal(second.length, 1)
@@ -52,7 +52,7 @@ test('durable claims survive restart, source text changes, compaction and candid
   const f = fixture(t, { config: { maxCandidates: 1, ruleTimeoutMs: 2000, roundTimeoutMs: 5000 } })
   await f.prepare(); const first = await f.collect()
   await f.collect({ committedIds: [first[0].id] })
-  f.handle.replace({ ...source, revision: 2, rules: [{ ...rule, text: '更新正文' }] })
+  f.handle.replace({ ...source, revision: 2, rules: [{ ...rule, actions: rule.actions.map(action => ({ ...action, template: '更新正文' })) }] })
   await f.prepare(); assert.deepEqual(await f.collect(), [])
   assert.ok(!f.saved.get('s').candidates.some(item => item.messageId === first[0].id))
   const restart = fixture(t, { entries: [...f.saved] })
@@ -113,22 +113,21 @@ test('concurrent collections reserve once; rollback of an acknowledged delivery 
 
 test('daytime windows, source replacement, condition trees and session scope use the same scheduler', async t => {
   const f = fixture(t)
-  f.handle.replace({ ...source, revision: 2, rules: [{ ...rule, when: { ...rule.when,
-    timeWindow: { start: '08:00', end: '09:00' },
-    condition: { kind: 'compare', field: 'context.messages.0.text', op: 'eq', value: '继续' } } }] })
+  f.handle.replace({ ...source, revision: 2, rules: [{ ...rule, event: { ...rule.event, timeWindow: { start: '08:00', end: '09:00' } },
+    match: { kind: 'compare', field: 'context.messages.0.text', op: 'eq', value: '继续' } }] })
   f.time(date(14, 7, 59)); await f.prepare(); assert.deepEqual(await f.collect(), [])
   f.time(date(14, 8)); await f.prepare(); assert.equal((await f.collect()).length, 1)
   await f.prepare([arrival(date(14, 8))], 'other'); assert.equal((await f.collect({ sessionId: 'other' })).length, 1)
   f.time(date(14, 9)); await f.prepare([arrival(date(14, 9))], 'third'); assert.deepEqual(await f.collect({ sessionId: 'third' }), [])
 });
 
-test('v1 remains strict; v2 requires valid local windows for window delivery', async t => {
+test('unified declarations require valid local windows for window delivery', async t => {
   const f = fixture(t)
   const validate = input => f.runtime.validateRule(input)
-  assert.equal(validate(rule).on, 'request.before')
+  assert.deepEqual(validate(rule).on, ['request.before'])
   for (const input of [ { ...rule, format: 'reminder/v3' },
-    { ...rule, when: {} }, { ...rule, when: { timeWindow: { start: '24:00', end: '06:00' } } },
-    { ...rule, when: { timeWindow: { start: '23:00', end: '23:00' } } },
-    { ...rule, when: { ...rule.when, tool: 'read' } } ]) assert.throws(() => validate(input))
+    { ...rule, event: {} }, { ...rule, event: { timeWindow: { start: '24:00', end: '06:00' } } },
+    { ...rule, event: { timeWindow: { start: '23:00', end: '23:00' } } },
+    { ...rule, event: { ...rule.event, tool: 'read' } } ]) assert.throws(() => validate(input))
   await assert.rejects(f.runtime.snooze({ sessionId: 's', ruleId: 'night' }), /together/)
 })

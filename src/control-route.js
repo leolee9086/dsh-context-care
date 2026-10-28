@@ -1,5 +1,6 @@
-import { ControlPatch, ControlError } from './rule-controls.js'
-import { CapacitySettings, CapacityError } from './reminder-capacity.js'
+import { ControlPatch, RuleStateError as ControlError } from '@leolee9086/dsh-rule-engine'
+import { CapacitySettings, CapacityError } from '@leolee9086/dsh-rule-engine/catalog-capacity'
+
 import { visibleReminderControls } from '../lib/reminder-runtime/control-view.js'
 
 /** Install authenticated session controls; authorization is required even on loopback. */

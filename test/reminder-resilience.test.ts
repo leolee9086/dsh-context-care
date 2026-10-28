@@ -1,7 +1,8 @@
+import { parseRuleAnswer, codeForFailure } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { parseRuleAnswer } from '../lib/reminder-runtime/evaluation.js'
-import { codeForFailure } from '../lib/reminder-runtime/denial.js'
+
+
 
 // Actual non-cooperating execution, thread exit, round exhaustion, and suffix
 // continuation are exercised in reminder-execution-real.test.ts. A never-settling

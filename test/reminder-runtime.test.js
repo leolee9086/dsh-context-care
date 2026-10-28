@@ -1,12 +1,13 @@
+import { createBoundedMatcher } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
+import { eventRule } from './event-rule.js'
 import assert from 'node:assert/strict'
-import { createReminderRuntime } from '../src/reminder-runtime/index.js'
-import { createBoundedMatcher } from '../src/bounded-matcher.js'
+import { createReminderRuntime } from './reminder-runtime-fixture.ts'
+
 import { setTimeout as delay } from 'node:timers/promises'
 import { asBatch } from './batch-execute.ts'
 
-const rule = { format: 'reminder/v4', id: 'no-any', on: 'tool.succeeded', text: '禁止使用 any',
-  when: { tool: 'read', arguments: { file_path: { regex: '\\.ts$', flags: 'i' } } }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } }
+const rule = eventRule('tool.succeeded', { id: 'no-any', event: { tool: 'read', arguments: { file_path: { regex: '\\.ts$', flags: 'i' } } } }, { template: '禁止使用 any' })
 const source = { sourceId: 'test', plugin: 'test', revision: 1, rules: [rule] }
 const event = (id, file = 'code.ts', sessionId = 's') => ({ callId: id, rootCallId: id, sessionId, name: 'read', arguments: { file_path: file } })
 function fixture(t, options = {}) {
@@ -18,8 +19,7 @@ function fixture(t, options = {}) {
 
 test('tool timeout rules match only TOOL_TIMEOUT failure results', async t => {
   const runtime = fixture(t)
-  const timeoutRule = { format: 'reminder/v4', id: 'timeout', on: 'tool.failed', text: '工具调用超时，请检查结果',
-    when: { tool: 'read', error: { code: 'TOOL_TIMEOUT' } }, effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } }
+  const timeoutRule = eventRule('tool.failed', { id: 'timeout', event: { tool: 'read', error: { code: 'TOOL_TIMEOUT' } } }, { template: '工具调用超时，请检查结果' })
   runtime.registerSource({ ...source, rules: [timeoutRule] })
   await runtime.submit({ ...event('other-failure'), type: 'tool.failed', error: { code: 'TOOL_FAILURE' } })
   assert.equal((await runtime.collect({ sessionId: 's', visible: [] })).length, 0)
@@ -49,7 +49,7 @@ test('analysis runs once before matching and supplies facts to multiple rules', 
   const module = new URL('./fixtures/reminder-analysis.js', import.meta.url).href
   runtime.registerAnalyzer({ ref: 'typescript', revision: 1, module })
   runtime.registerSource({ ...source, rules: [rule, { ...rule, id: 'facts',
-    when: { tool: 'read', condition: { kind: 'compare', field: 'facts.typescript.language', op: 'eq', value: 'ts' } } }] })
+    event: { tool: 'read' }, match: { kind: 'compare', field: 'facts.typescript.language', op: 'eq', value: 'ts' } }] })
   await runtime.submit(event('1'))
   const snapshot = runtime.snapshot('s')
   assert.equal(snapshot.diagnostics.filter(item => item.status === 'analyzed').length, 1)
@@ -170,7 +170,7 @@ test('session scope and global rule capacity apply across sources', async t => {
 
 test('default catalog accepts thousands of rules exceeding the execution byte budget', async t => {
   const runtime = fixture(t)
-  const rules = Array.from({ length: 2000 }, (_, id) => ({ ...rule, id: String(id), text: 'x'.repeat(1024) }))
+  const rules = Array.from({ length: 2000 }, (_, id) => ({ ...rule, id: String(id), actions: rule.actions.map(action => ({ ...action, template: 'x'.repeat(1024) })) }))
   runtime.registerSource({ ...source, rules })
   assert.equal(runtime.capacitySnapshot().registeredRules, 2000)
   assert.equal(runtime.capacitySnapshot().maxRules, 0)
@@ -250,7 +250,7 @@ test('production deadlines execute short async judges on hot workers and retain 
 
 test('session and preset scopes apply to catalog, submission and delivery', async t => {
   const runtime = fixture(t, { execute: asBatch(async () => ({ ok: true })) })
-  const scopedRule = { ...rule, id: 'scoped-rule', scope: { agentPresets: ['preset-a'] } }
+  const scopedRule = { ...rule, id: 'scoped-rule', recipient: { agentPresets: ['preset-a'] } }
   runtime.registerSource({ ...source, sourceId: 'scoped-source',
     scope: { sessionIds: ['s'], agentPresets: ['preset-a'] }, rules: [scopedRule] })
 
@@ -275,7 +275,7 @@ test('session and preset scopes apply to catalog, submission and delivery', asyn
 test('authoritative preset lookup applies on every boundary and overrides event metadata', async t => {
   let preset
   const runtime = fixture(t, { resolvePreset: () => preset })
-  runtime.registerSource({ ...source, rules: [{ ...rule, scope: { agentPresets: ['p'] } }] })
+  runtime.registerSource({ ...source, rules: [{ ...rule, recipient: { agentPresets: ['p'] } }] })
   assert.equal((await runtime.catalog('s', 'p'))[0].rules.length, 0)
   await runtime.submit({ ...event('forged'), agentPreset: 'p' })
   assert.equal(runtime.snapshot('s').candidates.length, 0)
@@ -293,7 +293,7 @@ test('legacy source identity, source scope, rule scope and callback intersect', 
   let accepted = true
   const runtime = fixture(t, { resolvePreset: () => 'p' })
   runtime.registerSource({ ...source, sessionId: 's', scope: { sessionIds: ['s', 'other'] },
-    rules: [{ ...rule, scope: { sessionIds: ['s'], agentPresets: ['p'] } }] },
+    rules: [{ ...rule, recipient: { sessionIds: ['s'], agentPresets: ['p'] } }] },
   { acceptSession: () => accepted })
   await runtime.submit(event('other', 'code.ts', 'other'))
   assert.deepEqual(await runtime.catalog('other'), [])

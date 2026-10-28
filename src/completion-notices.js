@@ -1,71 +1,10 @@
-import { z } from 'zod'
-import { requestFingerprint } from './request-journal.js'
+import { createCompletionOutbox, COMPLETION_NOTICES_DOMAIN } from '@leolee9086/dsh-rule-engine'
+import { completionNoticeText } from './completion-copy.js'
 
-/** Completion wording observations are distinct from verified task completion. */
-export const COMPLETION_NOTICES_DOMAIN = {
-  name: 'context_care_completion_notices', version: 1, layout: 'per-record',
-  tables: { notices: { valueSchema: z.object({ sessionId: z.string(), eventSeq: z.number().int().nonnegative(),
-    route: z.object({ provider: z.string(), model: z.string() }).strict(), label: z.string(), line: z.string(),
-    deliveries: z.number().int().nonnegative(), maxDeliveries: z.number().int().positive(),
-    status: z.enum(['pending', 'delivery-unknown', 'dispatched', 'superseded']), callId: z.string().optional(),
-  }).strict() }, processed: { valueSchema: z.number().int().nonnegative() } },
-}
 
-/** Open a replayable, bounded-delivery notice outbox. The caller serializes writes. */
+/** 旧独立调用方的原生表端口；生产 Session 路径不打开这些侧表。 */
 export async function openCompletionNotices(storageDomain) {
   const handle = await storageDomain.open(COMPLETION_NOTICES_DOMAIN)
-  const table = handle.table('notices')
-  const values = new Map(table.entries())
-  async function save(key, value) { await table.put(key, value); values.set(key, value) }
-  async function publish(session, eventSeq, route, candidate, maxDeliveries) {
-    const key = requestFingerprint({ sessionId: session.id, eventSeq })
-    if (values.has(key)) return
-    await save(key, { sessionId: String(session.id), eventSeq, route: { provider: route.provider, model: route.model },
-      ...candidate, deliveries: 0, maxDeliveries, status: 'pending' })
-  }
-  function collect(session, request) {
-    if ((request.purpose ?? 'conversation') !== 'conversation') return []
-    return [...values].filter(([, value]) => value.sessionId === String(session.id)
-      && ['pending', 'delivery-unknown'].includes(value.status) && value.deliveries < value.maxDeliveries
-      && value.route.provider === request.provider && value.route.model === request.model)
-      .sort((a, b) => b[1].eventSeq - a[1].eventSeq).slice(0, 1).map(([key, value]) => ({
-      ruleId: 'completion-observation', version: '1', trigger: 'completion', provider: request.provider, model: request.model,
-      purpose: 'conversation', sourceSeqs: [value.eventSeq], completionKey: key,
-      text: `上一份输出使用了“${value.label}”等完成表述。它是输出措辞的观察结果。请依据实际请求、交付内容和验证记录核对完成范围；若仍有已授权工作，继续完成。`,
-    }))
-  }
-  const reservations = new Map()
-  async function reserve(session, segments, callId) {
-    for (const segment of segments.filter(value => value.completionKey !== undefined)) {
-      const old = values.get(segment.completionKey)
-      const previous = reservations.get(callId) ?? new Map()
-      previous.set(segment.completionKey, structuredClone(old))
-      reservations.set(callId, previous)
-      await save(segment.completionKey, { ...old, deliveries: old.deliveries + 1, status: 'delivery-unknown', callId })
-    }
-  }
-  async function rollback(session, callId) {
-    // Restore only a known unstarted handoff, never a crash's unknown delivery.
-    for (const [key, previous] of reservations.get(callId) ?? []) {
-      const current = values.get(key)
-      if (current?.callId === callId && current.status === 'delivery-unknown') await save(key, previous)
-    }
-    reservations.delete(callId)
-  }
-  async function dispatched(session, segments, callId, request) {
-    reservations.delete(callId)
-    if ((request.purpose ?? 'conversation') !== 'conversation') return
-    const sent = new Set(segments.map(segment => segment.completionKey))
-    for (const [key, old] of values) {
-      if (old.sessionId !== String(session.id) || !['pending', 'delivery-unknown'].includes(old.status)) continue
-      // Only the most recent notice is useful on this natural request. Older
-      // notices must not reappear on successive turns after this one dispatches.
-      await save(key, { ...old, callId, status: sent.has(key) ? 'dispatched' : 'superseded' })
-    }
-  }
-  const processed = handle.table('processed')
-  return { publish, collect, reserve, rollback, dispatched,
-    seen: (session, seq) => (processed.get(requestFingerprint(String(session.id))) ?? -1) >= seq,
-    async mark(session, seq) { await processed.put(requestFingerprint(String(session.id)), seq) },
-    list: () => [...values.values()], close: () => handle.close() }
+  const outbox = createCompletionOutbox({ table: handle.table('notices'), processed: handle.table('processed'), render: completionNoticeText })
+  return { ...outbox, close: () => handle.close() }
 }

@@ -8,6 +8,7 @@
 /** @import {} from '@deepseek-ai/dsh-agent-preset-registry' */
 /** @import {} from '@deepseek-ai/dsh-compaction' */
 import { installContextCare, Config } from './index.js'
+import { actionRunRecords } from '@leolee9086/dsh-rule-engine'
 
 import { installControlRoute } from './control-route.js'
 import { installWorkbenchRoute } from './workbench-route.js'
@@ -92,8 +93,8 @@ export function apply(ctx, config = {}) {
         : { items: [], admission: undefined, total: 0, offset, selectedFound: selectedSeq === undefined ? undefined : false, nextOffset: null }
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
       const runtime = ctx.get('contextCareWorkbench')?.store.read(sessionId)?.runtime
-      const matchingFailures = collection === 'actions' ? (runtime?.runs ?? []).flatMap(run => {
-        if (run === null || typeof run !== 'object' || Array.isArray(run) || (run.kind !== 'matching' && run.kind !== 'display')) return []
+      const matchingFailures = collection === 'actions' ? (runtime ? actionRunRecords(runtime) : []).flatMap(run => {
+        if (run.kind !== 'matching' && run.kind !== 'display') return []
         return [{ id: run.id, kind: run.kind, status: run.status, reason: run.reason, count: run.count,
           updatedAt: run.updatedAt, sourceSeqs: run.sourceSeqs, diagnostic: run.result }]
       }) : undefined
@@ -115,7 +116,7 @@ export function apply(ctx, config = {}) {
       kind: 'exact',
       path: JOURNAL_ROUTE,
       handler: async (req, res) => {
-        res.setHeader('x-context-care-journal-format', journal.format ?? 'legacy')
+        res.setHeader('x-context-care-journal-format', journal.format)
         if (!authorized(req, res)) return
         if (req.method !== 'GET') { res.writeHead(405, { allow: 'GET' }); res.end(); return }
         if (!req.url) { res.writeHead(400); res.end(); return }

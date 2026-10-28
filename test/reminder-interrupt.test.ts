@@ -1,9 +1,11 @@
+import { createBoundedMatcher, createOutputInterrupt } from '@leolee9086/dsh-rule-engine'
 import test, { type TestContext } from 'node:test'
+import { eventRule } from './event-rule.js'
 import assert from 'node:assert/strict'
-import { createBoundedMatcher } from '../src/bounded-matcher.js'
-import { createReminderRuntime } from '../lib/reminder-runtime/runtime.js'
-import { createOutputInterrupt } from '../src/reminder-runtime/interrupt.ts'
-import type { OutputEvidence } from '../lib/reminder-runtime/output-stream.js'
+
+import { createReminderRuntime } from './reminder-runtime-fixture.ts'
+
+import type { OutputEvidence } from '@leolee9086/dsh-rule-engine'
 
 /** Matching and candidate admission use the real Worker; only race timing is controlled. */
 async function fixture(t: TestContext) {
@@ -12,11 +14,8 @@ async function fixture(t: TestContext) {
     dispatches: true, execute: (input, signal, timing) => matcher.detect(input, signal, timing) })
   t.after(async () => { await runtime.close(); await matcher.close() })
   await matcher.warmup()
-  runtime.registerSource({ sourceId: 'interrupt-race', plugin: 'test', revision: 1, rules: [{
-    format: 'reminder/v4', id: 'output', on: 'assistant.output', text: 'OUTPUT_NOTICE',
-    when: { blockTypes: ['text'], pattern: { kind: 'literal', text: 'ARCHIVE' } },
-    effect: { kind: 'remind', deliver: { model: { once: 'surface', interrupt: 'abort-resume' } } },
-  }] })
+  runtime.registerSource({ sourceId: 'interrupt-race', plugin: 'test', revision: 1, rules: [eventRule('assistant.output', { id: 'output', event: { blockTypes: ['text'], pattern: { kind: 'literal', text: 'ARCHIVE' } } },
+    { template: 'OUTPUT_NOTICE', delivery: { model: { once: 'surface', interrupt: 'abort-resume' } } })] })
   const output: OutputEvidence = { attemptId: 'attempt', turn: 0, step: 0, index: 0,
     type: 'text', text: 'ARCHIVE', full: 'ARCHIVE', offset: 0 }
   await runtime.submit({ type: 'assistant.output', sessionId: 's', callId: 'output-call',

@@ -1,5 +1,5 @@
 import { isCheckpointSource } from './producer-source.js'
-import { createDiagnosticIndex, createDiagnosticRelations, createDiagnosticRecordChanges, compareDiagnosticRecords, createDiagnosticOrder } from '../lib/diagnostic-pages.js'
+import { createDiagnosticIndex, createDiagnosticRelations, compareDiagnosticRecords, createDiagnosticOrder } from '../lib/diagnostic-pages.js'
 
 const fields = ['action', 'reason', 'phase', 'rule', 'outcome', 'beforeSeq', 'afterSeq', 'beforeGeneration', 'afterGeneration',
   'beforeInput', 'afterInput', 'routeSaving', 'heuristicSaving', 'sourceSeqs', 'shadowedSeqs', 'oldSourceSeqs', 'replacements',
@@ -13,7 +13,6 @@ export function createActionIndex() {
   const entries = createDiagnosticIndex(), summaries = new Map(), checkpoints = new Map()
   const byTransaction = new Map(), checkpointGroups = new Map(), groupCheckpoints = new Map()
   const transactionOwners = new Map(), auditOwners = new Map(), groupAudits = new Map(), auditCandidates = new Map()
-  const changes = createDiagnosticRecordChanges()
   const ownerDeclarations = createDiagnosticRelations(record => record.kind === 'maintenance' && record.data.operationId
     ? [record.data.compactionId, ...(record.data.summaryTransactions ?? [])].filter(Boolean) : [], compareDiagnosticRecords)
   const transactionMembers = createDiagnosticRelations(record => eligible(record) && record.data.compactionId ? [record.data.compactionId] : [], compareDiagnosticRecords)
@@ -67,9 +66,9 @@ export function createActionIndex() {
   }
   return (records, added) => {
     const dirty = new Set(), affected = new Set()
-    const delta = changes(records)
+    const delta = records
     if (delta.added.length || delta.removed.length || delta.order) {
-      const relationRecords = delta.order ?? delta
+      const relationRecords = delta
       const rekey = new Set()
       transactionMembers.update(relationRecords)
       for (const id of ownerDeclarations.update(relationRecords)) {
@@ -144,6 +143,6 @@ export function createActionIndex() {
 /** Whole-list query over an explicit shared log; HTTP routes use bounded pages. */
 export function contextCareActions(records, session, log) {
   const events = log.select(actionEventTypes)
-  const { entries, admission } = createActionIndex()(records, events)
+  const { entries, admission } = createActionIndex()({ added: records, removed: [], order: records }, events)
   return { admission, actions: entries.slice(0, entries.size).map(entry => entry.materialize(log)) }
 }

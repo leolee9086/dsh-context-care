@@ -1,4 +1,5 @@
 import test, { type TestContext } from 'node:test'
+import { eventRule } from './event-rule.js'
 import assert from 'node:assert/strict'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-tools'
@@ -21,12 +22,8 @@ const formerTicketTtlMs = ruleTimeoutMs * 4
 const blockedReason = 'DENIAL_LIFETIME_BLOCKED'
 const LoggedResult = z.object({ message: z.object({ source: z.object({ callId: z.string() }),
   isError: z.boolean().optional(), content: z.array(z.object({ text: z.string().optional() }).passthrough()) }) })
-const notice = (on: 'tool.succeeded' | 'tool.before-execute') => ({ format: 'reminder/v4', id: 'notice', on,
-  text: 'DENIAL_LIFETIME_NOTICE', when: { tool: 'lifetime_probe' },
-  effect: { kind: 'remind', deliver: { model: { once: 'surface' } } } })
-const denial = (tool: string) => ({ format: 'reminder/v4', id: 'deny', on: 'tool.before-execute',
-  text: blockedReason, when: { tool }, effect: { kind: 'deny-tool', dangerous: true, reason: blockedReason,
-    deliver: { model: { once: 'surface' } } } })
+const notice = (on: 'tool.succeeded' | 'tool.before-execute') => eventRule(on, { event: { tool: 'lifetime_probe' } }, { template: 'DENIAL_LIFETIME_NOTICE' })
+const denial = (tool: string) => eventRule('tool.before-execute', { id: 'deny', event: { tool } }, { template: blockedReason, deny: { dangerous: true, reason: blockedReason } })
 
 /** A real Loader provides the pre-execute hook, synchronous guard, worker and durable storage. */
 export function registerDenialLifetimeHostCases(harness: Harness): void {
@@ -61,7 +58,7 @@ export function registerDenialLifetimeHostCases(harness: Harness): void {
           assert.ok(elapsedMs > formerTicketTtlMs)
         } else if (scenario === 'unrelated-refresh') {
           unrelated.replace({ sourceId: 'unrelated-notice', plugin: 'test', revision: 2,
-            rules: [{ ...notice('tool.succeeded'), text: 'REFRESHED_NOTICE' }] })
+            rules: [eventRule('tool.succeeded', { event: { tool: 'lifetime_probe' } }, { template: 'REFRESHED_NOTICE' })] })
         } else {
           // A newly introduced deny-tool rule really changes authorization.
           runtime.registerSource({ sourceId: 'new-denial', plugin: 'test', revision: 1,
