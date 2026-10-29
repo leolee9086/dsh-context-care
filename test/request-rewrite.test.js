@@ -1,7 +1,37 @@
-import { REWRITER_NAME } from '@leolee9086/dsh-rule-engine'
+import { REWRITER_NAME, createRuleControls } from '@leolee9086/dsh-rule-engine'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createRequestRewriter } from '../src/request-rewrite.js'
+import { createRequestRewriter as createHostRewriter } from '../src/request-rewrite.js'
+
+// 下列改写行为发生在模型会话内；普通 HTTP 请求单独验证其适配边界。
+function createRequestRewriter(options) {
+  const rewrite = createHostRewriter(options)
+  return request => rewrite({ scope: { sessionId: 'rewrite-session' }, ...request })
+}
+
+test('无会话的思源请求不读取会话控制、不执行改写', async () => {
+  const controls = createRuleControls({ save: async () => {} })
+  const records = []
+  let revisionReads = 0
+  const rewrite = createHostRewriter({
+    rules: () => [requestRule()],
+    revision: sessionId => {
+      revisionReads++
+      return JSON.stringify([controls.revision(sessionId), controls.epoch(sessionId, 'dsh-context-care', 'state')])
+    },
+    onRecord: record => records.push(record),
+  })
+  const request = { url: 'http://127.0.0.1:52705/api/query/sql', body: '{"stmt":"SELECT 1 AS ok"}' }
+  for (const scope of [undefined, {}, { sessionId: undefined }, { sessionId: '' }, { sessionId: 1 }]) {
+    assert.equal(await rewrite({ ...request, scope }), undefined)
+  }
+  assert.equal(revisionReads, 0)
+  assert.deepEqual(records, [])
+  // 同一实例仍为具名会话执行规则，保持控制版本与交付记录的原有行为。
+  assert.equal(await rewrite({ ...request, body: 'secret', scope: { sessionId: 's' } }), '[已隐藏]')
+  assert.equal(records[0].outcome, 'applied')
+  assert.ok(revisionReads > 0)
+})
 
 test('request transform cooldown and surface memory belong to each session', async () => {
   const records = []

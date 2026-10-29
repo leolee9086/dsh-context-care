@@ -6,7 +6,7 @@
 
 参考 S-forge MAGI 的指标曲线和 Codex 的上下文生命周期设计，以独立 Cordis 插件接入，不修改 Harness、S-forge 或 Codex 源码。本文档以中文为主。
 
-> 版本：`v0.14.18`，面向官方 DSH `0.2.0-rc.2` API，并已用桌面 `0.2.1-rc.3` 原生产物完成共享读取兼容检查。配合 DSH 思源对接插件 `dsh-plugin-siyuan v0.8.0`，支持独立规则来源、当前预设名称与模型条件，以及跨会话共享次数。通过固定 GitHub 标签安装，标签携带客户端及提醒运行时构建产物。
+> 版本：`v0.14.19`，面向官方 DSH `0.2.0-rc.2` API，并已用桌面 `0.2.1-rc.3` 原生产物完成共享读取兼容检查。配合 DSH 思源对接插件 `dsh-plugin-siyuan v0.8.0`，支持独立规则来源、当前预设名称与模型条件，以及跨会话共享次数。通过固定 GitHub 标签安装，标签携带客户端及提醒运行时构建产物。
 
 ## 指标与行为
 
@@ -445,7 +445,7 @@ UI 优先显示当前进程最近一次请求边界的独立数值采样，关�
 
 刚发布的依赖受 pnpm 的 `minimumReleaseAge` 政策约束。本机 pnpm 11.7.0 与 12.6.0 的冻结锁文件安装都因两个版本未满24小时而失败；pnpm 11.7.0 的普通 `add` 成功，但自动在消费目录记录了两个精确版本的 `minimumReleaseAgeExclude`。这与无豁免安装不同。保持该政策且没有精确版本批准的环境应等待其发布时间窗口满足后再安装；本仓库不分发豁免，不修改消费者的全局设置。
 
-GitHub 标签已包含客户端构建产物；包没有 `prepare`、`prepack` 或安装生命周期脚本。官方插件管理器的包来源可直接填写 `github:leolee9086/dsh-context-care#v0.14.18`。普通 pnpm 安装不需要 `allowBuilds`、`--ignore-scripts` 或 `blockExoticSubdeps` 例外。v0.8.0 的安装契约问题和历史验证限制保留在更新记录中。
+GitHub 标签已包含客户端构建产物；包没有 `prepare`、`prepack` 或安装生命周期脚本。官方插件管理器的包来源可直接填写 `github:leolee9086/dsh-context-care#v0.14.19`。普通 pnpm 安装不需要 `allowBuilds`、`--ignore-scripts` 或 `blockExoticSubdeps` 例外。v0.8.0 的安装契约问题和历史验证限制保留在更新记录中。
 
 ### 安装发行包
 
@@ -455,14 +455,14 @@ GitHub 标签已包含客户端构建产物；包没有 `prepare`、`prepack` �
 dsh plugin --profile desktop add "/absolute/path/to/plugin.tgz"
 ```
 
-Host 代码更新后需要重启 DSH，再刷新页面；重新启用条目不会清除旧 Node 模块缓存。安装和重启通过官方管理流程完成。
+更新运行中的插件应通过官方插件管理器完成。DSH 0.2.1-rc.3 启用 HMR 时要求先卸载已安装包，再安装目标 GitHub 标签，由管理器停止旧组件并协调新模块加载。CLI 覆盖已有依赖可能只改变磁盘文件，bundle 列表不变时不会触发运行时刷新；应核对管理器应用结果和实际调用行为。管理器明确报告需要重启时，再按其诊断处理。
 
 ### 从 GitHub 安装
 
-使用固定的 `v0.14.18` 标签：
+使用固定的 `v0.14.19` 标签：
 
 ```sh
-dsh plugin --profile web add "github:leolee9086/dsh-context-care#v0.14.18"
+dsh plugin --profile web add "github:leolee9086/dsh-context-care#v0.14.19"
 ```
 
 构建产物 `lib/` 已入库，装完即可用 —— 不需要额外构建，也不需要手工打包上传 tgz。带上标签安装，版本不会跟着分支漂。

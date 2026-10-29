@@ -16,7 +16,13 @@ function blocksChangedBetween(before, after) {
   return beforeMessages === undefined || afterMessages === undefined ? [] : changedBlocks(beforeMessages, afterMessages)
 }
 
-/** Host 只提供改写证据与实际持久 ACK；规则准入、冷却、清理和提交归引擎。 */
+/** Host 识别会话请求并提供改写证据与持久 ACK；规则准入、冷却、清理和提交归引擎。 */
 export function createRequestRewriter(options) {
-  return createEngineRewriter({ ...options, blocksChanged: blocksChangedBetween })
+  const rewrite = createEngineRewriter({ ...options, blocksChanged: blocksChangedBetween })
+  return async request => {
+    // fetch-router 同时转发思源等普通 HTTP 请求；没有会话身份就没有可查询的会话规则与偏好。
+    const sessionId = request.scope?.sessionId
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return undefined
+    return rewrite(request)
+  }
 }
