@@ -54,7 +54,7 @@ Host 行 `dsh-context-care/requests` 通过官方 `llm/stream` waterfall 拦截�
 
 ## 规则提醒与晚间休息
 
-规则领域统一使用 `@leolee9086/dsh-rule-engine@0.8.0`。同步通知、请求改写、文档/条目和事件提醒复用同一 Engine，条件树、来源、动作身份与提交策略由库持有；Host 连接原生 Session、工具审批、存储 ACK 和实际交付。请求/显示同时支持原坐标补丁与 `transform` 顺序文本动作，保留酒馆宏、捕获/trim、深度和编辑条件。`registerCondition` / `registerAction` 提供版本化编译扩展，能力目录包含参数 schema；替换/卸载会使依赖该能力的计划失效。架构、扩展与验收见[统一引擎迁移验收](docs/unified-engine-migration.md)。
+规则领域统一使用 `@leolee9086/dsh-rule-engine@0.9.1`。检测器回调分宿主与 Worker 两条通路，独占组按同一份全局顺序决出。同步通知、请求改写、文档/条目和事件提醒复用同一 Engine，条件树、来源、动作身份与提交策略由库持有；Host 连接原生 Session、工具审批、存储 ACK 和实际交付。请求/显示同时支持原坐标补丁与 `transform` 顺序文本动作，保留酒馆宏、捕获/trim、深度和编辑条件。`registerCondition` / `registerAction` 提供版本化编译扩展，能力目录包含参数 schema；替换/卸载会使依赖该能力的计划失效。架构、扩展与验收见[统一引擎迁移验收](docs/unified-engine-migration.md)。
 
 规则入口接受引擎统一的 `schemaVersion: 2` 声明。`on` 是阶段数组，`match` 是统一条件树，`actions` 可以声明多个有独立 ID 的动作；通知正文在动作 `template`，投递策略在 `delivery.model`，执行前拒绝在 `deny: { dangerous: true, reason }`。`event` 描述工具名、参数、错误码、输出模式与原生事件名；自然请求 `request.before` 支持 `event.timeWindow: { start: "23:00", end: "06:00", timeZone: local }` 与 `event.humanActivity: { withinSeconds: 300 }`。旧 `reminder/v1` 至 `reminder/v4` 不执行，来源插件需要直接提交统一声明。已提交消息中的旧字段仅读作投递、窗口和配额事实。时间采用 Host 本机时区，开始包含、结束不包含；两个时间必须不同。近期真人输入根据持久入队事件的 `source.kind: user` 与首次入队时间确定；插件消息、自动续跑和继承的 fork 历史不刷新在场时间。人工审批暂未作为在场证据。
 
@@ -441,7 +441,7 @@ UI 优先显示当前进程最近一次请求边界的独立数值采样，关�
 
 ## 安装
 
-运行环境需要 Node.js 22.19.0 或更新版本。当前开发树通过标准 npm 精确依赖使用 `@leolee9086/dsh-rule-engine@0.8.0` 与独立分块库 `@leolee9086/dsh-session-blocks@0.1.0`，没有内嵌副本或引擎源码解析覆盖。引擎承担统一规则、请求/显示规划、事件交付与恢复，并补齐通知通道、完成观察、循环/流式提醒、精确路由提示和请求改写事务；插件保留原生环境接入及呈现。必要环境端口显式提供，事件形状类型从库的同一生成源取得；0.8.0 补齐共同条件、顺序文本、ACK 后提交与扩展能力。职责与当前验证见 [统一引擎迁移验收](docs/unified-engine-migration.md)，早期迁移过程见 [提醒领域迁移验收](docs/reminder-residual-migration.md)及 [引擎契约复核](docs/engine-contract-review.md)。配套引擎发行后，执行 `pnpm install --frozen-lockfile`、`pnpm check`、`pnpm test` 和 `pnpm build` 即使用锁定依赖；本轮归档安装验收使用已生成的实际包。旧发行标签保留其当时依赖，不能用当前开发树验证代替旧标签内容。
+运行环境需要 Node.js 22.19.0 或更新版本。当前开发树通过标准 npm 精确依赖使用 `@leolee9086/dsh-rule-engine@0.9.1` 与独立分块库 `@leolee9086/dsh-session-blocks@0.1.0`，没有内嵌副本或引擎源码解析覆盖。引擎承担统一规则、请求/显示规划、事件交付与恢复，并补齐通知通道、完成观察、循环/流式提醒、精确路由提示和请求改写事务；插件保留原生环境接入及呈现。必要环境端口显式提供，事件形状类型从库的同一生成源取得；0.9.1 补齐检测器的宿主/Worker 双通路、跨通路全局顺序与内联判定器。职责与当前验证见 [统一引擎迁移验收](docs/unified-engine-migration.md)，早期迁移过程见 [提醒领域迁移验收](docs/reminder-residual-migration.md)及 [引擎契约复核](docs/engine-contract-review.md)。配套引擎发行后，执行 `pnpm install --frozen-lockfile`、`pnpm check`、`pnpm test` 和 `pnpm build` 即使用锁定依赖；本轮归档安装验收使用已生成的实际包。旧发行标签保留其当时依赖，不能用当前开发树验证代替旧标签内容。
 
 刚发布的依赖受 pnpm 的 `minimumReleaseAge` 政策约束。本机 pnpm 11.7.0 与 12.6.0 的冻结锁文件安装都因两个版本未满24小时而失败；pnpm 11.7.0 的普通 `add` 成功，但自动在消费目录记录了两个精确版本的 `minimumReleaseAgeExclude`。这与无豁免安装不同。保持该政策且没有精确版本批准的环境应等待其发布时间窗口满足后再安装；本仓库不分发豁免，不修改消费者的全局设置。
 

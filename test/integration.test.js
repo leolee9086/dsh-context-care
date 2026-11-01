@@ -4500,7 +4500,7 @@ test('Workbench v2 external detector finalizes a real stream once and exposes ow
   ctx.llm.registerAdapter(['care-test'], new DetectorAdapter([{ blocks: [{ type: 'text', text: 'Next step.' }] }]))
   const agent = await ctx.agentLoop.create('external-detector', { provider: 'care-test', model: 'care-test' })
   const dispose = service.registerDetector({ plugin: 'test-plugin', ref: 'test:final', revision: 1, sessionId: agent.id, on: ['output.delta'],
-    paramsSchema: {}, stateSchema: { type: 'string' }, resultSchema: {}, callbacks: {
+    paramsSchema: {}, stateSchema: { type: 'string' }, resultSchema: {}, hostCallbacks: {
       initialize() { return '' },
       feed({ state, delta }) { return { state: state + delta, result: { ok: false, ranges: [], captures: {} } } },
       finalize({ state }) { return { state, result: { ok: state === 'ARCHIVE', ranges: [], captures: { text: state } } } },

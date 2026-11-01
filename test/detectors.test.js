@@ -2,18 +2,30 @@ import { createBoundedMatcher, createDetectorRegistry, normalizeRuleV2 } from '@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-const spec = extra => ({ plugin: 'test-plugin', ref: 'test:letters', revision: 1, on: ['output.delta', 'output.complete', 'display.render'],
+// 两条通路：hostCallbacks 是宿主进程里的真函数；workerCallbacks 是进 Worker 编译的源码。
+// 验证 Worker 隔离（死循环、闭包、全局污染）的用例必须走 workerCallbacks，
+// 其余行为用 hostCallbacks 即可——两者共用同一套状态机与校验。
+const base = { plugin: 'test-plugin', ref: 'test:letters', revision: 1, on: ['output.delta', 'output.complete', 'display.render'],
   paramsSchema: { type: 'object', properties: { token: { type: 'string' } }, required: ['token'], additionalProperties: false },
   stateSchema: { type: 'object', properties: { text: { type: 'string' }, feeds: { type: 'integer' } }, required: ['text', 'feeds'], additionalProperties: false },
-  resultSchema: {}, callbacks: {
-    initialize() { return { text: '', feeds: 0 } },
-    feed({ state, params, delta }) {
-      state.text += delta; state.feeds++
-      return { state, result: { ok: state.text.includes(params.token), ranges: [], captures: {}, facts: { text: state.text, feeds: state.feeds } } }
-    },
-    finalize({ state }) { return { state, result: { ok: true, ranges: [], captures: {}, facts: { final: true, text: state.text, feeds: state.feeds } } } },
-    reset() { return { text: '', feeds: 0 } },
-  }, ...extra })
+  resultSchema: {} }
+const hostCode = {
+  initialize() { return { text: '', feeds: 0 } },
+  feed({ state, params, delta }) {
+    state.text += delta; state.feeds++
+    return { state, result: { ok: state.text.includes(params.token), ranges: [], captures: {}, facts: { text: state.text, feeds: state.feeds } } }
+  },
+  finalize({ state }) { return { state, result: { ok: true, ranges: [], captures: {}, facts: { final: true, text: state.text, feeds: state.feeds } } } },
+  reset() { return { text: '', feeds: 0 } },
+}
+const workerCode = {
+  initialize: '() => ({ text: "", feeds: 0 })',
+  feed: '({ state, params, delta }) => { state.text += delta; state.feeds++; return { state, result: { ok: state.text.includes(params.token), ranges: [], captures: {}, facts: { text: state.text, feeds: state.feeds } } } }',
+  finalize: '({ state }) => ({ state, result: { ok: true, ranges: [], captures: {}, facts: { final: true, text: state.text, feeds: state.feeds } } })',
+  reset: '() => ({ text: "", feeds: 0 })',
+}
+const spec = (extra = {}) => ({ ...base, hostCallbacks: hostCode, ...extra })
+const workerSpec = (extra = {}) => ({ ...base, workerCallbacks: workerCode, ...extra })
 const rule = (extra = {}) => normalizeRuleV2({ schemaVersion: 2, sourceId: 'test', id: 'r', revision: 1, on: ['output.delta'],
   select: { view: 'original', roles: ['assistant'], blockTypes: ['text'] }, match: { kind: 'detector', ref: 'test:letters', revision: 1, params: { token: 'ab' } },
   actions: [{ id: 'a', kind: 'notify', stage: 'output.delta', enabledDefault: true, template: 'hit' }], ...extra })
@@ -60,7 +72,8 @@ test('Owned detector scope and revision drive availability; registration collisi
   assert.throws(() => registry.register(spec()), /conflict/)
   const foreignDispose = registry.register(spec({ sessionId: 'other' }))
   assert.equal((await registry.detect(input('ab'), undefined, { sessionId: 'missing' })).length, 0)
-  assert.throws(() => registry.register(spec({ ref: 'async', callbacks: { ...spec().callbacks, feed: async () => null } })), /synchronous/)
+  // 宿主通路只收同步函数：异步函数在注册时就被拒，不会拖到调用期。
+  assert.throws(() => registry.register(spec({ ref: 'async', hostCallbacks: { ...hostCode, feed: async () => null } })), /synchronous/)
   await dispose(); assert.equal(registry.available(rule(), 's', 'output.delta'), false)
   await foreignDispose()
 }))
@@ -76,7 +89,8 @@ test('External detectors and native regex share one priority/exclusive pass with
 }))
 
 test('Detector cancellation and disposal stop workers before returning; synchronous loops time out', async () => fixture(async registry => {
-  const slow = spec({ timeoutMs: 25, callbacks: { ...spec().callbacks, feed() { while (true) {} } } })
+  // 死循环只能在 Worker 里被掐断——宿主通路跑死循环会卡住宿主，所以这条必须走源码通路。
+  const slow = workerSpec({ timeoutMs: 25, workerCallbacks: { ...workerCode, feed: '() => { while (true) {} }' } })
   const dispose = registry.register(slow)
   await assert.rejects(registry.detect(input('a'), undefined, { sessionId: 's' }), /timed out|work-timeout/)
   const controller = new AbortController()
@@ -92,14 +106,15 @@ test('Malformed params, state, evidence, promises and closure references cannot 
   let dispose = registry.register(spec())
   await assert.rejects(registry.detect(input('a', [rule({ match: { kind: 'detector', ref: 'test:letters', revision: 1, params: { token: 1 } } })]), undefined, { sessionId: 's' }), /params-schema/)
   await dispose()
+  // 闭包与 Promise 的边界属于 Worker 通路：源码在另一侧重新编译，拿不到定义处的变量。
   for (const feed of [
-    () => ({ state: { text: '', feeds: 'bad' }, result: { ok: false, ranges: [], captures: {} } }),
-    ({ state }) => ({ state, result: { ok: true, ranges: [[0, 999]], captures: {} } }),
-    ({ state }) => ({ state, result: { ok: true, ranges: [], captures: {}, field: 'arbitrary.path' } }),
-    () => Promise.resolve(null),
-    () => missingClosure,
+    '() => ({ state: { text: "", feeds: "bad" }, result: { ok: false, ranges: [], captures: {} } })',
+    '({ state }) => ({ state, result: { ok: true, ranges: [[0, 999]], captures: {} } })',
+    '({ state }) => ({ state, result: { ok: true, ranges: [], captures: {}, field: "arbitrary.path" } })',
+    '() => Promise.resolve(null)',
+    '() => missingClosure',
   ]) {
-    dispose = registry.register(spec({ callbacks: { ...spec().callbacks, feed } }))
+    dispose = registry.register(workerSpec({ workerCallbacks: { ...workerCode, feed } }))
     await assert.rejects(registry.detect(input('a'), undefined, { sessionId: 's' }), /state-schema|invalid detector range|block.text|plain-json|not defined/)
     await dispose()
   }
@@ -123,7 +138,9 @@ test('Builtin marker/phrase/line-repeat/degradation reuse shared facts and patte
 }))
 
 test('Detector schemas with catastrophic regex run inside the terminable worker', async () => fixture(async registry => {
-  registry.register(spec({ paramsSchema: { type: 'object', properties: { token: { type: 'string', pattern: '^(a+)+$' } }, required: ['token'], additionalProperties: false } }))
+  // schema 里的灾难性正则属于 Worker 隔离能盖住的范围：宿主通路没有超时，
+  // 这条要测的是「不可信 schema 被可终止的那一侧挡住」，所以必须走源码通路。
+  registry.register(workerSpec({ paramsSchema: { type: 'object', properties: { token: { type: 'string', pattern: '^(a+)+$' } }, required: ['token'], additionalProperties: false } }))
   const bad = rule({ match: { kind: 'detector', ref: 'test:letters', revision: 1, params: { token: 'a'.repeat(80) + '!' } } })
   await assert.rejects(registry.detect(input('a', [bad]), undefined, { sessionId: 's' }), /matcher-work-timeout/)
 }, { timeoutMs: 500 }))
@@ -142,7 +159,7 @@ test('Detector policy races, concurrent feeds and reused session scopes cannot c
   await registry.releaseBlock(options.scope, 0)
   assert.equal((await registry.detect(input('a'), undefined, options)).length, 0)
   await registry.detect(input('ab'), undefined, options)
-  const disposeBad = registry.register(spec({ ref: 'bad-reset', callbacks: { ...spec().callbacks, reset() { throw new Error('reset-failed') } } }))
+  const disposeBad = registry.register(spec({ ref: 'bad-reset', hostCallbacks: { ...hostCode, reset() { throw new Error('reset-failed') } } }))
   const badRule = rule({ id: 'bad', match: { kind: 'detector', ref: 'bad-reset', revision: 1, params: { token: 'never' } } })
   await registry.detect(input('a', [badRule]), undefined, { ...options, scope: 'bad-reset' })
   await assert.rejects(disposeBad(), /resource-close-failed/)
@@ -175,12 +192,9 @@ test('Epoch reset holds the stream lock; explicit close during reset prevents a 
 }))
 
 test('Reused workers preserve explicit state but recreate callback globals and honor changed schemas', async () => fixture(async registry => {
-  const dispose = registry.register(spec({ callbacks: { ...spec().callbacks,
-    feed({ state, delta }) {
-      globalThis.visits = (globalThis.visits ?? 0) + 1
-      state.text += delta; state.feeds++
-      return { state, result: { ok: true, ranges: [], captures: {}, facts: { visits: globalThis.visits, feeds: state.feeds } } }
-    },
+  // 全局污染只可能发生在 Worker 的共享 vm 上下文里，所以这条也走源码通路。
+  const dispose = registry.register(workerSpec({ workerCallbacks: { ...workerCode,
+    feed: '({ state, delta }) => { globalThis.visits = (globalThis.visits ?? 0) + 1; state.text += delta; state.feeds++; return { state, result: { ok: true, ranges: [], captures: {}, facts: { visits: globalThis.visits, feeds: state.feeds } } } }',
   } }))
   const options = { sessionId: 's', scope: 'warm-stream', epoch: 'p' }
   assert.deepEqual((await registry.detect(input('a'), undefined, options))[0].facts, { visits: 1, feeds: 1 })
@@ -195,14 +209,15 @@ test('Reused workers preserve explicit state but recreate callback globals and h
 }))
 
 test('Invalid feed evidence fails before a valid finalize can hide it; method-local arrows transfer correctly', async () => fixture(async registry => {
-  const dispose = registry.register(spec({ callbacks: { ...spec().callbacks,
-    feed({ state }) { return { state, result: { ok: false, ranges: [[0, 999]], captures: {} } } },
+  // 简写方法要能被序列化成源码，这条测的是 Worker 通路的传输形态。
+  const dispose = registry.register(workerSpec({ workerCallbacks: { ...workerCode,
+    feed: '({ state }) => ({ state, result: { ok: false, ranges: [[0, 999]], captures: {} } })',
   } }))
   const completeRule = rule({ on: ['output.complete'], actions: [{ id: 'a', kind: 'notify', stage: 'output.complete', enabledDefault: true, template: 'hit' }] })
   await assert.rejects(registry.detect(input('ab', [completeRule], { stage: 'output.complete' }), undefined, { sessionId: 's' }), /invalid detector range/)
   await dispose()
-  registry.register(spec({ callbacks: { ...spec().callbacks,
-    feed({ state, delta }) { state.text = [state.text, delta].map(value => value).join(''); state.feeds++; return { state, result: { ok: true, ranges: [], captures: {} } } },
+  registry.register(workerSpec({ workerCallbacks: { ...workerCode,
+    feed: '({ state, delta }) => { state.text = [state.text, delta].map(value => value).join(""); state.feeds++; return { state, result: { ok: true, ranges: [], captures: {} } } }',
   } }))
   assert.equal((await registry.detect(input('a'), undefined, { sessionId: 's' })).length, 1)
 }))
