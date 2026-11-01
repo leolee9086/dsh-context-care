@@ -5,7 +5,13 @@
 - 依赖更新为 `@leolee9086/dsh-rule-engine@0.9.1`，锁文件同步。检测器回调拆成两条互斥通路：`hostCallbacks` 交真实函数、在主进程直接执行，可以用闭包；`workerCallbacks` 交源码字符串、在 Worker 的 vm 里编译，保留隔离与超时。两条通路共用同一套 `initialize` / `feed` / `finalize` / `reset` 生命周期与 JSON/schema 校验。
 - 检测器用例按语义分流：普通行为与状态保留走宿主通路；死循环、闭包缺失、全局污染、方法源码序列化与病态 schema 正则仍走 Worker（这些是被测的 Worker 属性）。`finalize` 的真实 Host 集成用例改用宿主通路，断言不变。
 - 引擎在同一份全局顺序里分段执行两条通路：独占组由当场命中的规则决定，落败的规则不执行；一次检测至少跨一个宏任务，取消、策略变更与串行锁语义与 0.8.0 一致。
-- 验证：插件 `pnpm check`、`pnpm test`（572 项）、`pnpm build` 通过；引擎 221 项门禁通过；迁移后的 13 项检测器用例在本地构建上全过。`pnpm test:integration` 与 `pnpm sync:events:check` 本轮未通过，原因与本改动无关：前者静态导入的 `test/session-log-host-cases.ts` 使用 `using` 声明，当前 Node 22.19 无法解析；后者记录安装的 DSH `0.2.0-rc.2` 与目录 `0.2.1-rc.5` 不一致，事件目录被判过期。
+- 验证：`pnpm check`、`pnpm test`（572 项）、`pnpm build` 通过；引擎 221 项门禁通过；迁移后的 13 项检测器用例全过。完整的 release 门禁见 v0.14.21。
+
+## v0.14.21
+
+- 事件目录按最新发布的 DSH `0.2.1-rc.5` 重新生成：62 个事件名与载荷形状不变，只有记录的来源版本从 `rc.4` 前进一档。
+- 补齐 release 门禁，全部实际跑过：`pnpm check`、`pnpm sync:events:check`、`pnpm test`（572 项）、`pnpm test:integration:source`（229 项，含 5 个真实 Host 套件）、`pnpm build`。
+- 记一笔入口约定：集成套件走 `pnpm test:integration:source`（需要 `DSH_TEST_CHECKOUT` 指向本地 DSH 克隆）。裸 `node --test test/integration.test.js` 加载不了 `test/session-log-host-cases.ts` 里的 `using` 声明，那不是环境问题，是走错了入口；v0.14.20 的更新记录曾把它写成环境原因，这里更正。
 
 ## v0.14.19
 
